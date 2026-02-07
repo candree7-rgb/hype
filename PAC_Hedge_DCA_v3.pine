@@ -1,0 +1,569 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+//@version=6
+strategy("PAC Hedge DCA v3 [Deep BT]", overlay=true, pyramiding=100, default_qty_type=strategy.cash, default_qty_value=0, initial_capital=2400, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.02, slippage=0, process_orders_on_close=true, calc_on_every_tick=true, margin_long=5, margin_short=5, max_bars_back=5000)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ PAC HEDGE DCA v3 - CORNIX MODEL
+// ══════════════════════════════════════════════════════════════════════════════
+// Modeled after real Cornix DCA bots (97% WR, 6-18% DD):
+//
+// PHILOSOPHY:
+//   - TP is TINY → natural market noise hits it in 2-3 hours
+//   - NO fixed SL → DCA handles drawdown
+//   - 97% of trades close at Entry 1 (no DCA needed)
+//   - DCA Level 2 needed ~15% of time
+//   - DCA Level 3 needed ~3% of time
+//   - Only catastrophic moves (crash) trigger emergency exit
+//   - Cross margin, 20x leverage
+//
+// KEY DIFFERENCE FROM v1/v2:
+//   v1/v2: tight SL kills position BEFORE DCA can recover
+//   v3: NO SL, let DCA work, wait for tiny TP, 97% WR
+//
+// SETTINGS: margin_long=5 = 20x leverage (100/5)
+//           commission=0.02% (maker via limit orders)
+// ══════════════════════════════════════════════════════════════════════════════
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- PAC Signal Sources ---
+string grp_pac = "═══ PAC Signals ═══"
+float ext_bull_fvg = input.source(close, "Bullish FVG Mitigated", group=grp_pac)
+float ext_bear_fvg = input.source(close, "Bearish FVG Mitigated", group=grp_pac)
+
+// --- Trend Filter ---
+string grp_trend = "═══ Trend Filter ═══"
+int ema_fast_len = input.int(50, "Fast EMA", minval=10, maxval=200, step=10, group=grp_trend)
+int ema_slow_len = input.int(200, "Slow EMA", minval=50, maxval=500, step=10, group=grp_trend)
+float counter_trend_mult = input.float(0.5, "Gegen-Trend Size Mult", minval=0.0, maxval=1.0, step=0.1, group=grp_trend, tooltip="0.0 = keine Gegen-Trend Trades\n0.5 = halbe Size\n1.0 = kein Filter")
+
+// --- Take Profit (KLEIN - Cornix Style) ---
+string grp_tp = "═══ Take Profit (Cornix) ═══"
+float tp_pct = input.float(0.5, "Take Profit %", minval=0.1, maxval=3.0, step=0.1, group=grp_tp, tooltip="KLEIN halten! 0.3-0.5% = natuerlicher Noise trifft es in 2-3h.\nMit 20x Leverage: 0.5% Preis = 10% Return.")
+bool use_moving_tp = input.bool(true, "Moving TP (von Avg, nicht Entry)", group=grp_tp, tooltip="TP berechnet sich vom DCA-Average.\nDCA verbessert Avg → TP rueckt naeher.")
+
+// --- DCA Levels (3 Entries wie Cornix) ---
+string grp_dca = "═══ DCA (3 Entries) ═══"
+float dca_1_pct = input.float(1.0, "Entry 2 Abstand %", minval=0.3, maxval=5.0, step=0.1, group=grp_dca, tooltip="Cornix: ~14% der Trades brauchen Entry 2")
+float dca_2_pct = input.float(2.0, "Entry 3 Abstand %", minval=0.5, maxval=10.0, step=0.1, group=grp_dca, tooltip="Cornix: ~3% der Trades brauchen Entry 3")
+float dca_3_pct = input.float(4.0, "Entry 4 (Notfall) %", minval=1.0, maxval=15.0, step=0.5, group=grp_dca, tooltip="Extra-Sicherheit: tiefste DCA Stufe")
+int max_dca = input.int(3, "Max DCA Stufen", minval=1, maxval=6, group=grp_dca)
+float dca_mult_2 = input.float(2.0, "Entry 2 Size Mult", minval=0.5, maxval=5.0, step=0.5, group=grp_dca, tooltip="Entry 2 = groesser als Entry 1 → Avg verbessert sich schneller")
+float dca_mult_3 = input.float(3.0, "Entry 3 Size Mult", minval=0.5, maxval=8.0, step=0.5, group=grp_dca, tooltip="Entry 3 = noch groesser → Avg nah am aktuellen Preis")
+
+// --- Account ---
+string grp_acc = "═══ Account ═══"
+float equity_pct = input.float(2.0, "Equity % pro Trade (Entry 1)", minval=0.5, maxval=10.0, step=0.5, group=grp_acc, tooltip="Klein halten! DCA Entries vergroessern die Position.\nTotal max Exposure = Entry1 × (1 + mult2 + mult3)")
+int max_open_trades = input.int(6, "Max gleichzeitige Trades", minval=1, maxval=12, group=grp_acc, tooltip="Cornix erlaubt 6 simultane Trades")
+int cooldown_bars = input.int(5, "Cooldown zwischen Entries (Bars)", minval=0, maxval=30, group=grp_acc)
+
+// --- Emergency Only (kein normaler SL!) ---
+string grp_emerg = "═══ Emergency Exit ═══"
+float emergency_pct = input.float(8.0, "Emergency Exit % unter letztem DCA", minval=3.0, maxval=20.0, step=1.0, group=grp_emerg, tooltip="Nur fuer Katastrophen: wenn Preis NOCH weiter faellt\nnach allen DCA Levels. Sollte fast nie triggern.")
+float max_dd_pct = input.float(20, "Max Drawdown % → Pause", minval=5, maxval=40, step=1, group=grp_emerg)
+int emergency_lockout = input.int(100, "Emergency Lockout (Bars)", minval=20, maxval=500, step=10, group=grp_emerg)
+bool use_max_bars = input.bool(true, "Max Trade Duration", group=grp_emerg)
+int max_trade_bars = input.int(200, "Max Bars bis Auto-Close", minval=50, maxval=1000, step=50, group=grp_emerg, tooltip="~50 Stunden auf 15min. Cornix avg = 3h, also 200 Bars = sehr grosszuegig.")
+
+// --- ATR / Crash ---
+string grp_atr = "═══ Crash Detection ═══"
+int atr_len = input.int(14, "ATR Laenge", group=grp_atr)
+int atr_avg_len = input.int(50, "ATR Avg Lookback", group=grp_atr)
+float vol_reduce_mult = input.float(1.5, "Hoch Vola → Size 50%", minval=1.1, maxval=3.0, step=0.1, group=grp_atr)
+float vol_stop_mult = input.float(3.0, "Crash → neue Entries STOP", minval=2.0, maxval=6.0, step=0.5, group=grp_atr)
+
+// --- Webhook ---
+string grp_wh = "═══ Webhook ═══"
+bool enable_alerts = input.bool(false, "Webhook Alerts aktivieren", group=grp_wh)
+string wh_secret = input.string("", "Webhook Secret", group=grp_wh)
+string wh_ticker = input.string("HYPEUSDT", "Ticker", group=grp_wh)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ATR
+float atr_val = ta.atr(atr_len)
+float atr_avg = ta.sma(atr_val, atr_avg_len)
+float atr_ratio = nz(atr_val / atr_avg, 1.0)
+bool vol_high = atr_ratio >= vol_reduce_mult and atr_ratio < vol_stop_mult
+bool vol_crash = atr_ratio >= vol_stop_mult
+float vol_size_mult = vol_crash ? 0.0 : vol_high ? 0.5 : 1.0
+
+// Trend
+float ema_fast = ta.ema(close, ema_fast_len)
+float ema_slow = ta.ema(close, ema_slow_len)
+int trend_state = ema_fast > ema_slow ? 1 : -1
+bool trend_bullish = trend_state == 1
+bool trend_bearish = trend_state == -1
+float long_trend_mult = trend_bullish ? 1.0 : counter_trend_mult
+float short_trend_mult = trend_bearish ? 1.0 : counter_trend_mult
+
+// PAC Signals
+bool bull_fvg_mit = ext_bull_fvg != ext_bull_fvg[1]
+bool bear_fvg_mit = ext_bear_fvg != ext_bear_fvg[1]
+
+// Debug
+var int dbg_bull_fvg = 0
+var int dbg_bear_fvg = 0
+var int dbg_tp_hit = 0
+var int dbg_emerg_hit = 0
+if bull_fvg_mit
+    dbg_bull_fvg += 1
+if bear_fvg_mit
+    dbg_bear_fvg += 1
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ POSITION TRACKING (multiple simultaneous trades)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// We track the LAST/ACTIVE position per side (simplified for Pine Script)
+// For true multi-trade, we'd need arrays - but strategy.order handles it
+
+var float long_qty = 0.0
+var float long_avg_price = 0.0
+var float long_entry_price = 0.0
+var int long_dca_count = 0
+var int long_entry_bar = 0
+
+var float short_qty = 0.0
+var float short_avg_price = 0.0
+var float short_entry_price = 0.0
+var int short_dca_count = 0
+var int short_entry_bar = 0
+
+var int last_long_entry_bar = -9999
+var int last_short_entry_bar = -9999
+var int emergency_bar = -9999
+var bool emergency_stop = false
+var float funding_total = 0.0
+var int total_wins = 0
+var int total_losses = 0
+
+bool long_active = long_qty > 0
+bool short_active = short_qty > 0
+
+// DCA size multiplier
+get_dca_mult(int level) =>
+    switch level
+        1 => dca_mult_2
+        2 => dca_mult_3
+        3 => dca_mult_3 * 1.5
+        => 1.0
+
+get_dca_pct(int level) =>
+    switch level
+        1 => dca_1_pct
+        2 => dca_2_pct
+        3 => dca_3_pct
+        => 999.0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ DRAWDOWN & EMERGENCY
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float peak_equity = strategy.initial_capital
+if strategy.equity > peak_equity
+    peak_equity := strategy.equity
+
+float dd_from_peak = peak_equity > 0 ? (1.0 - strategy.equity / peak_equity) * 100.0 : 0.0
+
+if dd_from_peak >= max_dd_pct and not emergency_stop
+    emergency_stop := true
+    emergency_bar := bar_index
+
+if emergency_stop and (bar_index - emergency_bar) >= emergency_lockout and dd_from_peak < max_dd_pct * 0.3
+    emergency_stop := false
+    peak_equity := strategy.equity
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ COMBINED GATE
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool can_trade = not emergency_stop and not vol_crash
+bool long_cooldown_ok = (bar_index - last_long_entry_bar) >= cooldown_bars
+bool short_cooldown_ok = (bar_index - last_short_entry_bar) >= cooldown_bars
+
+// Funding
+if long_active
+    funding_total += long_qty * close * 0.01 / 100 / 96
+if short_active
+    funding_total += short_qty * close * 0.01 / 100 / 96
+
+// Size
+float current_equity = strategy.equity
+float base_size_usd = current_equity * equity_pct / 100 * vol_size_mult
+
+calc_qty(float usd_size) =>
+    usd_size * 20 / close   // 20x leverage (margin=5%)
+
+// Webhook
+build_alert(string act, float qty, float price, float sl, string cmt) =>
+    '{"s":"' + wh_secret + '","t":"' + wh_ticker + '","a":"' + act + '",' +
+     '"q":' + str.tostring(qty, "#.####") + ',' +
+     '"p":' + str.tostring(price, "#.####") + ',' +
+     '"sl":' + str.tostring(nz(sl, 0), "#.####") + ',' +
+     '"c":"' + cmt + '"}'
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ TAKE PROFIT (Cornix: tiny TP from average → 97% hit rate)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// TP for LONG: close FULL position when TP hit (not partial like v1/v2)
+if long_active
+    float tp_base = use_moving_tp ? long_avg_price : long_entry_price
+    float tp_level = tp_base * (1 + tp_pct / 100)
+    if high >= tp_level
+        if long_qty > 0
+            strategy.order("L_TP", strategy.short, qty=long_qty, comment="L TP")
+            if enable_alerts
+                alert(build_alert("close_long", long_qty, close, 0, "L TP"), alert.freq_once_per_bar_close)
+        total_wins += 1
+        dbg_tp_hit += 1
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+
+// TP for SHORT
+if short_active
+    float tp_base = use_moving_tp ? short_avg_price : short_entry_price
+    float tp_level = tp_base * (1 - tp_pct / 100)
+    if low <= tp_level
+        if short_qty > 0
+            strategy.order("S_TP", strategy.long, qty=short_qty, comment="S TP")
+            if enable_alerts
+                alert(build_alert("close_short", short_qty, close, 0, "S TP"), alert.freq_once_per_bar_close)
+        total_wins += 1
+        dbg_tp_hit += 1
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ DCA (average down/up, TP gets closer)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_active and long_dca_count < max_dca and can_trade
+    float next_pct = get_dca_pct(long_dca_count + 1)
+    float dca_level = long_entry_price * (1 - next_pct / 100)
+    if low <= dca_level
+        float dca_size = base_size_usd * get_dca_mult(long_dca_count + 1)
+        float dca_qty = calc_qty(dca_size)
+        if dca_qty > 0
+            string cmt = "L E" + str.tostring(long_dca_count + 2)
+            strategy.order("L_D" + str.tostring(long_dca_count + 1), strategy.long, qty=dca_qty, comment=cmt)
+            float cost = long_avg_price * long_qty + close * dca_qty
+            long_qty := long_qty + dca_qty
+            long_avg_price := cost / long_qty
+            long_dca_count += 1
+            if enable_alerts
+                alert(build_alert("dca_long", dca_qty, long_avg_price, 0, cmt), alert.freq_once_per_bar_close)
+
+if short_active and short_dca_count < max_dca and can_trade
+    float next_pct = get_dca_pct(short_dca_count + 1)
+    float dca_level = short_entry_price * (1 + next_pct / 100)
+    if high >= dca_level
+        float dca_size = base_size_usd * get_dca_mult(short_dca_count + 1)
+        float dca_qty = calc_qty(dca_size)
+        if dca_qty > 0
+            string cmt = "S E" + str.tostring(short_dca_count + 2)
+            strategy.order("S_D" + str.tostring(short_dca_count + 1), strategy.short, qty=dca_qty, comment=cmt)
+            float cost = short_avg_price * short_qty + close * dca_qty
+            short_qty := short_qty + dca_qty
+            short_avg_price := cost / short_qty
+            short_dca_count += 1
+            if enable_alerts
+                alert(build_alert("dca_short", dca_qty, short_avg_price, 0, cmt), alert.freq_once_per_bar_close)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ ENTRIES (FVG Mitigated → open new position)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if bull_fvg_mit and can_trade and not long_active and long_cooldown_ok and long_trend_mult > 0
+    float size_usd = base_size_usd * long_trend_mult
+    float qty = calc_qty(size_usd)
+    if qty > 0
+        strategy.order("L_E", strategy.long, qty=qty, comment="L E1")
+        long_qty := qty
+        long_avg_price := close
+        long_entry_price := close
+        long_dca_count := 0
+        long_entry_bar := bar_index
+        last_long_entry_bar := bar_index
+        if enable_alerts
+            alert(build_alert("open_long", qty, close, 0, "L E1"), alert.freq_once_per_bar_close)
+
+if bear_fvg_mit and can_trade and not short_active and short_cooldown_ok and short_trend_mult > 0
+    float size_usd = base_size_usd * short_trend_mult
+    float qty = calc_qty(size_usd)
+    if qty > 0
+        strategy.order("S_E", strategy.short, qty=qty, comment="S E1")
+        short_qty := qty
+        short_avg_price := close
+        short_entry_price := close
+        short_dca_count := 0
+        short_entry_bar := bar_index
+        last_short_entry_bar := bar_index
+        if enable_alerts
+            alert(build_alert("open_short", qty, close, 0, "S E1"), alert.freq_once_per_bar_close)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ EMERGENCY EXIT (only for catastrophic moves past ALL DCA)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Emergency SL = below deepest DCA level + buffer
+if long_active
+    float deepest_dca = long_entry_price * (1 - get_dca_pct(math.min(max_dca, 3)) / 100)
+    float emerg_level = deepest_dca * (1 - emergency_pct / 100)
+    if low <= emerg_level
+        if long_qty > 0
+            strategy.order("L_EM", strategy.short, qty=long_qty, comment="L EMRG")
+            if enable_alerts
+                alert(build_alert("emerg_long", long_qty, close, 0, "L EMRG"), alert.freq_once_per_bar_close)
+        total_losses += 1
+        dbg_emerg_hit += 1
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+
+if short_active
+    float deepest_dca = short_entry_price * (1 + get_dca_pct(math.min(max_dca, 3)) / 100)
+    float emerg_level = deepest_dca * (1 + emergency_pct / 100)
+    if high >= emerg_level
+        if short_qty > 0
+            strategy.order("S_EM", strategy.long, qty=short_qty, comment="S EMRG")
+            if enable_alerts
+                alert(build_alert("emerg_short", short_qty, close, 0, "S EMRG"), alert.freq_once_per_bar_close)
+        total_losses += 1
+        dbg_emerg_hit += 1
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ MAX TRADE DURATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+if use_max_bars and long_active and (bar_index - long_entry_bar) >= max_trade_bars
+    if long_qty > 0
+        strategy.order("L_MB", strategy.short, qty=long_qty, comment="L MaxBar")
+        if enable_alerts
+            alert(build_alert("close_long", long_qty, close, 0, "L MaxBar"), alert.freq_once_per_bar_close)
+    float pnl = close - long_avg_price
+    if pnl > 0
+        total_wins += 1
+    else
+        total_losses += 1
+    long_qty := 0.0
+    long_avg_price := 0.0
+    long_entry_price := 0.0
+    long_dca_count := 0
+
+if use_max_bars and short_active and (bar_index - short_entry_bar) >= max_trade_bars
+    if short_qty > 0
+        strategy.order("S_MB", strategy.long, qty=short_qty, comment="S MaxBar")
+        if enable_alerts
+            alert(build_alert("close_short", short_qty, close, 0, "S MaxBar"), alert.freq_once_per_bar_close)
+    float pnl = short_avg_price - close
+    if pnl > 0
+        total_wins += 1
+    else
+        total_losses += 1
+    short_qty := 0.0
+    short_avg_price := 0.0
+    short_entry_price := 0.0
+    short_dca_count := 0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ GLOBAL EMERGENCY (DD limit)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if emergency_stop and (long_active or short_active)
+    if long_qty > 0
+        strategy.order("L_DD", strategy.short, qty=long_qty, comment="EM L")
+        if enable_alerts
+            alert(build_alert("emerg_long", long_qty, close, 0, "EM L"), alert.freq_once_per_bar_close)
+        total_losses += 1
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+    if short_qty > 0
+        strategy.order("S_DD", strategy.long, qty=short_qty, comment="EM S")
+        if enable_alerts
+            alert(build_alert("emerg_short", short_qty, close, 0, "EM S"), alert.freq_once_per_bar_close)
+        total_losses += 1
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+
+// Crash: close all
+if vol_crash and (long_active or short_active)
+    if long_qty > 0
+        strategy.order("L_CR", strategy.short, qty=long_qty, comment="L CRASH")
+        if enable_alerts
+            alert(build_alert("close_long", long_qty, close, 0, "L CRASH"), alert.freq_once_per_bar_close)
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+    if short_qty > 0
+        strategy.order("S_CR", strategy.long, qty=short_qty, comment="S CRASH")
+        if enable_alerts
+            alert(build_alert("close_short", short_qty, close, 0, "S CRASH"), alert.freq_once_per_bar_close)
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ HEARTBEAT ALERT
+// ══════════════════════════════════════════════════════════════════════════════
+
+if enable_alerts and barstate.isconfirmed
+    string hb = '{"s":"' + wh_secret + '","a":"hb",' +
+     '"cp":' + str.tostring(close, "#.####") + ',' +
+     '"td":' + str.tostring(trend_state) + ',' +
+     '"s1":0,"s3":0,"r1":0,"r3":0,"tr":0,' +
+     '"lq":' + str.tostring(long_qty, "#.####") + ',' +
+     '"la":' + str.tostring(long_avg_price, "#.####") + ',' +
+     '"ls":0,' +
+     '"ld":' + str.tostring(long_dca_count) + ',' +
+     '"le":0,' +
+     '"sq":' + str.tostring(short_qty, "#.####") + ',' +
+     '"sa":' + str.tostring(short_avg_price, "#.####") + ',' +
+     '"ss":0,' +
+     '"sd":' + str.tostring(short_dca_count) + ',' +
+     '"se":0}'
+    alert(hb, alert.freq_once_per_bar_close)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ VISUALISIERUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(ema_fast, "EMA Fast", color=color.new(#2196F3, 40), linewidth=1)
+plot(ema_slow, "EMA Slow", color=color.new(#FF9800, 40), linewidth=1)
+
+// Average + TP
+plot(long_active ? long_avg_price : na, "L Avg", color=color.new(#4CAF50, 30), style=plot.style_linebr, linewidth=1)
+plot(short_active ? short_avg_price : na, "S Avg", color=color.new(#F44336, 30), style=plot.style_linebr, linewidth=1)
+
+float l_tp = long_active ? (use_moving_tp ? long_avg_price : long_entry_price) * (1 + tp_pct / 100) : na
+float s_tp = short_active ? (use_moving_tp ? short_avg_price : short_entry_price) * (1 - tp_pct / 100) : na
+plot(l_tp, "L TP", color=color.new(#4CAF50, 50), style=plot.style_linebr, linewidth=2)
+plot(s_tp, "S TP", color=color.new(#F44336, 50), style=plot.style_linebr, linewidth=2)
+
+// Next DCA
+float next_dca_l = long_active and long_dca_count < max_dca ? long_entry_price * (1 - get_dca_pct(long_dca_count + 1) / 100) : na
+float next_dca_s = short_active and short_dca_count < max_dca ? short_entry_price * (1 + get_dca_pct(short_dca_count + 1) / 100) : na
+plot(next_dca_l, "Next DCA L", color=color.new(#4CAF50, 70), style=plot.style_linebr, linewidth=1)
+plot(next_dca_s, "Next DCA S", color=color.new(#F44336, 70), style=plot.style_linebr, linewidth=1)
+
+// Emergency level
+float emerg_l = long_active ? long_entry_price * (1 - get_dca_pct(math.min(max_dca, 3)) / 100) * (1 - emergency_pct / 100) : na
+float emerg_s = short_active ? short_entry_price * (1 + get_dca_pct(math.min(max_dca, 3)) / 100) * (1 + emergency_pct / 100) : na
+plot(emerg_l, "L Emergency", color=color.new(#FF0000, 70), style=plot.style_linebr, linewidth=1)
+plot(emerg_s, "S Emergency", color=color.new(#FF0000, 70), style=plot.style_linebr, linewidth=1)
+
+// Background
+bgcolor(trend_bullish ? color.new(#4CAF50, 96) : color.new(#F44336, 96))
+bgcolor(vol_crash ? color.new(#FF0000, 85) : na)
+bgcolor(emergency_stop ? color.new(#FF00FF, 90) : na)
+
+// Signals
+plotshape(bull_fvg_mit and trend_bullish, "Bull FVG", shape.triangleup, location.belowbar, color.new(#4CAF50, 0), size=size.tiny)
+plotshape(bear_fvg_mit and trend_bearish, "Bear FVG", shape.triangledown, location.abovebar, color.new(#F44336, 0), size=size.tiny)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ INFO TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table info = table.new(position.top_right, 4, 10, bgcolor=color.new(#0d1117, 5), border_color=color.new(#30305a, 0), border_width=1)
+
+if barstate.islast
+    table.cell(info, 0, 0, "PAC", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 1, 0, "CORNIX", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 2, 0, "DCA", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 3, 0, "v3", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+
+    // Trend + Vola
+    table.cell(info, 0, 1, "Trend", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 1, trend_bullish ? "BULL" : "BEAR", text_color=trend_bullish ? #4CAF50 : #F44336, text_size=size.tiny)
+    table.cell(info, 2, 1, "Vola", text_color=#aaaaaa, text_size=size.tiny)
+    string vol_txt = vol_crash ? "CRASH" : vol_high ? "HOCH" : "OK"
+    table.cell(info, 3, 1, vol_txt, text_color=vol_crash ? #FF0000 : vol_high ? #FF9800 : #4CAF50, text_size=size.tiny)
+
+    // Long
+    table.cell(info, 0, 2, "LONG", text_color=#4CAF50, text_size=size.tiny)
+    table.cell(info, 1, 2, long_active ? "E" + str.tostring(long_dca_count + 1) : "---", text_color=long_active ? #4CAF50 : #555555, text_size=size.tiny)
+    table.cell(info, 2, 2, "Avg", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 2, long_active ? str.tostring(long_avg_price, "#.##") : "---", text_color=#4CAF50, text_size=size.tiny)
+
+    // Short
+    table.cell(info, 0, 3, "SHORT", text_color=#F44336, text_size=size.tiny)
+    table.cell(info, 1, 3, short_active ? "E" + str.tostring(short_dca_count + 1) : "---", text_color=short_active ? #F44336 : #555555, text_size=size.tiny)
+    table.cell(info, 2, 3, "Avg", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 3, short_active ? str.tostring(short_avg_price, "#.##") : "---", text_color=#F44336, text_size=size.tiny)
+
+    // TP levels
+    table.cell(info, 0, 4, "L TP", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 4, long_active ? str.tostring((use_moving_tp ? long_avg_price : long_entry_price) * (1 + tp_pct / 100), "#.##") : "---", text_color=#4CAF50, text_size=size.tiny)
+    table.cell(info, 2, 4, "S TP", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 4, short_active ? str.tostring((use_moving_tp ? short_avg_price : short_entry_price) * (1 - tp_pct / 100), "#.##") : "---", text_color=#F44336, text_size=size.tiny)
+
+    // Win Rate
+    int total_trades = total_wins + total_losses
+    float win_rate = total_trades > 0 ? total_wins * 100.0 / total_trades : 0.0
+    table.cell(info, 0, 5, "WR", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 5, str.tostring(win_rate, "#.#") + "%", text_color=win_rate > 90 ? #4CAF50 : win_rate > 70 ? #FF9800 : #F44336, text_size=size.tiny)
+    table.cell(info, 2, 5, "W/L", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 5, str.tostring(total_wins) + "/" + str.tostring(total_losses), text_color=#aaaaaa, text_size=size.tiny)
+
+    // Status
+    string st = vol_crash ? "CRASH" : emergency_stop ? "EMERG" : "ACTIVE"
+    color stc = vol_crash or emergency_stop ? #FF0000 : #4CAF50
+    table.cell(info, 0, 6, "Status", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 6, st, text_color=stc, text_size=size.tiny)
+    table.cell(info, 2, 6, "DD", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 6, str.tostring(dd_from_peak, "#.1") + "%", text_color=dd_from_peak > 10 ? #F44336 : #4CAF50, text_size=size.tiny)
+
+    // TP + Emergency hits
+    table.cell(info, 0, 7, "TP hit", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 7, str.tostring(dbg_tp_hit), text_color=#4CAF50, text_size=size.tiny)
+    table.cell(info, 2, 7, "Emrg", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 7, str.tostring(dbg_emerg_hit), text_color=#F44336, text_size=size.tiny)
+
+    // Fund
+    table.cell(info, 0, 8, "Fund", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 8, "-$" + str.tostring(funding_total, "#.0"), text_color=#FF9800, text_size=size.tiny)
+    table.cell(info, 2, 8, "ATR", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 8, str.tostring(atr_ratio, "#.##") + "x", text_color=vol_crash ? #FF0000 : #aaaaaa, text_size=size.tiny)
+
+    // Debug
+    table.cell(info, 0, 9, "DBG", text_color=#FF9800, text_size=size.tiny)
+    table.cell(info, 1, 9, "FVG B:" + str.tostring(dbg_bull_fvg) + " S:" + str.tostring(dbg_bear_fvg), text_color=#FF9800, text_size=size.tiny)
+    table.cell(info, 2, 9, "Lev", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 9, "20x", text_color=#FF9800, text_size=size.tiny)
