@@ -9,23 +9,33 @@ strategy("Cornix Clone v6 [HYPE]", overlay=true, pyramiding=100, default_qty_typ
 //
 // Reverse-engineered aus VERLUST-Trades (grösste Losses):
 //
-// XMR Loss: E1=285.69, E2=277.37 → Avg=281.53 → Stop=275.86 = Avg-2.0%
-// HYPE Loss: E1=31.954, E2=29.881 → Avg=30.918 → Stop=30.467 = Avg-1.5%
+// LOSS TRADES (Stop = Avg - 1.5%):
+//   XMR: E1=285.69, E2=277.37 → Avg=281.53, Stop=275.86 = Avg-2.0%
+//   HYPE: E1=31.954, E2=29.881 → Avg=30.918, Stop=30.467 = Avg-1.5%
+//
+// WIN TRADES MIT DEEP DCA (Stop ÜBER Avg!):
+//   HYPE: E1-E5 gefüllt, Avg=29.16, Stop=29.311 = Avg+0.52% (PROFIT!)
+//   XMR: E1-E5 gefüllt, Avg=346.14, Stop=348.97 = Avg+0.82% (PROFIT!)
+//
+// DCA SIZING = EXPONENTIELL (2er-Potenzen!):
+//   E1=1x, E2=2x, E3=4x, E4=8x, E5=16x, E6=32x
+//   Verifiziert: HYPE 8.59, 17.19, 34.38, 68.78, 137.6 = exakt 1:2:4:8:16
+//   XMR identisch: 8.67, 17.35, 34.81, 69.95, 139.9 = exakt 1:2:4:8:16
 //
 // MECHANISMUS:
 //   1. LONG ONLY (kein Short)
 //   2. Immer in einem Trade (sofort wieder rein nach TP)
-//   3. TP = Avg + 0.8% (winzig, Noise trifft es)
-//   4. 6 DCA Levels bei tiefem Drop (HYPE Spacing)
+//   3. TP = Avg + 0.8%
+//   4. DCA: 6 Levels, exponentiell (1x→32x)
 //   5. Stop = Avg - 1.5% (NACH DCA-Check!)
-//   6. DCA füllt VOR Stop-Prüfung (wie echte Exchange)
-//   7. Nach DCA: Stop recalculated, tiefere DCA cancelled
+//   6. DCA füllt VOR Stop (wie Exchange: Limit füllt vor Trail)
+//   7. Nach DCA: Avg sinkt massiv wegen exponentieller Sizing
+//   8. Kleiner Bounce → Stop über Avg → Profit!
 //
-// WARUM ES FUNKTIONIERT:
-//   - Uptrend: Dips bouncen immer → TP hit (97%)
-//   - DCA: Tiefere Dips werden aufgefangen, Avg sinkt, TP rückt näher
-//   - Stop -1.5%: Wenn kein Bounce → kleiner, kontrollierter Verlust
-//   - Grösster Cornix-Loss = -$4.55 (XMR) / -$1.80 (HYPE)
+// WARUM EXPONENTIELL DER SCHLÜSSEL IST:
+//   Mit altem Sizing (1,1,1.5,2,2.5,3): Avg sinkt langsam
+//   Mit Cornix Sizing (1,2,4,8,16,32): E5 dominiert, Avg ≈ E5-Preis
+//   → Winziger Bounce reicht für TP oder Profit-Stop
 // ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -59,15 +69,15 @@ int max_dca = input.int(5, "Max DCA Stufen", minval=0, maxval=5, group=grp_dca)
 // --- DCA Sizing ---
 string grp_sz = "═══ DCA Sizing ═══"
 float sz_1 = input.float(1.0, "E1 Size", group=grp_sz)
-float sz_2 = input.float(1.0, "E2 Size Mult", group=grp_sz)
-float sz_3 = input.float(1.5, "E3 Size Mult", group=grp_sz)
-float sz_4 = input.float(2.0, "E4 Size Mult", group=grp_sz)
-float sz_5 = input.float(2.5, "E5 Size Mult", group=grp_sz)
-float sz_6 = input.float(3.0, "E6 Size Mult", group=grp_sz)
+float sz_2 = input.float(2.0, "E2 Size Mult", group=grp_sz, tooltip="Cornix: EXAKT 2x E1 (verifiziert aus Screenshots)")
+float sz_3 = input.float(4.0, "E3 Size Mult", group=grp_sz, tooltip="Cornix: EXAKT 4x E1")
+float sz_4 = input.float(8.0, "E4 Size Mult", group=grp_sz, tooltip="Cornix: EXAKT 8x E1")
+float sz_5 = input.float(16.0, "E5 Size Mult", group=grp_sz, tooltip="Cornix: EXAKT 16x E1")
+float sz_6 = input.float(32.0, "E6 Size Mult", group=grp_sz, tooltip="Cornix: EXAKT 32x E1 (extrapoliert)")
 
 // --- Account ---
 string grp_acc = "═══ Account ═══"
-float equity_pct = input.float(1.0, "Equity % pro E1", minval=0.1, maxval=5.0, step=0.1, group=grp_acc)
+float equity_pct = input.float(0.5, "Equity % pro E1", minval=0.1, maxval=5.0, step=0.1, group=grp_acc, tooltip="KLEIN! Exponentielles DCA:\nE1-E6 = 1+2+4+8+16+32 = 63x\n0.5% × 63 × 20x = 630% max Notional\nSelten: E5+ passiert fast nie")
 int cooldown = input.int(1, "Cooldown Bars nach TP/SL", minval=0, maxval=10, group=grp_acc, tooltip="Wie schnell nach Schliessung wieder rein.\n1 = nächster Bar (quasi sofort)")
 
 
@@ -147,9 +157,8 @@ dca_this_bar := false
 if l_active and long_dca < max_dca
     float pct = get_dca_pct(long_dca + 1)
     float lvl = long_entry * (1 - pct / 100)
-    // DCA nur wenn Level ÜBER dem aktuellen Stop liegt
-    float current_stop = long_avg * (1 - sl_pct / 100)
-    if low <= lvl and lvl > current_stop
+    // DCA füllt DURCH den Stop hindurch (wie Cornix: Limit Order füllt vor Trail)
+    if low <= lvl
         float usd = base_usd * get_dca_sz(long_dca + 1)
         float qty = calc_qty(usd)
         if qty > 0
@@ -207,13 +216,12 @@ plot(l_active ? long_avg : na, "Avg", color=color.new(#4CAF50, 20), style=plot.s
 plot(l_active ? long_avg * (1 + tp_pct / 100) : na, "TP", color=color.new(#00E676, 30), style=plot.style_linebr, linewidth=2)
 plot(l_active ? long_avg * (1 - sl_pct / 100) : na, "SL", color=color.new(#F44336, 30), style=plot.style_linebr, linewidth=2)
 
-// DCA levels (nur wenn über Stop)
-float cur_sl = l_active ? long_avg * (1 - sl_pct / 100) : na
-plot(l_active and long_dca < 1 and long_entry * (1 - dca_1/100) > nz(cur_sl) ? long_entry * (1 - dca_1/100) : na, "E2", color=color.new(#4CAF50, 70), style=plot.style_linebr)
-plot(l_active and long_dca < 2 and long_entry * (1 - dca_2/100) > nz(cur_sl) ? long_entry * (1 - dca_2/100) : na, "E3", color=color.new(#4CAF50, 75), style=plot.style_linebr)
-plot(l_active and long_dca < 3 and long_entry * (1 - dca_3/100) > nz(cur_sl) ? long_entry * (1 - dca_3/100) : na, "E4", color=color.new(#4CAF50, 80), style=plot.style_linebr)
-plot(l_active and long_dca < 4 and long_entry * (1 - dca_4/100) > nz(cur_sl) ? long_entry * (1 - dca_4/100) : na, "E5", color=color.new(#FF9800, 80), style=plot.style_linebr)
-plot(l_active and long_dca < 5 and long_entry * (1 - dca_5/100) > nz(cur_sl) ? long_entry * (1 - dca_5/100) : na, "E6", color=color.new(#F44336, 80), style=plot.style_linebr)
+// DCA levels (immer zeigen - DCA füllt durch Stop hindurch)
+plot(l_active and long_dca < 1 ? long_entry * (1 - dca_1/100) : na, "E2", color=color.new(#4CAF50, 70), style=plot.style_linebr)
+plot(l_active and long_dca < 2 ? long_entry * (1 - dca_2/100) : na, "E3", color=color.new(#4CAF50, 75), style=plot.style_linebr)
+plot(l_active and long_dca < 3 ? long_entry * (1 - dca_3/100) : na, "E4", color=color.new(#4CAF50, 80), style=plot.style_linebr)
+plot(l_active and long_dca < 4 ? long_entry * (1 - dca_4/100) : na, "E5", color=color.new(#FF9800, 80), style=plot.style_linebr)
+plot(l_active and long_dca < 5 ? long_entry * (1 - dca_5/100) : na, "E6", color=color.new(#F44336, 80), style=plot.style_linebr)
 
 bgcolor(use_trend_filter and not uptrend ? color.new(#F44336, 93) : na)
 
