@@ -238,23 +238,6 @@ build_alert(string act, float qty, float price, float sl, string cmt) =>
      '"sl":' + str.tostring(nz(sl, 0), "#.####") + ',' +
      '"c":"' + cmt + '"}'
 
-// Reset helper
-reset_long() =>
-    long_qty := 0.0
-    long_avg_price := 0.0
-    long_entry_price := 0.0
-    long_dca_count := 0
-    long_total_cost := 0.0
-    long_last_dca_bar := 0
-
-reset_short() =>
-    short_qty := 0.0
-    short_avg_price := 0.0
-    short_entry_price := 0.0
-    short_dca_count := 0
-    short_total_cost := 0.0
-    short_last_dca_bar := 0
-
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ▌ TAKE PROFIT (Cornix: tiny TP from average → 97% hit rate)
@@ -270,7 +253,12 @@ if long_active
                 alert(build_alert("close_long", long_qty, close, 0, "L TP"), alert.freq_once_per_bar_close)
         total_wins += 1
         dbg_tp_hit += 1
-        reset_long()
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+        long_total_cost := 0.0
+        long_last_dca_bar := 0
 
 if short_active
     float tp_base = use_moving_tp ? short_avg_price : short_entry_price
@@ -282,7 +270,12 @@ if short_active
                 alert(build_alert("close_short", short_qty, close, 0, "S TP"), alert.freq_once_per_bar_close)
         total_wins += 1
         dbg_tp_hit += 1
-        reset_short()
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+        short_total_cost := 0.0
+        short_last_dca_bar := 0
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -304,7 +297,12 @@ if use_be_trailing and long_active and long_dca_count > 0
                     alert(build_alert("close_long", long_qty, close, 0, "L BE"), alert.freq_once_per_bar_close)
             total_be += 1
             dbg_be_hit += 1
-            reset_long()
+            long_qty := 0.0
+            long_avg_price := 0.0
+            long_entry_price := 0.0
+            long_dca_count := 0
+            long_total_cost := 0.0
+            long_last_dca_bar := 0
 
 if use_be_trailing and short_active and short_dca_count > 0
     int bars_since_dca = bar_index - short_last_dca_bar
@@ -317,7 +315,12 @@ if use_be_trailing and short_active and short_dca_count > 0
                     alert(build_alert("close_short", short_qty, close, 0, "S BE"), alert.freq_once_per_bar_close)
             total_be += 1
             dbg_be_hit += 1
-            reset_short()
+            short_qty := 0.0
+            short_avg_price := 0.0
+            short_entry_price := 0.0
+            short_dca_count := 0
+            short_total_cost := 0.0
+            short_last_dca_bar := 0
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -336,7 +339,12 @@ if long_active
                 alert(build_alert("close_long", long_qty, close, 0, "L CUT"), alert.freq_once_per_bar_close)
         total_losses += 1
         dbg_cut_hit += 1
-        reset_long()
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+        long_total_cost := 0.0
+        long_last_dca_bar := 0
 
 if short_active
     float short_pnl = (short_avg_price - close) * short_qty
@@ -348,7 +356,12 @@ if short_active
                 alert(build_alert("close_short", short_qty, close, 0, "S CUT"), alert.freq_once_per_bar_close)
         total_losses += 1
         dbg_cut_hit += 1
-        reset_short()
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+        short_total_cost := 0.0
+        short_last_dca_bar := 0
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -439,13 +452,23 @@ if eq_stopped and (long_active or short_active)
         if enable_alerts
             alert(build_alert("close_long", long_qty, close, 0, "EQ STOP"), alert.freq_once_per_bar_close)
         total_losses += 1
-        reset_long()
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+        long_total_cost := 0.0
+        long_last_dca_bar := 0
     if short_qty > 0
         strategy.order("S_EQ", strategy.long, qty=short_qty, comment="EQ S")
         if enable_alerts
             alert(build_alert("close_short", short_qty, close, 0, "EQ STOP"), alert.freq_once_per_bar_close)
         total_losses += 1
-        reset_short()
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+        short_total_cost := 0.0
+        short_last_dca_bar := 0
 
 // Crash: close all
 if vol_crash and (long_active or short_active)
@@ -454,13 +477,23 @@ if vol_crash and (long_active or short_active)
         if enable_alerts
             alert(build_alert("close_long", long_qty, close, 0, "L CRASH"), alert.freq_once_per_bar_close)
         total_losses += 1
-        reset_long()
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+        long_total_cost := 0.0
+        long_last_dca_bar := 0
     if short_qty > 0
         strategy.order("S_CR", strategy.long, qty=short_qty, comment="S CRASH")
         if enable_alerts
             alert(build_alert("close_short", short_qty, close, 0, "S CRASH"), alert.freq_once_per_bar_close)
         total_losses += 1
-        reset_short()
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+        short_total_cost := 0.0
+        short_last_dca_bar := 0
 
 
 // ══════════════════════════════════════════════════════════════════════════════
