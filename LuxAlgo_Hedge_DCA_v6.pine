@@ -1,0 +1,955 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+//@version=6
+strategy("LuxAlgo Hedge DCA v6 [Deep BT]", overlay=true, pyramiding=20, default_qty_type=strategy.cash, default_qty_value=0, initial_capital=2400, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.035, slippage=0, process_orders_on_close=true, calc_on_every_tick=true, margin_long=10, margin_short=10, max_bars_back=5000)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ HEDGE via strategy.order()
+// ══════════════════════════════════════════════════════════════════════════════
+// strategy.order() erlaubt Long + Short gleichzeitig.
+// Positionen werden intern manuell getrackt.
+//
+// v6 CHANGELOG vs v4:
+//   REALISMUS:
+//   - commission=0.035% (realistischer Maker/Taker-Mix statt 0.02%)
+//   - process_orders_on_close=true BLEIBT (korrekt fuer pre-placed Limits)
+//   - initial_capital=2400 (dein aktueller Wert)
+//   DEFENSE (optional, default AUS fuer A/B Vergleich mit v4):
+//   + Schicht 1: EMA Trend Filter
+//   + Schicht 2: Trailing Drawdown vom Peak
+//   + Schicht 3: Side Circuit Breaker
+//   IMPROVEMENTS:
+//   + Max Bars in Trade (schliesst stuck Positions)
+//   + Dynamic SL Option (ATR-basiert statt fix %)
+//   + Consecutive Loss Size Reduction
+//
+// LUXALGO PLOT MAPPING:
+// Reversal Zones: R1 (inner rot), R3 (outer rot), S1 (inner gruen), S3 (outer gruen)
+// Signals: Bullish/Bearish Confirmation (normal) und Confirmation+ (stark)
+// Smart Trail: einzelne Linie
+// Exit: Exit Signal (X)
+// ══════════════════════════════════════════════════════════════════════════════
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+string mode = input.string("LuxAlgo External", "Modus", options=["Built-in", "LuxAlgo External"])
+
+// --- Reversal Zones (R1/R3 = Rot, S1/S3 = Gruen) ---
+string grp_zones = "═══ Reversal Zones ═══"
+float ext_r1 = input.source(high, "R1 (Inner Rot - Short Entry)", group=grp_zones, tooltip="Innerstes rotes Band - Short Entry Zone")
+float ext_r3 = input.source(high, "R3 (Outer Rot - Short DCA)", group=grp_zones, tooltip="Aeusserstes rotes Band - Short DCA Trigger")
+float ext_s1 = input.source(low, "S1 (Inner Gruen - Long Entry)", group=grp_zones, tooltip="Innerstes gruenes Band - Long Entry Zone")
+float ext_s3 = input.source(low, "S3 (Outer Gruen - Long DCA)", group=grp_zones, tooltip="Aeusserstes gruenes Band - Long DCA Trigger")
+
+// --- Smart Trail ---
+string grp_trail = "═══ Smart Trail ═══"
+float ext_smart_trail = input.source(close, "Smart Trail Linie", group=grp_trail)
+
+// --- Confirmation Signals ---
+string grp_sig = "═══ Confirmation Signals ═══"
+float ext_bull_conf      = input.source(close, "Bullish Confirmation", group=grp_sig, tooltip="LuxAlgo Bullish Confirmation Signal Plot")
+float ext_bull_conf_plus = input.source(close, "Bullish Confirmation+", group=grp_sig, tooltip="LuxAlgo Bullish Confirmation+ (staerker)")
+float ext_bear_conf      = input.source(close, "Bearish Confirmation", group=grp_sig, tooltip="LuxAlgo Bearish Confirmation Signal Plot")
+float ext_bear_conf_plus = input.source(close, "Bearish Confirmation+", group=grp_sig, tooltip="LuxAlgo Bearish Confirmation+ (staerker)")
+float ext_any_bull       = input.source(close, "Any Bullish Confirmation", group=grp_sig, tooltip="Alle Bullish Signals kombiniert")
+float ext_any_bear       = input.source(close, "Any Bearish Confirmation", group=grp_sig, tooltip="Alle Bearish Signals kombiniert")
+float ext_exit_signal    = input.source(close, "Exit Signal (X)", group=grp_sig, tooltip="LuxAlgo Exit Signal Plot")
+
+// --- Signal Filter ---
+string grp_filter = "═══ Signal Filter ═══"
+string signal_mode = input.string("Nur Confirmation+", "Welche Signals fuer Entry?", options=["Nur Confirmation+", "Confirmation + Confirmation+", "Any Confirmation", "Ohne Signal Filter"], group=grp_filter, tooltip="Nur Conf+ = konservativ (nur starke Signale)\nConf + Conf+ = balanced\nAny = alle\nOhne = nur Zones + Trail")
+string dca_signal_mode = input.string("Nur Confirmation+", "Welche Signals fuer DCA?", options=["Nur Confirmation+", "Confirmation + Confirmation+", "Any Confirmation", "Ohne Signal Filter"], group=grp_filter)
+bool signal_scale_size = input.bool(true, "Conf+ = volle Size / Conf = halbe Size", group=grp_filter, tooltip="Wenn aktiv: Confirmation = 50% Size, Confirmation+ = 100%")
+
+// --- Exit Signals ---
+string grp_exit = "═══ Exit Regeln ═══"
+bool use_exit_signals   = input.bool(true, "Exit X als Teilverkauf", group=grp_exit)
+float exit_partial_pct  = input.float(40, "Teilverkauf pct Exit X", minval=10, maxval=80, step=5, group=grp_exit)
+float trail_partial_pct = input.float(30, "Teilverkauf pct Trail", minval=10, maxval=80, step=5, group=grp_exit)
+bool exit_x_moves_sl    = input.bool(true, "Exit X SL auf BE", group=grp_exit)
+bool trail_tightens_sl  = input.bool(true, "Trail SL auf Trail", group=grp_exit)
+
+// --- Account ---
+string grp_acc = "═══ Account ═══"
+float equity_pct = input.float(5.0, "Equity pct pro Trade", minval=1.0, maxval=20.0, step=0.5, group=grp_acc)
+int max_slots    = input.int(6, "Max Slots", minval=2, maxval=12, group=grp_acc)
+
+// --- Orders ---
+string grp_ord = "═══ Orders ═══"
+string entry_type = input.string("Limit", "Entry Typ", options=["Limit", "Market"], group=grp_ord)
+string exit_type  = input.string("Limit", "Exit Typ", options=["Limit", "Market"], group=grp_ord)
+
+// --- Fees ---
+string grp_fee = "═══ Fees ═══"
+float funding_rate_avg = input.float(0.01, "Avg Funding pct 8h", minval=-0.1, maxval=0.3, step=0.005, group=grp_fee)
+
+// --- Strategie ---
+string grp_strat = "═══ Strategie ═══"
+int max_dca_steps    = input.int(3, "Max DCA Stufen", minval=1, maxval=5, group=grp_strat)
+float dca_size_decay = input.float(0.7, "DCA Size Decay", minval=0.3, maxval=1.0, step=0.05, group=grp_strat)
+bool use_hedge_flip  = input.bool(true, "Hedge Flip", group=grp_strat)
+
+// --- ATR ---
+string grp_atr = "═══ ATR Filter ═══"
+int atr_length         = input.int(14, "ATR Laenge", minval=5, maxval=50, group=grp_atr)
+int atr_avg_length     = input.int(50, "ATR Avg Lookback", minval=20, maxval=200, group=grp_atr)
+float atr_high_mult    = input.float(1.5, "Hoch Vola Schwelle", minval=1.1, maxval=3.0, step=0.1, group=grp_atr)
+float atr_extreme_mult = input.float(2.5, "Extrem Vola Schwelle", minval=1.5, maxval=5.0, step=0.1, group=grp_atr)
+
+// --- Risk ---
+string grp_risk = "═══ Risiko ═══"
+float max_loss_pct     = input.float(3.0, "Max Loss pct (fix)", minval=1.0, maxval=10.0, step=0.5, group=grp_risk)
+float max_drawdown_pct = input.float(15, "Max Drawdown pct", minval=5, maxval=30, step=1, group=grp_risk)
+int cooldown_bars      = input.int(3, "Cooldown Bars", minval=0, maxval=20, group=grp_risk)
+
+// --- Built-in ---
+string grp_bi = "═══ Built-in Fallback ═══"
+int bi_rev_len      = input.int(20, "Rev Zone Lookback", minval=5, maxval=100, group=grp_bi)
+float bi_rev_mult   = input.float(2.0, "Rev Zone ATR Mult", minval=0.5, maxval=5.0, step=0.1, group=grp_bi)
+int bi_trail_len    = input.int(14, "Trail Laenge", minval=5, maxval=50, group=grp_bi)
+float bi_trail_mult = input.float(1.5, "Trail ATR Mult", minval=0.5, maxval=4.0, step=0.1, group=grp_bi)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ S1: EMA TREND FILTER (default AUS)
+// ══════════════════════════════════════════════════════════════════════════════
+
+string grp_s1 = "═══ S1: Trend Filter ═══"
+bool use_trend_filter     = input.bool(false, "Trend Filter aktivieren", group=grp_s1, tooltip="Blockt Entries gegen den uebergeordneten Trend.\nDefault AUS fuer v4-Vergleich. AN empfohlen fuer Live.")
+int trend_ema_len         = input.int(200, "Trend EMA Laenge", minval=50, maxval=500, step=10, group=grp_s1)
+float trend_atr_distance  = input.float(1.5, "Trend ATR Abstand", minval=0.5, maxval=5.0, step=0.25, group=grp_s1, tooltip="Wie weit Preis vom EMA sein muss (in ATR)\num klaren Trend zu erkennen")
+bool trend_also_dca       = input.bool(true, "Trend Filter auch fuer DCA", group=grp_s1)
+bool trend_also_flip      = input.bool(true, "Trend Filter auch fuer Flip", group=grp_s1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ S2: TRAILING DRAWDOWN (default AUS)
+// ══════════════════════════════════════════════════════════════════════════════
+
+string grp_s2 = "═══ S2: Trailing Drawdown ═══"
+bool use_trailing_dd       = input.bool(false, "Trailing DD aktivieren", group=grp_s2, tooltip="Stoppt Trading wenn Equity X% vom Peak faellt.\nDefault AUS fuer v4-Vergleich.")
+float trailing_dd_pct      = input.float(12.0, "Trailing DD pct vom Peak", minval=3, maxval=30, step=1, group=grp_s2)
+float trailing_dd_recovery = input.float(50.0, "Recovery pct zum Weitermachen", minval=20, maxval=80, step=5, group=grp_s2)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ S3: CIRCUIT BREAKER (default AUS)
+// ══════════════════════════════════════════════════════════════════════════════
+
+string grp_s3 = "═══ S3: Circuit Breaker ═══"
+bool use_circuit_breaker   = input.bool(false, "Circuit Breaker aktivieren", group=grp_s3, tooltip="Pausiert eine Seite nach X Verlusten am Stueck.\nDefault AUS fuer v4-Vergleich.")
+int cb_max_losses          = input.int(5, "Max konsekutive Verluste", minval=2, maxval=15, step=1, group=grp_s3)
+int cb_cooldown_bars       = input.int(100, "Pause Bars nach Trigger", minval=20, maxval=500, step=10, group=grp_s3)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ IMPROVEMENTS (default AUS)
+// ══════════════════════════════════════════════════════════════════════════════
+
+string grp_imp = "═══ Improvements ═══"
+bool use_dynamic_sl      = input.bool(false, "Dynamic SL (ATR-basiert)", group=grp_imp, tooltip="SL = 1.5x ATR statt fixer %.\nPasst sich Volatilitaet an: enger bei ruhigem Markt, weiter bei volatilem.")
+float dynamic_sl_mult    = input.float(1.5, "Dynamic SL ATR Mult", minval=0.5, maxval=4.0, step=0.25, group=grp_imp)
+bool use_max_bars        = input.bool(false, "Max Bars in Trade", group=grp_imp, tooltip="Schliesst Position nach X Bars wenn kein Exit kam.\nVerhindert stuck Positions.")
+int max_trade_bars       = input.int(500, "Max Bars bis Auto-Close", minval=50, maxval=2000, step=50, group=grp_imp)
+bool use_loss_scaling    = input.bool(false, "Loss Streak Size Reduction", group=grp_imp, tooltip="Nach Verlusten wird Size reduziert.\n3 Verluste = 75%, 5+ = 50%")
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ BERECHNUNGEN
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ATR
+float atr_val       = ta.atr(atr_length)
+float atr_avg       = ta.sma(atr_val, atr_avg_length)
+float atr_ratio     = nz(atr_val / atr_avg, 1.0)
+bool vol_normal     = atr_ratio < atr_high_mult
+bool vol_high       = atr_ratio >= atr_high_mult and atr_ratio < atr_extreme_mult
+bool vol_extreme    = atr_ratio >= atr_extreme_mult
+float vol_size_mult = vol_extreme ? 0.25 : vol_high ? 0.5 : 1.0
+
+// Built-in Zones
+float bi_highest     = ta.highest(high, bi_rev_len)
+float bi_lowest      = ta.lowest(low, bi_rev_len)
+float bi_atr         = ta.atr(bi_rev_len)
+float bi_upper_outer = bi_highest + bi_atr * bi_rev_mult * 0.5
+float bi_upper_inner = bi_highest
+float bi_lower_inner = bi_lowest
+float bi_lower_outer = bi_lowest - bi_atr * bi_rev_mult * 0.5
+
+// Built-in Trail
+float bi_trail_atr = ta.atr(bi_trail_len)
+var float bi_trail = na
+var int bi_trail_dir = 0
+if bar_index == 0
+    bi_trail     := close
+    bi_trail_dir := 0
+else
+    if close > nz(bi_trail[1])
+        bi_trail     := math.max(nz(bi_trail[1]), low - bi_trail_atr * bi_trail_mult)
+        bi_trail_dir := 1
+    else
+        bi_trail     := math.min(nz(bi_trail[1]), high + bi_trail_atr * bi_trail_mult)
+        bi_trail_dir := -1
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ TREND FILTER BERECHNUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+float trend_ema       = ta.ema(close, trend_ema_len)
+float ema_distance    = close - trend_ema
+float ema_dist_in_atr = nz(ema_distance / atr_val, 0.0)
+
+int trend_state = 0
+if use_trend_filter
+    if ema_dist_in_atr > trend_atr_distance
+        trend_state := 1   // bullish → block shorts
+    else if ema_dist_in_atr < -trend_atr_distance
+        trend_state := -1  // bearish → block longs
+
+bool trend_block_long  = use_trend_filter and trend_state == -1
+bool trend_block_short = use_trend_filter and trend_state == 1
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SIGNAL SOURCES
+// ══════════════════════════════════════════════════════════════════════════════
+
+float zone_short_entry = mode == "Built-in" ? bi_upper_inner : ext_r1
+float zone_short_dca   = mode == "Built-in" ? bi_upper_outer : ext_r3
+float zone_long_entry  = mode == "Built-in" ? bi_lower_inner : ext_s1
+float zone_long_dca    = mode == "Built-in" ? bi_lower_outer : ext_s3
+
+float smart_trail = mode == "Built-in" ? bi_trail : ext_smart_trail
+int trail_dir     = mode == "Built-in" ? bi_trail_dir : (close > ext_smart_trail ? 1 : -1)
+bool trail_bull_cross = trail_dir == 1 and trail_dir[1] == -1
+bool trail_bear_cross = trail_dir == -1 and trail_dir[1] == 1
+
+bool use_signals = mode == "LuxAlgo External"
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SIGNAL DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool raw_bull_conf      = use_signals and ext_bull_conf != ext_bull_conf[1]
+bool raw_bull_conf_plus = use_signals and ext_bull_conf_plus != ext_bull_conf_plus[1]
+bool raw_bear_conf      = use_signals and ext_bear_conf != ext_bear_conf[1]
+bool raw_bear_conf_plus = use_signals and ext_bear_conf_plus != ext_bear_conf_plus[1]
+bool raw_any_bull       = use_signals and ext_any_bull != ext_any_bull[1]
+bool raw_any_bear       = use_signals and ext_any_bear != ext_any_bear[1]
+bool raw_exit           = use_signals and ext_exit_signal != ext_exit_signal[1]
+
+bool fresh_bull_conf      = raw_bull_conf or raw_bull_conf[1] or raw_bull_conf[2] or raw_bull_conf[3] or raw_bull_conf[4] or raw_bull_conf[5] or raw_bull_conf[6] or raw_bull_conf[7] or raw_bull_conf[8] or raw_bull_conf[9]
+bool fresh_bull_conf_plus = raw_bull_conf_plus or raw_bull_conf_plus[1] or raw_bull_conf_plus[2] or raw_bull_conf_plus[3] or raw_bull_conf_plus[4] or raw_bull_conf_plus[5] or raw_bull_conf_plus[6] or raw_bull_conf_plus[7] or raw_bull_conf_plus[8] or raw_bull_conf_plus[9]
+bool fresh_any_bull       = raw_any_bull or raw_any_bull[1] or raw_any_bull[2] or raw_any_bull[3] or raw_any_bull[4] or raw_any_bull[5] or raw_any_bull[6] or raw_any_bull[7] or raw_any_bull[8] or raw_any_bull[9]
+bool fresh_bear_conf      = raw_bear_conf or raw_bear_conf[1] or raw_bear_conf[2] or raw_bear_conf[3] or raw_bear_conf[4] or raw_bear_conf[5] or raw_bear_conf[6] or raw_bear_conf[7] or raw_bear_conf[8] or raw_bear_conf[9]
+bool fresh_bear_conf_plus = raw_bear_conf_plus or raw_bear_conf_plus[1] or raw_bear_conf_plus[2] or raw_bear_conf_plus[3] or raw_bear_conf_plus[4] or raw_bear_conf_plus[5] or raw_bear_conf_plus[6] or raw_bear_conf_plus[7] or raw_bear_conf_plus[8] or raw_bear_conf_plus[9]
+bool fresh_any_bear       = raw_any_bear or raw_any_bear[1] or raw_any_bear[2] or raw_any_bear[3] or raw_any_bear[4] or raw_any_bear[5] or raw_any_bear[6] or raw_any_bear[7] or raw_any_bear[8] or raw_any_bear[9]
+bool fresh_exit           = raw_exit
+
+var int dbg_bull_conf_count = 0
+var int dbg_bull_plus_count = 0
+var int dbg_bear_conf_count = 0
+var int dbg_bear_plus_count = 0
+var int dbg_exit_count = 0
+if raw_bull_conf
+    dbg_bull_conf_count += 1
+if raw_bull_conf_plus
+    dbg_bull_plus_count += 1
+if raw_bear_conf
+    dbg_bear_conf_count += 1
+if raw_bear_conf_plus
+    dbg_bear_plus_count += 1
+if raw_exit
+    dbg_exit_count += 1
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ ZONE DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool in_upper_zone = high >= zone_short_entry
+bool in_lower_zone = low <= zone_long_entry
+bool beyond_upper  = high > zone_short_dca
+bool beyond_lower  = low < zone_long_dca
+
+var bool was_in_upper = false
+var bool was_in_lower = false
+bool upper_zone_touch = in_upper_zone and not was_in_upper
+bool lower_zone_touch = in_lower_zone and not was_in_lower
+was_in_upper := in_upper_zone
+was_in_lower := in_lower_zone
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SEQUENTIAL ENTRY STATE MACHINE
+// ══════════════════════════════════════════════════════════════════════════════
+
+int state_timeout = 20
+
+// --- Long State Machine ---
+var int long_signal_bar    = -9999
+var int long_signal_type   = 0
+var int long_zone_bar      = -9999
+
+if raw_bull_conf_plus
+    long_signal_bar  := bar_index
+    long_signal_type := 2
+else if raw_bull_conf
+    long_signal_bar  := bar_index
+    long_signal_type := math.max(long_signal_type, 1)
+else if raw_any_bull and long_signal_type == 0
+    long_signal_bar  := bar_index
+    long_signal_type := 1
+
+if lower_zone_touch
+    long_zone_bar := bar_index
+
+if (bar_index - long_signal_bar) > state_timeout
+    long_signal_type := 0
+if (bar_index - long_zone_bar) > state_timeout
+    long_zone_bar := -9999
+
+bool long_signal_ready = long_signal_type > 0 and (bar_index - long_signal_bar) <= state_timeout
+bool long_zone_ready   = (bar_index - long_zone_bar) <= state_timeout
+bool long_both_new     = lower_zone_touch or raw_bull_conf or raw_bull_conf_plus or raw_any_bull
+
+bool long_entry = long_signal_ready and long_zone_ready and long_both_new
+
+bool long_entry_filtered = false
+if signal_mode == "Nur Confirmation+"
+    long_entry_filtered := long_entry and long_signal_type >= 2
+else if signal_mode == "Confirmation + Confirmation+"
+    long_entry_filtered := long_entry and long_signal_type >= 1
+else if signal_mode == "Any Confirmation"
+    long_entry_filtered := long_entry
+else
+    long_entry_filtered := lower_zone_touch
+
+float long_final_mult = long_signal_type >= 2 ? 1.0 : 0.5
+int long_sig_for_comment = long_signal_type
+bool long_trail_ok = trail_dir == 1 or trail_bull_cross
+if not long_trail_ok and long_entry_filtered
+    long_final_mult := long_final_mult * 0.5
+
+if long_entry_filtered
+    long_signal_type := 0
+    long_signal_bar  := -9999
+    long_zone_bar    := -9999
+
+// --- Short State Machine ---
+var int short_signal_bar    = -9999
+var int short_signal_type   = 0
+var int short_zone_bar      = -9999
+
+if raw_bear_conf_plus
+    short_signal_bar  := bar_index
+    short_signal_type := 2
+else if raw_bear_conf
+    short_signal_bar  := bar_index
+    short_signal_type := math.max(short_signal_type, 1)
+else if raw_any_bear and short_signal_type == 0
+    short_signal_bar  := bar_index
+    short_signal_type := 1
+
+if upper_zone_touch
+    short_zone_bar := bar_index
+
+if (bar_index - short_signal_bar) > state_timeout
+    short_signal_type := 0
+if (bar_index - short_zone_bar) > state_timeout
+    short_zone_bar := -9999
+
+bool short_signal_ready = short_signal_type > 0 and (bar_index - short_signal_bar) <= state_timeout
+bool short_zone_ready   = (bar_index - short_zone_bar) <= state_timeout
+bool short_both_new     = upper_zone_touch or raw_bear_conf or raw_bear_conf_plus or raw_any_bear
+
+bool short_entry = short_signal_ready and short_zone_ready and short_both_new
+
+bool short_entry_filtered = false
+if signal_mode == "Nur Confirmation+"
+    short_entry_filtered := short_entry and short_signal_type >= 2
+else if signal_mode == "Confirmation + Confirmation+"
+    short_entry_filtered := short_entry and short_signal_type >= 1
+else if signal_mode == "Any Confirmation"
+    short_entry_filtered := short_entry
+else
+    short_entry_filtered := upper_zone_touch
+
+float short_final_mult = short_signal_type >= 2 ? 1.0 : 0.5
+int short_sig_for_comment = short_signal_type
+bool short_trail_ok = trail_dir == -1 or trail_bear_cross
+if not short_trail_ok and short_entry_filtered
+    short_final_mult := short_final_mult * 0.5
+
+if short_entry_filtered
+    short_signal_type := 0
+    short_signal_bar  := -9999
+    short_zone_bar    := -9999
+
+// DCA Signal Check
+bool bull_dca_ok = false
+if dca_signal_mode == "Nur Confirmation+"
+    bull_dca_ok := fresh_bull_conf_plus
+else if dca_signal_mode == "Confirmation + Confirmation+"
+    bull_dca_ok := fresh_bull_conf_plus or fresh_bull_conf
+else if dca_signal_mode == "Any Confirmation"
+    bull_dca_ok := fresh_any_bull
+else
+    bull_dca_ok := true
+
+bool bear_dca_ok = false
+if dca_signal_mode == "Nur Confirmation+"
+    bear_dca_ok := fresh_bear_conf_plus
+else if dca_signal_mode == "Confirmation + Confirmation+"
+    bear_dca_ok := fresh_bear_conf_plus or fresh_bear_conf
+else if dca_signal_mode == "Any Confirmation"
+    bear_dca_ok := fresh_any_bear
+else
+    bear_dca_ok := true
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ POSITION TRACKING
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float long_qty        = 0.0
+var float long_avg_price  = 0.0
+var int long_dca_count    = 0
+var int long_exit_stage   = 0
+var float long_sl_price   = 0.0
+var int long_entry_bar    = 0
+
+var float short_qty       = 0.0
+var float short_avg_price = 0.0
+var int short_dca_count   = 0
+var int short_exit_stage  = 0
+var float short_sl_price  = 0.0
+var int short_entry_bar   = 0
+
+var int last_exit_bar     = 0
+var bool emergency_stop   = false
+var float funding_total   = 0.0
+
+// Loss streak tracking
+var int long_consec_losses  = 0
+var int short_consec_losses = 0
+
+bool long_active  = long_qty > 0
+bool short_active = short_qty > 0
+bool in_cooldown  = (bar_index - last_exit_bar) < cooldown_bars
+int active_slots  = (long_active ? 1 : 0) + (short_active ? 1 : 0)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ TRAILING DRAWDOWN (Schicht 2)
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float peak_equity        = strategy.initial_capital
+var bool trailing_dd_stopped = false
+
+if strategy.equity > peak_equity
+    peak_equity := strategy.equity
+
+float trail_dd_from_peak = peak_equity > 0 ? (1.0 - strategy.equity / peak_equity) * 100.0 : 0.0
+
+if use_trailing_dd and not trailing_dd_stopped and trail_dd_from_peak >= trailing_dd_pct
+    trailing_dd_stopped := true
+
+if trailing_dd_stopped and use_trailing_dd
+    float dd_loss   = peak_equity - strategy.equity
+    float threshold = peak_equity - dd_loss * (1.0 - trailing_dd_recovery / 100.0)
+    if strategy.equity >= threshold or trail_dd_from_peak < trailing_dd_pct * 0.3
+        trailing_dd_stopped := false
+        peak_equity         := strategy.equity
+
+// Legacy DD
+float dd_pct = strategy.equity > 0 ? (1 - strategy.equity / strategy.initial_capital) * 100 : 0
+if strategy.equity < strategy.initial_capital and dd_pct >= max_drawdown_pct
+    emergency_stop := true
+if emergency_stop and dd_pct < max_drawdown_pct * 0.5
+    emergency_stop := false
+
+bool any_emergency = emergency_stop or trailing_dd_stopped
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ CIRCUIT BREAKER (Schicht 3)
+// ══════════════════════════════════════════════════════════════════════════════
+
+var int cb_long_blocked_bar  = -9999
+var int cb_short_blocked_bar = -9999
+
+bool cb_long_active  = use_circuit_breaker and (bar_index - cb_long_blocked_bar) < cb_cooldown_bars
+bool cb_short_active = use_circuit_breaker and (bar_index - cb_short_blocked_bar) < cb_cooldown_bars
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ COMBINED GATE
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool can_open       = active_slots < max_slots and not in_cooldown and not any_emergency
+bool can_open_long  = can_open and not trend_block_long  and not cb_long_active
+bool can_open_short = can_open and not trend_block_short and not cb_short_active
+
+// Funding
+if long_active
+    funding_total += long_qty * close * funding_rate_avg / 100 / 96
+if short_active
+    funding_total += short_qty * close * funding_rate_avg / 100 / 96
+
+// Size mit Loss Streak Reduction
+float loss_scale = 1.0
+if use_loss_scaling
+    int worst_streak = math.max(long_consec_losses, short_consec_losses)
+    loss_scale := worst_streak >= 5 ? 0.5 : worst_streak >= 3 ? 0.75 : 1.0
+
+float current_equity = strategy.equity
+float base_size_usd  = current_equity * equity_pct / 100 * vol_size_mult * loss_scale
+
+calc_qty(float usd_size) =>
+    usd_size * 10 / close
+
+// Dynamic SL Helper
+calc_sl_long(float avg_price) =>
+    if use_dynamic_sl
+        avg_price - atr_val * dynamic_sl_mult
+    else
+        avg_price * (1 - max_loss_pct / 100)
+
+calc_sl_short(float avg_price) =>
+    if use_dynamic_sl
+        avg_price + atr_val * dynamic_sl_mult
+    else
+        avg_price * (1 + max_loss_pct / 100)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ MAX BARS AUTO-CLOSE
+// ══════════════════════════════════════════════════════════════════════════════
+
+if use_max_bars and long_active and (bar_index - long_entry_bar) >= max_trade_bars
+    if long_qty > 0
+        strategy.order("L_MB", strategy.short, qty=long_qty, comment="L MaxBar")
+    float pnl = long_qty * (close - long_avg_price)
+    if pnl < 0
+        long_consec_losses += 1
+    else
+        long_consec_losses := 0
+    long_qty := 0.0
+    long_avg_price := 0.0
+    long_dca_count := 0
+    long_exit_stage := 0
+    long_sl_price := 0.0
+    last_exit_bar := bar_index
+
+if use_max_bars and short_active and (bar_index - short_entry_bar) >= max_trade_bars
+    if short_qty > 0
+        strategy.order("S_MB", strategy.long, qty=short_qty, comment="S MaxBar")
+    float pnl = short_qty * (short_avg_price - close)
+    if pnl < 0
+        short_consec_losses += 1
+    else
+        short_consec_losses := 0
+    short_qty := 0.0
+    short_avg_price := 0.0
+    short_dca_count := 0
+    short_exit_stage := 0
+    short_sl_price := 0.0
+    last_exit_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ ENTRIES
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_entry_filtered and can_open_long and not long_active
+    float size_usd = base_size_usd * long_final_mult
+    float qty = calc_qty(size_usd)
+    if qty > 0
+        string sig_txt = long_sig_for_comment == 2 ? "C+" : long_sig_for_comment == 1 ? "C" : "T"
+        string cmt = "L " + sig_txt
+        if entry_type == "Limit"
+            strategy.order("L_E", strategy.long, qty=qty, limit=zone_long_entry, comment=cmt)
+        else
+            strategy.order("L_E", strategy.long, qty=qty, comment=cmt)
+        long_qty        := qty
+        long_avg_price  := entry_type == "Limit" ? zone_long_entry : close
+        long_dca_count  := 0
+        long_exit_stage := 0
+        long_sl_price   := calc_sl_long(long_avg_price)
+        long_entry_bar  := bar_index
+
+if short_entry_filtered and can_open_short and not short_active
+    float size_usd = base_size_usd * short_final_mult
+    float qty = calc_qty(size_usd)
+    if qty > 0
+        string sig_txt = short_sig_for_comment == 2 ? "C+" : short_sig_for_comment == 1 ? "C" : "T"
+        string cmt = "S " + sig_txt
+        if entry_type == "Limit"
+            strategy.order("S_E", strategy.short, qty=qty, limit=zone_short_entry, comment=cmt)
+        else
+            strategy.order("S_E", strategy.short, qty=qty, comment=cmt)
+        short_qty        := qty
+        short_avg_price  := entry_type == "Limit" ? zone_short_entry : close
+        short_dca_count  := 0
+        short_exit_stage := 0
+        short_sl_price   := calc_sl_short(short_avg_price)
+        short_entry_bar  := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ DCA
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool dca_trend_ok_long  = not trend_also_dca or not trend_block_long
+bool dca_trend_ok_short = not trend_also_dca or not trend_block_short
+
+if beyond_lower and long_active and long_dca_count < max_dca_steps and bull_dca_ok and not any_emergency and dca_trend_ok_long
+    float dca_usd = base_size_usd * math.pow(dca_size_decay, long_dca_count + 1)
+    float dca_qty = calc_qty(dca_usd)
+    if dca_qty > 0
+        string cmt = "L D" + str.tostring(long_dca_count + 1)
+        if entry_type == "Limit"
+            strategy.order("L_D" + str.tostring(long_dca_count + 1), strategy.long, qty=dca_qty, limit=zone_long_dca, comment=cmt)
+        else
+            strategy.order("L_D" + str.tostring(long_dca_count + 1), strategy.long, qty=dca_qty, comment=cmt)
+        float fill = entry_type == "Limit" ? zone_long_dca : close
+        float cost = long_avg_price * long_qty + fill * dca_qty
+        long_qty       := long_qty + dca_qty
+        long_avg_price := cost / long_qty
+        long_dca_count += 1
+        long_sl_price  := calc_sl_long(long_avg_price)
+
+if beyond_upper and short_active and short_dca_count < max_dca_steps and bear_dca_ok and not any_emergency and dca_trend_ok_short
+    float dca_usd = base_size_usd * math.pow(dca_size_decay, short_dca_count + 1)
+    float dca_qty = calc_qty(dca_usd)
+    if dca_qty > 0
+        string cmt = "S D" + str.tostring(short_dca_count + 1)
+        if entry_type == "Limit"
+            strategy.order("S_D" + str.tostring(short_dca_count + 1), strategy.short, qty=dca_qty, limit=zone_short_dca, comment=cmt)
+        else
+            strategy.order("S_D" + str.tostring(short_dca_count + 1), strategy.short, qty=dca_qty, comment=cmt)
+        float fill = entry_type == "Limit" ? zone_short_dca : close
+        float cost = short_avg_price * short_qty + fill * dca_qty
+        short_qty       := short_qty + dca_qty
+        short_avg_price := cost / short_qty
+        short_dca_count += 1
+        short_sl_price  := calc_sl_short(short_avg_price)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ EXIT 1: Exit X Signal
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_active and use_exit_signals and fresh_exit and long_exit_stage == 0
+    float close_qty = long_qty * exit_partial_pct / 100
+    if close_qty > 0
+        string cmt = "L X" + str.tostring(exit_partial_pct, "#") + "%"
+        if exit_type == "Limit"
+            strategy.order("L_X", strategy.short, qty=close_qty, limit=close, comment=cmt)
+        else
+            strategy.order("L_X", strategy.short, qty=close_qty, comment=cmt)
+        long_qty        := long_qty - close_qty
+        long_exit_stage := 1
+        if exit_x_moves_sl
+            long_sl_price := long_avg_price
+
+if short_active and use_exit_signals and fresh_exit and short_exit_stage == 0
+    float close_qty = short_qty * exit_partial_pct / 100
+    if close_qty > 0
+        string cmt = "S X" + str.tostring(exit_partial_pct, "#") + "%"
+        if exit_type == "Limit"
+            strategy.order("S_X", strategy.long, qty=close_qty, limit=close, comment=cmt)
+        else
+            strategy.order("S_X", strategy.long, qty=close_qty, comment=cmt)
+        short_qty        := short_qty - close_qty
+        short_exit_stage := 1
+        if exit_x_moves_sl
+            short_sl_price := short_avg_price
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ EXIT 2: Trail Cross
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_active and trail_bear_cross and long_exit_stage <= 1
+    float pct = long_exit_stage == 0 ? (exit_partial_pct + trail_partial_pct) : trail_partial_pct
+    float close_qty = long_qty * math.min(pct, 90) / 100
+    if close_qty > 0
+        string cmt = "L T" + str.tostring(pct, "#") + "%"
+        if exit_type == "Limit"
+            strategy.order("L_T", strategy.short, qty=close_qty, limit=close, comment=cmt)
+        else
+            strategy.order("L_T", strategy.short, qty=close_qty, comment=cmt)
+        long_qty        := long_qty - close_qty
+        long_exit_stage := 2
+        long_sl_price   := trail_tightens_sl ? math.max(long_avg_price, smart_trail) : long_avg_price
+
+if short_active and trail_bull_cross and short_exit_stage <= 1
+    float pct = short_exit_stage == 0 ? (exit_partial_pct + trail_partial_pct) : trail_partial_pct
+    float close_qty = short_qty * math.min(pct, 90) / 100
+    if close_qty > 0
+        string cmt = "S T" + str.tostring(pct, "#") + "%"
+        if exit_type == "Limit"
+            strategy.order("S_T", strategy.long, qty=close_qty, limit=close, comment=cmt)
+        else
+            strategy.order("S_T", strategy.long, qty=close_qty, comment=cmt)
+        short_qty        := short_qty - close_qty
+        short_exit_stage := 2
+        short_sl_price   := trail_tightens_sl ? math.min(short_avg_price, smart_trail) : short_avg_price
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ EXIT 3: Gegenseite + Flip
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool flip_trend_ok_long  = not trend_also_flip or not trend_block_long
+bool flip_trend_ok_short = not trend_also_flip or not trend_block_short
+
+if long_active and upper_zone_touch
+    // Track P&L for circuit breaker + loss streak
+    float long_close_pnl = long_qty * (close - long_avg_price)
+    if long_close_pnl < 0
+        long_consec_losses += 1
+        if use_circuit_breaker and long_consec_losses >= cb_max_losses
+            cb_long_blocked_bar := bar_index
+    else
+        long_consec_losses := 0
+
+    if long_qty > 0
+        strategy.order("L_F", strategy.short, qty=long_qty, comment="L Full")
+    long_qty := 0.0
+    long_avg_price := 0.0
+    long_dca_count := 0
+    long_exit_stage := 0
+    long_sl_price := 0.0
+    last_exit_bar := bar_index
+    if use_hedge_flip and not any_emergency and flip_trend_ok_short and not cb_short_active
+        float flip_usd = base_size_usd * vol_size_mult
+        float flip_qty = calc_qty(flip_usd)
+        if flip_qty > 0 and not short_active
+            if entry_type == "Limit"
+                strategy.order("S_FL", strategy.short, qty=flip_qty, limit=zone_short_entry, comment="S Flip")
+            else
+                strategy.order("S_FL", strategy.short, qty=flip_qty, comment="S Flip")
+            short_qty := flip_qty
+            short_avg_price := entry_type == "Limit" ? zone_short_entry : close
+            short_dca_count := 0
+            short_exit_stage := 0
+            short_sl_price := calc_sl_short(short_avg_price)
+            short_entry_bar := bar_index
+
+if short_active and lower_zone_touch
+    float short_close_pnl = short_qty * (short_avg_price - close)
+    if short_close_pnl < 0
+        short_consec_losses += 1
+        if use_circuit_breaker and short_consec_losses >= cb_max_losses
+            cb_short_blocked_bar := bar_index
+    else
+        short_consec_losses := 0
+
+    if short_qty > 0
+        strategy.order("S_F", strategy.long, qty=short_qty, comment="S Full")
+    short_qty := 0.0
+    short_avg_price := 0.0
+    short_dca_count := 0
+    short_exit_stage := 0
+    short_sl_price := 0.0
+    last_exit_bar := bar_index
+    if use_hedge_flip and not any_emergency and flip_trend_ok_long and not cb_long_active
+        float flip_usd = base_size_usd * vol_size_mult
+        float flip_qty = calc_qty(flip_usd)
+        if flip_qty > 0 and not long_active
+            if entry_type == "Limit"
+                strategy.order("L_FL", strategy.long, qty=flip_qty, limit=zone_long_entry, comment="L Flip")
+            else
+                strategy.order("L_FL", strategy.long, qty=flip_qty, comment="L Flip")
+            long_qty := flip_qty
+            long_avg_price := entry_type == "Limit" ? zone_long_entry : close
+            long_dca_count := 0
+            long_exit_stage := 0
+            long_sl_price := calc_sl_long(long_avg_price)
+            long_entry_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ EXIT 4: Stop Loss
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_active and long_sl_price > 0 and low <= long_sl_price
+    long_consec_losses += 1
+    if use_circuit_breaker and long_consec_losses >= cb_max_losses
+        cb_long_blocked_bar := bar_index
+
+    if long_qty > 0
+        strategy.order("L_SL", strategy.short, qty=long_qty, stop=long_sl_price, comment="L SL")
+    long_qty := 0.0
+    long_avg_price := 0.0
+    long_dca_count := 0
+    long_exit_stage := 0
+    long_sl_price := 0.0
+    last_exit_bar := bar_index
+
+if short_active and short_sl_price > 0 and high >= short_sl_price
+    short_consec_losses += 1
+    if use_circuit_breaker and short_consec_losses >= cb_max_losses
+        cb_short_blocked_bar := bar_index
+
+    if short_qty > 0
+        strategy.order("S_SL", strategy.long, qty=short_qty, stop=short_sl_price, comment="S SL")
+    short_qty := 0.0
+    short_avg_price := 0.0
+    short_dca_count := 0
+    short_exit_stage := 0
+    short_sl_price := 0.0
+    last_exit_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ EMERGENCY
+// ══════════════════════════════════════════════════════════════════════════════
+
+if any_emergency and (long_active or short_active)
+    if long_qty > 0
+        strategy.order("L_EM", strategy.short, qty=long_qty, comment="EM L")
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_dca_count := 0
+        long_exit_stage := 0
+        long_sl_price := 0.0
+    if short_qty > 0
+        strategy.order("S_EM", strategy.long, qty=short_qty, comment="EM S")
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_dca_count := 0
+        short_exit_stage := 0
+        short_sl_price := 0.0
+    last_exit_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ VISUALISIERUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+p1 = plot(zone_short_dca, "R3", color=color.new(color.red, 65))
+p2 = plot(zone_short_entry, "R1", color=color.new(color.red, 45))
+p3 = plot(zone_long_entry, "S1", color=color.new(color.green, 45))
+p4 = plot(zone_long_dca, "S3", color=color.new(color.green, 65))
+fill(p1, p2, color=color.new(color.red, 88))
+fill(p3, p4, color=color.new(color.green, 88))
+
+color trail_col = trail_dir == 1 ? color.new(#2196F3, 0) : color.new(#F44336, 0)
+plot(smart_trail, "Trail", color=trail_col, linewidth=2)
+
+// Trend EMA (nur wenn aktiv)
+color ema_col = trend_state == 1 ? color.new(#4CAF50, 30) : trend_state == -1 ? color.new(#F44336, 30) : color.new(#888888, 50)
+plot(use_trend_filter ? trend_ema : na, "Trend EMA", color=ema_col, linewidth=2, style=plot.style_line)
+
+bgcolor(vol_extreme ? color.new(color.red, 95) : vol_high ? color.new(color.orange, 96) : na)
+bgcolor(trailing_dd_stopped ? color.new(#FF0000, 90) : na)
+bgcolor(cb_long_active and cb_short_active ? color.new(#FF6600, 93) : cb_long_active or cb_short_active ? color.new(#FF6600, 96) : na)
+
+plot(long_active ? long_avg_price : na, "L Avg", color=color.new(color.green, 30), style=plot.style_linebr, linewidth=1)
+plot(short_active ? short_avg_price : na, "S Avg", color=color.new(color.red, 30), style=plot.style_linebr, linewidth=1)
+plot(long_active and long_sl_price > 0 ? long_sl_price : na, "L SL", color=color.new(#FF5252, 50), style=plot.style_linebr, linewidth=1)
+plot(short_active and short_sl_price > 0 ? short_sl_price : na, "S SL", color=color.new(#FF5252, 50), style=plot.style_linebr, linewidth=1)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ INFO TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table info = table.new(position.top_right, 4, 12, bgcolor=color.new(#0d1117, 5), border_color=color.new(#30305a, 0), border_width=1)
+
+if barstate.islast
+    table.cell(info, 0, 0, "HEDGE", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 1, 0, "DCA", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 2, 0, "v6", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 3, 0, "REAL", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    
+    string l_stg = long_exit_stage == 0 ? "FULL" : long_exit_stage == 1 ? "X" : "T"
+    string s_stg = short_exit_stage == 0 ? "FULL" : short_exit_stage == 1 ? "X" : "T"
+    string l_txt = long_active ? l_stg + " D:" + str.tostring(long_dca_count) : "---"
+    string s_txt = short_active ? s_stg + " D:" + str.tostring(short_dca_count) : "---"
+    color l_c = long_active ? #4CAF50 : #555555
+    color s_c = short_active ? #F44336 : #555555
+    table.cell(info, 0, 1, "LONG", text_color=#4CAF50, text_size=size.tiny)
+    table.cell(info, 1, 1, l_txt, text_color=l_c, text_size=size.tiny)
+    table.cell(info, 2, 1, "SHORT", text_color=#F44336, text_size=size.tiny)
+    table.cell(info, 3, 1, s_txt, text_color=s_c, text_size=size.tiny)
+    
+    string la = long_active ? str.tostring(long_avg_price, "#.##") : "---"
+    string sa = short_active ? str.tostring(short_avg_price, "#.##") : "---"
+    table.cell(info, 0, 2, "L Avg", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 2, la, text_color=#4CAF50, text_size=size.tiny)
+    table.cell(info, 2, 2, "S Avg", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 2, sa, text_color=#F44336, text_size=size.tiny)
+    
+    string ls = long_active ? str.tostring(long_sl_price, "#.##") : "---"
+    string ss = short_active ? str.tostring(short_sl_price, "#.##") : "---"
+    table.cell(info, 0, 3, "L SL", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 3, ls, text_color=#FF5252, text_size=size.tiny)
+    table.cell(info, 2, 3, "S SL", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 3, ss, text_color=#FF5252, text_size=size.tiny)
+    
+    string vtxt = vol_extreme ? "EXTREM" : vol_high ? "HOCH" : "NORMAL"
+    color vc = vol_extreme ? #F44336 : vol_high ? #FF9800 : #4CAF50
+    table.cell(info, 0, 4, "ATR", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 4, str.tostring(atr_ratio, "#.##") + "x", text_color=vc, text_size=size.tiny)
+    table.cell(info, 2, 4, "Vol", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 4, vtxt + " " + str.tostring(vol_size_mult * 100, "#") + "%", text_color=vc, text_size=size.tiny)
+    
+    string sig_txt = signal_mode == "Ohne Signal Filter" ? "OFF" : long_signal_type >= 2 ? "C+" : long_signal_type >= 1 ? "C" : "---"
+    color sig_c = long_signal_type >= 2 ? #4CAF50 : long_signal_type >= 1 ? #FF9800 : #555555
+    table.cell(info, 0, 5, "Sig", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 5, sig_txt, text_color=sig_c, text_size=size.tiny)
+    table.cell(info, 2, 5, "Fund", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 5, "-$" + str.tostring(funding_total, "#.0"), text_color=#FF9800, text_size=size.tiny)
+    
+    string st = any_emergency ? (trailing_dd_stopped ? "DD STOP" : "STOPPED") : "ACTIVE"
+    color stc = any_emergency ? #F44336 : #4CAF50
+    table.cell(info, 0, 6, "Status", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 6, st, text_color=stc, text_size=size.tiny)
+    table.cell(info, 2, 6, "Streak", text_color=#aaaaaa, text_size=size.tiny)
+    string streak_txt = "L:" + str.tostring(long_consec_losses) + " S:" + str.tostring(short_consec_losses)
+    color streak_col = math.max(long_consec_losses, short_consec_losses) >= 5 ? #F44336 : math.max(long_consec_losses, short_consec_losses) >= 3 ? #FF9800 : #4CAF50
+    table.cell(info, 3, 6, streak_txt, text_color=streak_col, text_size=size.tiny)
+    
+    string dbg1 = "B:" + str.tostring(dbg_bull_conf_count) + "/+" + str.tostring(dbg_bull_plus_count)
+    string dbg2 = "S:" + str.tostring(dbg_bear_conf_count) + "/+" + str.tostring(dbg_bear_plus_count)
+    table.cell(info, 0, 7, "DBG", text_color=#FF9800, text_size=size.tiny)
+    table.cell(info, 1, 7, dbg1, text_color=#FF9800, text_size=size.tiny)
+    table.cell(info, 2, 7, dbg2, text_color=#FF9800, text_size=size.tiny)
+    table.cell(info, 3, 7, "X:" + str.tostring(dbg_exit_count), text_color=#FF9800, text_size=size.tiny)
+
+    // Defense Layers
+    string tf_txt = not use_trend_filter ? "OFF" : trend_state == 1 ? "BULL" : trend_state == -1 ? "BEAR" : "NEUT"
+    color tf_col = not use_trend_filter ? #555555 : trend_state == 1 ? #4CAF50 : trend_state == -1 ? #F44336 : #FF9800
+    string tf_block = not use_trend_filter ? "---" : trend_block_long and trend_block_short ? "L+S" : trend_block_long ? "noL" : trend_block_short ? "noS" : "---"
+    table.cell(info, 0, 8, "S1:TF", text_color=#00BCD4, text_size=size.tiny)
+    table.cell(info, 1, 8, tf_txt, text_color=tf_col, text_size=size.tiny)
+    table.cell(info, 2, 8, "Block", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 8, tf_block, text_color=tf_col, text_size=size.tiny)
+
+    string dd_txt = not use_trailing_dd ? "OFF" : trailing_dd_stopped ? "STOP" : str.tostring(trail_dd_from_peak, "#.1") + "%"
+    color dd_col = not use_trailing_dd ? #555555 : trailing_dd_stopped ? #F44336 : trail_dd_from_peak > trailing_dd_pct * 0.7 ? #FF9800 : #4CAF50
+    table.cell(info, 0, 9, "S2:DD", text_color=#00BCD4, text_size=size.tiny)
+    table.cell(info, 1, 9, dd_txt, text_color=dd_col, text_size=size.tiny)
+    table.cell(info, 2, 9, "Peak", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 9, "$" + str.tostring(peak_equity, "#"), text_color=#aaaaaa, text_size=size.tiny)
+
+    string cb_l = not use_circuit_breaker ? "OFF" : cb_long_active ? "PAUSE" : str.tostring(long_consec_losses) + "/" + str.tostring(cb_max_losses)
+    string cb_s = not use_circuit_breaker ? "OFF" : cb_short_active ? "PAUSE" : str.tostring(short_consec_losses) + "/" + str.tostring(cb_max_losses)
+    color cb_l_col = not use_circuit_breaker ? #555555 : cb_long_active ? #F44336 : long_consec_losses >= cb_max_losses - 1 ? #FF9800 : #4CAF50
+    color cb_s_col = not use_circuit_breaker ? #555555 : cb_short_active ? #F44336 : short_consec_losses >= cb_max_losses - 1 ? #FF9800 : #4CAF50
+    table.cell(info, 0, 10, "S3:L", text_color=#00BCD4, text_size=size.tiny)
+    table.cell(info, 1, 10, cb_l, text_color=cb_l_col, text_size=size.tiny)
+    table.cell(info, 2, 10, "S3:S", text_color=#00BCD4, text_size=size.tiny)
+    table.cell(info, 3, 10, cb_s, text_color=cb_s_col, text_size=size.tiny)
+
+    table.cell(info, 0, 11, "Dist", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 11, str.tostring(ema_dist_in_atr, "#.#") + "x", text_color=tf_col, text_size=size.tiny)
+    string scale_txt = use_loss_scaling ? str.tostring(loss_scale * 100, "#") + "%" : "---"
+    table.cell(info, 2, 11, "Scale", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 11, scale_txt, text_color=loss_scale < 1 ? #FF9800 : #555555, text_size=size.tiny)
