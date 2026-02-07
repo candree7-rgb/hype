@@ -12,7 +12,7 @@ class Config:
     # Bybit API
     BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "")
     BYBIT_API_SECRET: str = os.getenv("BYBIT_API_SECRET", "")
-    BYBIT_TESTNET: bool = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
+    BYBIT_TESTNET: bool = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 
     # Trading
     SYMBOL: str = os.getenv("SYMBOL", "HYPEUSDT")
