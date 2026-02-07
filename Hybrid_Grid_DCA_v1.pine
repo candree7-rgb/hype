@@ -1,0 +1,531 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+//@version=6
+strategy("Hybrid Grid-DCA v1 [HYPE]", overlay=true, pyramiding=100, default_qty_type=strategy.cash, default_qty_value=0, initial_capital=2400, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.02, slippage=0, process_orders_on_close=true, calc_on_every_tick=true, margin_long=5, margin_short=5, max_bars_back=5000)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ HYBRID GRID-DCA v1
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// KEINE externen Indikatoren noetig. Alles built-in.
+//
+// MARKT-REGIME ERKENNUNG (ADX):
+//   ADX < 20 → RANGING  → Grid Modus (beide Seiten, BB-Entries)
+//   ADX > 25 → TRENDING → DCA Modus (nur mit Trend, Pullback-Entries)
+//   20-25    → ÜBERGANG → halbe Size, vorsichtig
+//
+// GRID MODUS (Ranging):
+//   - Buy bei unterem Bollinger Band + RSI oversold
+//   - Sell bei oberem Bollinger Band + RSI overbought
+//   - Beide Seiten gleichzeitig (Hedge)
+//   - Tiny TP (0.3%) → Noise trifft schnell
+//   - DCA falls tiefer → Average verbessert → TP naeher
+//
+// DCA MODUS (Trending):
+//   - NUR mit Trend handeln (keine Gegen-Trend Positionen!)
+//   - Entry bei RSI-Pullback (RSI<40 im Uptrend, RSI>60 im Downtrend)
+//   - DCA bei tieferem Pullback → Average verbessert
+//   - Tiny TP (0.5%) vom Average
+//
+// ZIEL: 97%+ WR, <20% DD wie Cornix Bots
+// ══════════════════════════════════════════════════════════════════════════════
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Regime Detection ---
+string grp_regime = "═══ Regime Detection ═══"
+int adx_len = input.int(14, "ADX Laenge", minval=7, maxval=30, group=grp_regime)
+int adx_smooth = input.int(14, "ADX Smoothing", minval=7, maxval=30, group=grp_regime)
+float adx_range = input.float(20.0, "ADX Ranging Schwelle", minval=10, maxval=30, step=1, group=grp_regime, tooltip="ADX unter diesem Wert = Ranging Markt → Grid Modus")
+float adx_trend = input.float(25.0, "ADX Trending Schwelle", minval=20, maxval=40, step=1, group=grp_regime, tooltip="ADX ueber diesem Wert = Trending Markt → DCA Modus")
+
+// --- Trend ---
+string grp_trend = "═══ Trend ═══"
+int ema_fast_len = input.int(50, "Fast EMA", minval=10, maxval=200, step=10, group=grp_trend)
+int ema_slow_len = input.int(200, "Slow EMA", minval=50, maxval=500, step=10, group=grp_trend)
+
+// --- Grid Mode (Ranging) ---
+string grp_grid = "═══ Grid Modus (Ranging) ═══"
+int bb_len = input.int(20, "Bollinger Band Laenge", minval=10, maxval=50, group=grp_grid)
+float bb_mult = input.float(2.0, "Bollinger Band Mult", minval=1.0, maxval=3.0, step=0.1, group=grp_grid)
+int rsi_len = input.int(14, "RSI Laenge", minval=7, maxval=30, group=grp_grid)
+float rsi_grid_buy = input.float(30.0, "RSI Buy Level (Grid)", minval=15, maxval=45, step=5, group=grp_grid)
+float rsi_grid_sell = input.float(70.0, "RSI Sell Level (Grid)", minval=55, maxval=85, step=5, group=grp_grid)
+float grid_tp_pct = input.float(0.3, "Grid TP %", minval=0.1, maxval=2.0, step=0.1, group=grp_grid, tooltip="Kleiner als DCA TP → mehr Trades, hoehere WR in Range")
+float grid_equity_pct = input.float(1.5, "Grid Equity % pro Entry", minval=0.5, maxval=5.0, step=0.5, group=grp_grid, tooltip="Kleiner als DCA → mehr Positionen moeglich")
+
+// --- DCA Mode (Trending) ---
+string grp_dca = "═══ DCA Modus (Trending) ═══"
+float rsi_pull_bull = input.float(40.0, "RSI Pullback Level (Bull)", minval=25, maxval=50, step=5, group=grp_dca, tooltip="Im Uptrend: RSI unter diesem Wert = Pullback → Buy")
+float rsi_pull_bear = input.float(60.0, "RSI Pullback Level (Bear)", minval=50, maxval=75, step=5, group=grp_dca, tooltip="Im Downtrend: RSI ueber diesem Wert = Rally → Sell")
+float dca_tp_pct = input.float(0.5, "DCA TP %", minval=0.1, maxval=3.0, step=0.1, group=grp_dca)
+float dca_equity_pct = input.float(2.0, "DCA Equity % pro Entry 1", minval=0.5, maxval=10.0, step=0.5, group=grp_dca)
+
+// --- DCA Levels ---
+string grp_dca_lvl = "═══ DCA Levels ═══"
+float dca_1_pct = input.float(1.0, "Entry 2 Abstand %", minval=0.3, maxval=5.0, step=0.1, group=grp_dca_lvl)
+float dca_2_pct = input.float(2.0, "Entry 3 Abstand %", minval=0.5, maxval=10.0, step=0.1, group=grp_dca_lvl)
+float dca_3_pct = input.float(4.0, "Entry 4 Abstand %", minval=1.0, maxval=15.0, step=0.5, group=grp_dca_lvl)
+int max_dca = input.int(3, "Max DCA Stufen", minval=1, maxval=6, group=grp_dca_lvl)
+float dca_mult_2 = input.float(2.0, "Entry 2 Size Mult", minval=0.5, maxval=5.0, step=0.5, group=grp_dca_lvl)
+float dca_mult_3 = input.float(3.0, "Entry 3 Size Mult", minval=0.5, maxval=8.0, step=0.5, group=grp_dca_lvl)
+
+// --- Risk ---
+string grp_risk = "═══ Risk ═══"
+float emergency_pct = input.float(8.0, "Emergency Exit % unter letztem DCA", minval=3.0, maxval=20.0, step=1.0, group=grp_risk)
+int cooldown_bars = input.int(3, "Cooldown Bars", minval=0, maxval=20, group=grp_risk)
+bool use_max_bars = input.bool(true, "Max Trade Duration", group=grp_risk)
+int max_trade_bars = input.int(200, "Max Bars", minval=50, maxval=1000, step=50, group=grp_risk)
+
+// --- Webhook ---
+string grp_wh = "═══ Webhook ═══"
+bool enable_alerts = input.bool(false, "Webhook Alerts", group=grp_wh)
+string wh_secret = input.string("", "Webhook Secret", group=grp_wh)
+string wh_ticker = input.string("HYPEUSDT", "Ticker", group=grp_wh)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ADX for regime
+[di_plus, di_minus, adx_val] = ta.dmi(adx_len, adx_smooth)
+
+// Regime
+bool is_ranging = adx_val < adx_range
+bool is_trending = adx_val > adx_trend
+bool is_transition = not is_ranging and not is_trending
+float regime_size_mult = is_ranging ? 1.0 : is_trending ? 1.0 : 0.5
+
+// Trend (EMA)
+float ema_fast = ta.ema(close, ema_fast_len)
+float ema_slow = ta.ema(close, ema_slow_len)
+bool uptrend = ema_fast > ema_slow
+bool downtrend = ema_fast < ema_slow
+
+// Bollinger Bands (for grid)
+[bb_mid, bb_upper, bb_lower] = ta.bb(close, bb_len, bb_mult)
+float bb_width_pct = (bb_upper - bb_lower) / bb_mid * 100
+
+// RSI
+float rsi = ta.rsi(close, rsi_len)
+
+// ATR for volatility
+float atr_val = ta.atr(14)
+float atr_avg = ta.sma(atr_val, 50)
+float atr_ratio = nz(atr_val / atr_avg, 1.0)
+bool vol_extreme = atr_ratio >= 3.0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ ENTRY SIGNALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GRID signals (ranging): buy at lower BB + oversold, sell at upper BB + overbought
+bool grid_buy_signal = is_ranging and rsi < rsi_grid_buy and close <= bb_lower * 1.002
+bool grid_sell_signal = is_ranging and rsi > rsi_grid_sell and close >= bb_upper * 0.998
+
+// GRID in transition: more extreme levels
+bool trans_buy_signal = is_transition and rsi < (rsi_grid_buy - 5) and close <= bb_lower
+bool trans_sell_signal = is_transition and rsi > (rsi_grid_sell + 5) and close >= bb_upper
+
+// DCA signals (trending): pullback entries WITH trend only
+bool dca_buy_signal = is_trending and uptrend and rsi < rsi_pull_bull
+bool dca_sell_signal = is_trending and downtrend and rsi > rsi_pull_bear
+
+// DCA in transition with trend: allowed but strict
+bool trans_dca_buy = is_transition and uptrend and rsi < (rsi_pull_bull - 5)
+bool trans_dca_sell = is_transition and downtrend and rsi > (rsi_pull_bear + 5)
+
+// Combined entry signals
+bool want_long = (grid_buy_signal or dca_buy_signal or trans_buy_signal or trans_dca_buy) and not vol_extreme
+bool want_short = (grid_sell_signal or dca_sell_signal or trans_sell_signal or trans_dca_sell) and not vol_extreme
+
+// Active TP percentage based on regime
+float active_tp_pct = is_ranging ? grid_tp_pct : dca_tp_pct
+
+// Active equity percentage
+float active_equity_pct = is_ranging ? grid_equity_pct : dca_equity_pct
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ POSITION TRACKING
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float long_qty = 0.0
+var float long_avg_price = 0.0
+var float long_entry_price = 0.0
+var int long_dca_count = 0
+var int long_entry_bar = 0
+var float long_tp_pct = 0.5
+
+var float short_qty = 0.0
+var float short_avg_price = 0.0
+var float short_entry_price = 0.0
+var int short_dca_count = 0
+var int short_entry_bar = 0
+var float short_tp_pct = 0.5
+
+var int last_long_bar = -9999
+var int last_short_bar = -9999
+var int total_wins = 0
+var int total_losses = 0
+var int total_grid_wins = 0
+var int total_dca_wins = 0
+
+bool long_active = long_qty > 0
+bool short_active = short_qty > 0
+
+get_dca_mult(int level) =>
+    switch level
+        1 => dca_mult_2
+        2 => dca_mult_3
+        3 => dca_mult_3 * 1.5
+        => 1.0
+
+get_dca_pct(int level) =>
+    switch level
+        1 => dca_1_pct
+        2 => dca_2_pct
+        3 => dca_3_pct
+        => 999.0
+
+// Size
+float base_usd = strategy.equity * active_equity_pct / 100 * regime_size_mult
+calc_qty(float usd) => usd * 20 / close
+
+// Webhook
+build_alert(string act, float qty, float price, string cmt) =>
+    '{"s":"' + wh_secret + '","t":"' + wh_ticker + '","a":"' + act + '",' +
+     '"q":' + str.tostring(qty, "#.####") + ',"p":' + str.tostring(price, "#.####") + ',' +
+     '"c":"' + cmt + '"}'
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ TAKE PROFIT
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_active
+    float tp_level = long_avg_price * (1 + long_tp_pct / 100)
+    if high >= tp_level
+        if long_qty > 0
+            strategy.order("L_TP", strategy.short, qty=long_qty, comment="L TP")
+            if enable_alerts
+                alert(build_alert("close_long", long_qty, close, "L TP"), alert.freq_once_per_bar_close)
+        total_wins += 1
+        if long_tp_pct <= grid_tp_pct
+            total_grid_wins += 1
+        else
+            total_dca_wins += 1
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+        long_tp_pct := 0.5
+
+if short_active
+    float tp_level = short_avg_price * (1 - short_tp_pct / 100)
+    if low <= tp_level
+        if short_qty > 0
+            strategy.order("S_TP", strategy.long, qty=short_qty, comment="S TP")
+            if enable_alerts
+                alert(build_alert("close_short", short_qty, close, "S TP"), alert.freq_once_per_bar_close)
+        total_wins += 1
+        if short_tp_pct <= grid_tp_pct
+            total_grid_wins += 1
+        else
+            total_dca_wins += 1
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+        short_tp_pct := 0.5
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ DCA (works in both modes)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_active and long_dca_count < max_dca and not vol_extreme
+    float next_pct = get_dca_pct(long_dca_count + 1)
+    float dca_level = long_entry_price * (1 - next_pct / 100)
+    if low <= dca_level
+        float dca_usd = base_usd * get_dca_mult(long_dca_count + 1)
+        float dca_qty = calc_qty(dca_usd)
+        if dca_qty > 0
+            string cmt = "L E" + str.tostring(long_dca_count + 2)
+            strategy.order("L_D" + str.tostring(long_dca_count + 1), strategy.long, qty=dca_qty, comment=cmt)
+            float cost = long_avg_price * long_qty + close * dca_qty
+            long_qty := long_qty + dca_qty
+            long_avg_price := cost / long_qty
+            long_dca_count += 1
+            if enable_alerts
+                alert(build_alert("dca_long", dca_qty, long_avg_price, cmt), alert.freq_once_per_bar_close)
+
+if short_active and short_dca_count < max_dca and not vol_extreme
+    float next_pct = get_dca_pct(short_dca_count + 1)
+    float dca_level = short_entry_price * (1 + next_pct / 100)
+    if high >= dca_level
+        float dca_usd = base_usd * get_dca_mult(short_dca_count + 1)
+        float dca_qty = calc_qty(dca_usd)
+        if dca_qty > 0
+            string cmt = "S E" + str.tostring(short_dca_count + 2)
+            strategy.order("S_D" + str.tostring(short_dca_count + 1), strategy.short, qty=dca_qty, comment=cmt)
+            float cost = short_avg_price * short_qty + close * dca_qty
+            short_qty := short_qty + dca_qty
+            short_avg_price := cost / short_qty
+            short_dca_count += 1
+            if enable_alerts
+                alert(build_alert("dca_short", dca_qty, short_avg_price, cmt), alert.freq_once_per_bar_close)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ ENTRIES
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool long_cd = (bar_index - last_long_bar) >= cooldown_bars
+bool short_cd = (bar_index - last_short_bar) >= cooldown_bars
+
+if want_long and not long_active and long_cd
+    float qty = calc_qty(base_usd)
+    if qty > 0
+        strategy.order("L_E", strategy.long, qty=qty, comment="L E1")
+        long_qty := qty
+        long_avg_price := close
+        long_entry_price := close
+        long_dca_count := 0
+        long_entry_bar := bar_index
+        last_long_bar := bar_index
+        long_tp_pct := active_tp_pct
+        if enable_alerts
+            alert(build_alert("open_long", qty, close, "L E1"), alert.freq_once_per_bar_close)
+
+if want_short and not short_active and short_cd
+    float qty = calc_qty(base_usd)
+    if qty > 0
+        strategy.order("S_E", strategy.short, qty=qty, comment="S E1")
+        short_qty := qty
+        short_avg_price := close
+        short_entry_price := close
+        short_dca_count := 0
+        short_entry_bar := bar_index
+        last_short_bar := bar_index
+        short_tp_pct := active_tp_pct
+        if enable_alerts
+            alert(build_alert("open_short", qty, close, "S E1"), alert.freq_once_per_bar_close)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ EMERGENCY EXIT (catastrophic moves only)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_active
+    float deepest = long_entry_price * (1 - get_dca_pct(math.min(max_dca, 3)) / 100)
+    float emerg = deepest * (1 - emergency_pct / 100)
+    if low <= emerg
+        if long_qty > 0
+            strategy.order("L_EM", strategy.short, qty=long_qty, comment="L EMRG")
+            if enable_alerts
+                alert(build_alert("close_long", long_qty, close, "EMRG"), alert.freq_once_per_bar_close)
+        total_losses += 1
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+        long_tp_pct := 0.5
+
+if short_active
+    float deepest = short_entry_price * (1 + get_dca_pct(math.min(max_dca, 3)) / 100)
+    float emerg = deepest * (1 + emergency_pct / 100)
+    if high >= emerg
+        if short_qty > 0
+            strategy.order("S_EM", strategy.long, qty=short_qty, comment="S EMRG")
+            if enable_alerts
+                alert(build_alert("close_short", short_qty, close, "EMRG"), alert.freq_once_per_bar_close)
+        total_losses += 1
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+        short_tp_pct := 0.5
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ MAX TRADE DURATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+if use_max_bars and long_active and (bar_index - long_entry_bar) >= max_trade_bars
+    if long_qty > 0
+        strategy.order("L_MB", strategy.short, qty=long_qty, comment="L MaxB")
+        if enable_alerts
+            alert(build_alert("close_long", long_qty, close, "MaxBar"), alert.freq_once_per_bar_close)
+    if close > long_avg_price
+        total_wins += 1
+    else
+        total_losses += 1
+    long_qty := 0.0
+    long_avg_price := 0.0
+    long_entry_price := 0.0
+    long_dca_count := 0
+    long_tp_pct := 0.5
+
+if use_max_bars and short_active and (bar_index - short_entry_bar) >= max_trade_bars
+    if short_qty > 0
+        strategy.order("S_MB", strategy.long, qty=short_qty, comment="S MaxB")
+        if enable_alerts
+            alert(build_alert("close_short", short_qty, close, "MaxBar"), alert.freq_once_per_bar_close)
+    if close < short_avg_price
+        total_wins += 1
+    else
+        total_losses += 1
+    short_qty := 0.0
+    short_avg_price := 0.0
+    short_entry_price := 0.0
+    short_dca_count := 0
+    short_tp_pct := 0.5
+
+
+// Extreme volatility: close all
+if vol_extreme and (long_active or short_active)
+    if long_qty > 0
+        strategy.order("L_VX", strategy.short, qty=long_qty, comment="L VOL")
+        total_losses += 1
+        long_qty := 0.0
+        long_avg_price := 0.0
+        long_entry_price := 0.0
+        long_dca_count := 0
+        long_tp_pct := 0.5
+    if short_qty > 0
+        strategy.order("S_VX", strategy.long, qty=short_qty, comment="S VOL")
+        total_losses += 1
+        short_qty := 0.0
+        short_avg_price := 0.0
+        short_entry_price := 0.0
+        short_dca_count := 0
+        short_tp_pct := 0.5
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ HEARTBEAT
+// ══════════════════════════════════════════════════════════════════════════════
+
+if enable_alerts and barstate.isconfirmed
+    string mode = is_ranging ? "GRID" : is_trending ? "DCA" : "TRANS"
+    string hb = '{"s":"' + wh_secret + '","a":"hb",' +
+     '"cp":' + str.tostring(close, "#.####") + ',' +
+     '"m":"' + mode + '",' +
+     '"adx":' + str.tostring(adx_val, "#.#") + ',' +
+     '"lq":' + str.tostring(long_qty, "#.####") + ',' +
+     '"la":' + str.tostring(long_avg_price, "#.####") + ',' +
+     '"sq":' + str.tostring(short_qty, "#.####") + ',' +
+     '"sa":' + str.tostring(short_avg_price, "#.####") + '}'
+    alert(hb, alert.freq_once_per_bar_close)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ VISUALISIERUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(ema_fast, "EMA 50", color=color.new(#2196F3, 40), linewidth=1)
+plot(ema_slow, "EMA 200", color=color.new(#FF9800, 40), linewidth=1)
+
+// Bollinger Bands
+p_bb_upper = plot(bb_upper, "BB Upper", color=color.new(#9C27B0, 60), linewidth=1)
+p_bb_lower = plot(bb_lower, "BB Lower", color=color.new(#9C27B0, 60), linewidth=1)
+fill(p_bb_upper, p_bb_lower, color=is_ranging ? color.new(#9C27B0, 92) : color.new(#9C27B0, 97))
+
+// Position avg + TP
+plot(long_active ? long_avg_price : na, "L Avg", color=color.new(#4CAF50, 30), style=plot.style_linebr, linewidth=1)
+plot(short_active ? short_avg_price : na, "S Avg", color=color.new(#F44336, 30), style=plot.style_linebr, linewidth=1)
+plot(long_active ? long_avg_price * (1 + long_tp_pct / 100) : na, "L TP", color=color.new(#4CAF50, 50), style=plot.style_linebr, linewidth=2)
+plot(short_active ? short_avg_price * (1 - short_tp_pct / 100) : na, "S TP", color=color.new(#F44336, 50), style=plot.style_linebr, linewidth=2)
+
+// Regime background
+color regime_col = is_ranging ? color.new(#9C27B0, 93) : is_trending ? (uptrend ? color.new(#4CAF50, 93) : color.new(#F44336, 93)) : color.new(#FF9800, 95)
+bgcolor(regime_col)
+
+// Entry signals
+plotshape(want_long and not long_active and long_cd, "Buy Signal", shape.triangleup, location.belowbar, color.new(#4CAF50, 0), size=size.tiny)
+plotshape(want_short and not short_active and short_cd, "Sell Signal", shape.triangledown, location.abovebar, color.new(#F44336, 0), size=size.tiny)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ INFO TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table info = table.new(position.top_right, 4, 11, bgcolor=color.new(#0d1117, 5), border_color=color.new(#30305a, 0), border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(info, 0, 0, "HYBRID", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 1, 0, "GRID", text_color=#9C27B0, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 2, 0, "DCA", text_color=#FF9800, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(info, 3, 0, "v1", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+
+    // Regime
+    string mode = is_ranging ? "GRID" : is_trending ? "DCA" : "TRANS"
+    color mode_col = is_ranging ? #9C27B0 : is_trending ? #FF9800 : #FFEB3B
+    table.cell(info, 0, 1, "Mode", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 1, mode, text_color=mode_col, text_size=size.tiny)
+    table.cell(info, 2, 1, "ADX", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 1, str.tostring(adx_val, "#.#"), text_color=mode_col, text_size=size.tiny)
+
+    // Trend
+    table.cell(info, 0, 2, "Trend", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 2, uptrend ? "BULL" : "BEAR", text_color=uptrend ? #4CAF50 : #F44336, text_size=size.tiny)
+    table.cell(info, 2, 2, "RSI", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 2, str.tostring(rsi, "#.#"), text_color=rsi < 30 ? #4CAF50 : rsi > 70 ? #F44336 : #aaaaaa, text_size=size.tiny)
+
+    // Long
+    table.cell(info, 0, 3, "LONG", text_color=#4CAF50, text_size=size.tiny)
+    table.cell(info, 1, 3, long_active ? "E" + str.tostring(long_dca_count + 1) : "---", text_color=long_active ? #4CAF50 : #555555, text_size=size.tiny)
+    table.cell(info, 2, 3, "Avg", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 3, long_active ? str.tostring(long_avg_price, "#.##") : "---", text_color=#4CAF50, text_size=size.tiny)
+
+    // Short
+    table.cell(info, 0, 4, "SHORT", text_color=#F44336, text_size=size.tiny)
+    table.cell(info, 1, 4, short_active ? "E" + str.tostring(short_dca_count + 1) : "---", text_color=short_active ? #F44336 : #555555, text_size=size.tiny)
+    table.cell(info, 2, 4, "Avg", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 4, short_active ? str.tostring(short_avg_price, "#.##") : "---", text_color=#F44336, text_size=size.tiny)
+
+    // TP
+    table.cell(info, 0, 5, "L TP", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 5, long_active ? str.tostring(long_avg_price * (1 + long_tp_pct / 100), "#.##") : "---", text_color=#4CAF50, text_size=size.tiny)
+    table.cell(info, 2, 5, "S TP", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 5, short_active ? str.tostring(short_avg_price * (1 - short_tp_pct / 100), "#.##") : "---", text_color=#F44336, text_size=size.tiny)
+
+    // Win Rate
+    int total_all = total_wins + total_losses
+    float wr = total_all > 0 ? total_wins * 100.0 / total_all : 0.0
+    table.cell(info, 0, 6, "WR", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 6, str.tostring(wr, "#.#") + "%", text_color=wr > 90 ? #4CAF50 : wr > 70 ? #FF9800 : #F44336, text_size=size.tiny)
+    table.cell(info, 2, 6, "W/L", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 6, str.tostring(total_wins) + "/" + str.tostring(total_losses), text_color=#aaaaaa, text_size=size.tiny)
+
+    // Grid vs DCA wins
+    table.cell(info, 0, 7, "Grid W", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 7, str.tostring(total_grid_wins), text_color=#9C27B0, text_size=size.tiny)
+    table.cell(info, 2, 7, "DCA W", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 7, str.tostring(total_dca_wins), text_color=#FF9800, text_size=size.tiny)
+
+    // BB Width + ATR
+    table.cell(info, 0, 8, "BB%", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 8, str.tostring(bb_width_pct, "#.##") + "%", text_color=#9C27B0, text_size=size.tiny)
+    table.cell(info, 2, 8, "ATR", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 8, str.tostring(atr_ratio, "#.##") + "x", text_color=vol_extreme ? #FF0000 : #aaaaaa, text_size=size.tiny)
+
+    // DI+ DI-
+    table.cell(info, 0, 9, "DI+", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 9, str.tostring(di_plus, "#.#"), text_color=#4CAF50, text_size=size.tiny)
+    table.cell(info, 2, 9, "DI-", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 9, str.tostring(di_minus, "#.#"), text_color=#F44336, text_size=size.tiny)
+
+    // TP mode
+    table.cell(info, 0, 10, "TP%", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 1, 10, str.tostring(active_tp_pct, "#.#") + "%", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 2, 10, "Lev", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(info, 3, 10, "20x", text_color=#FF9800, text_size=size.tiny)
