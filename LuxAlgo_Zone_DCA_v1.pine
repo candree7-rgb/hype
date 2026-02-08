@@ -81,14 +81,14 @@ string sl_activation = input.string("Nach letztem DCA", "SL Aktivierung", option
 
 // --- DCA Spacing ---
 string grp_dca = "═══ DCA Spacing ═══"
-string dca_mode = input.string("Fixed %", "DCA Modus", options=["Fixed %", "Zone-basiert"], group=grp_dca, tooltip="Fixed %: Feste Abstände vom Entry (wie Cornix)\nZone-basiert: DCA bei S3/R3 Touch")
-float dca_1 = input.float(3.0, "E2 Abstand %", group=grp_dca, tooltip="Enger als Cornix (6.3%) weil\nEntry bereits an Zone = smart")
-float dca_2 = input.float(6.0, "E3 Abstand %", group=grp_dca)
-float dca_3 = input.float(10.0, "E4 Abstand %", group=grp_dca)
-float dca_4 = input.float(15.0, "E5 Abstand %", group=grp_dca)
-float dca_5 = input.float(21.0, "E6 Abstand %", group=grp_dca)
+string dca_mode = input.string("Fixed %", "DCA Modus", options=["Fixed %", "Zone + Spread"], group=grp_dca, tooltip="Fixed %: Feste Abstände vom Entry (wie Cornix)\nZone + Spread: E2 bei S3, E3-E6 gestaffelt unter S3")
+float dca_1 = input.float(3.0, "E2 Abstand % (Fixed)", group=grp_dca, tooltip="Nur Fixed-Modus: E2 bei Entry - 3%")
+float dca_2 = input.float(6.0, "E3 Abstand % (Fixed)", group=grp_dca)
+float dca_3 = input.float(10.0, "E4 Abstand % (Fixed)", group=grp_dca)
+float dca_4 = input.float(15.0, "E5 Abstand % (Fixed)", group=grp_dca)
+float dca_5 = input.float(21.0, "E6 Abstand % (Fixed)", group=grp_dca)
+float zone_spread = input.float(3.0, "Zone-Spread % (zwischen DCAs)", minval=1.0, maxval=10.0, step=0.5, group=grp_dca, tooltip="Nur Zone+Spread: Abstand zwischen DCAs unter S3.\nE2=S3, E3=S3-3%, E4=S3-6%, E5=S3-9%, E6=S3-12%")
 int max_dca = input.int(5, "Max DCA Stufen", minval=0, maxval=5, group=grp_dca, tooltip="0 = kein DCA (nur E1)\n3-4 empfohlen bei Zone-Entry\n5 = volle 6 Entries")
-int dca_zone_cooldown = input.int(5, "Zone-DCA Cooldown Bars", minval=1, maxval=50, group=grp_dca, tooltip="Nur Zone-Modus: Min. Bars zwischen DCAs.\nVerhindert dass alle DCAs auf einmal feuern.")
 
 // --- DCA Sizing ---
 string grp_sz = "═══ DCA Sizing (Exponentiell) ═══"
@@ -463,9 +463,9 @@ if l_active and long_dca < max_dca and dca_trend_ok_long
                 long_last_dca_bar := bar_index
                 dca_this_bar := true
     else
-        // Zone-basiert: DCA bei S3 Touch (nur erster Kontakt + Cooldown)
-        bool long_dca_ready = beyond_lower_touch or (beyond_lower and (bar_index - long_last_dca_bar) >= dca_zone_cooldown and long_last_dca_bar > 0)
-        if long_dca_ready
+        // Zone + Spread: E2 bei S3, E3 bei S3-3%, E4 bei S3-6%, etc.
+        float zone_dca_lvl = zone_long_dca * (1 - (long_dca) * zone_spread / 100)
+        if low <= zone_dca_lvl
             float usd = base_usd * get_dca_sz(long_dca + 1)
             float qty = calc_qty(usd)
             if qty > 0
@@ -498,9 +498,9 @@ if s_active and short_dca < max_dca and dca_trend_ok_short
                 short_last_dca_bar := bar_index
                 dca_this_bar := true
     else
-        // Zone-basiert: DCA bei R3 Touch (nur erster Kontakt + Cooldown)
-        bool short_dca_ready = beyond_upper_touch or (beyond_upper and (bar_index - short_last_dca_bar) >= dca_zone_cooldown and short_last_dca_bar > 0)
-        if short_dca_ready
+        // Zone + Spread: E2 bei R3, E3 bei R3+3%, E4 bei R3+6%, etc.
+        float zone_dca_lvl = zone_short_dca * (1 + (short_dca) * zone_spread / 100)
+        if high >= zone_dca_lvl
             float usd = base_usd * get_dca_sz(short_dca + 1)
             float qty = calc_qty(usd)
             if qty > 0
@@ -627,12 +627,17 @@ plot(s_active ? short_avg : na, "S Avg", color=color.new(#F44336, 20), style=plo
 plot(s_active ? short_avg * (1 - tp_pct / 100) : na, "S TP", color=color.new(#00E676, 40), style=plot.style_linebr, linewidth=1)
 plot(s_active and short_sl > 0 ? short_sl : na, "S SL", color=color.new(#FF5252, 40), style=plot.style_linebr, linewidth=1)
 
-// DCA Levels (Long)
-plot(l_active and long_dca < 1 and dca_mode == "Fixed %" ? long_entry_price * (1 - dca_1/100) : na, "L E2", color=color.new(#4CAF50, 75), style=plot.style_linebr)
-plot(l_active and long_dca < 2 and dca_mode == "Fixed %" ? long_entry_price * (1 - dca_2/100) : na, "L E3", color=color.new(#4CAF50, 80), style=plot.style_linebr)
-plot(l_active and long_dca < 3 and dca_mode == "Fixed %" ? long_entry_price * (1 - dca_3/100) : na, "L E4", color=color.new(#4CAF50, 85), style=plot.style_linebr)
-plot(l_active and long_dca < 4 and dca_mode == "Fixed %" ? long_entry_price * (1 - dca_4/100) : na, "L E5", color=color.new(#FF9800, 80), style=plot.style_linebr)
-plot(l_active and long_dca < 5 and dca_mode == "Fixed %" ? long_entry_price * (1 - dca_5/100) : na, "L E6", color=color.new(#F44336, 80), style=plot.style_linebr)
+// DCA Levels (Long) - Fixed % ODER Zone+Spread
+float l_dca2 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_1/100) : zone_long_dca
+float l_dca3 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_2/100) : zone_long_dca * (1 - zone_spread/100)
+float l_dca4 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_3/100) : zone_long_dca * (1 - 2*zone_spread/100)
+float l_dca5 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_4/100) : zone_long_dca * (1 - 3*zone_spread/100)
+float l_dca6 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_5/100) : zone_long_dca * (1 - 4*zone_spread/100)
+plot(l_active and long_dca < 1 ? l_dca2 : na, "L E2", color=color.new(#4CAF50, 75), style=plot.style_linebr)
+plot(l_active and long_dca < 2 ? l_dca3 : na, "L E3", color=color.new(#4CAF50, 80), style=plot.style_linebr)
+plot(l_active and long_dca < 3 ? l_dca4 : na, "L E4", color=color.new(#4CAF50, 85), style=plot.style_linebr)
+plot(l_active and long_dca < 4 ? l_dca5 : na, "L E5", color=color.new(#FF9800, 80), style=plot.style_linebr)
+plot(l_active and long_dca < 5 ? l_dca6 : na, "L E6", color=color.new(#F44336, 80), style=plot.style_linebr)
 
 // Trend-Block Hintergrund
 bgcolor(trend_mode != "Aus" and not trend_allow_long and not trend_allow_short ? color.new(#F44336, 95) : na)
