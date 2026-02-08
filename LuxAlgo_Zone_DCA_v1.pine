@@ -62,7 +62,8 @@ string grp_trend = "═══ Trend Filter ═══"
 string trend_mode = input.string("Aus", "Trend Filter Modus", options=["Aus", "EMA", "Neo Cloud External"], group=grp_trend, tooltip="Aus = immer traden\nEMA = EMA 50/200 Crossover\nNeo Cloud = LuxAlgo Neo Cloud Richtung")
 int ema_fast_len = input.int(50, "EMA Fast", minval=10, maxval=200, step=10, group=grp_trend)
 int ema_slow_len = input.int(200, "EMA Slow", minval=50, maxval=500, step=10, group=grp_trend)
-float ext_neo_cloud = input.source(close, "Neo Cloud Direction", group=grp_trend, tooltip="Neo Cloud Bull/Bear Plot.\nWert > close[1] = Bullish\nWert < close[1] = Bearish")
+float ext_neo_lag = input.source(close, "Neo Cloud Lag", group=grp_trend, tooltip="Neo Cloud: Lagging Line Plot")
+float ext_neo_lead = input.source(close, "Neo Cloud Lead", group=grp_trend, tooltip="Neo Cloud: Leading Line Plot")
 bool trend_blocks_entry_only = input.bool(true, "Trend blockt nur neue Entries (nicht DCA)", group=grp_trend, tooltip="AN: DCA füllt immer (schützt bestehende Pos.)\nAUS: DCA auch von Trend geblockt")
 
 // --- Take Profit ---
@@ -86,6 +87,7 @@ float dca_3 = input.float(10.0, "E4 Abstand %", group=grp_dca)
 float dca_4 = input.float(15.0, "E5 Abstand %", group=grp_dca)
 float dca_5 = input.float(21.0, "E6 Abstand %", group=grp_dca)
 int max_dca = input.int(5, "Max DCA Stufen", minval=0, maxval=5, group=grp_dca, tooltip="0 = kein DCA (nur E1)\n3-4 empfohlen bei Zone-Entry\n5 = volle 6 Entries")
+int dca_zone_cooldown = input.int(5, "Zone-DCA Cooldown Bars", minval=1, maxval=50, group=grp_dca, tooltip="Nur Zone-Modus: Min. Bars zwischen DCAs.\nVerhindert dass alle DCAs auf einmal feuern.")
 
 // --- DCA Sizing ---
 string grp_sz = "═══ DCA Sizing (Exponentiell) ═══"
@@ -167,8 +169,8 @@ if trend_mode == "EMA"
     trend_bull := ema_fast > ema_slow
     trend_bear := ema_fast < ema_slow
 else if trend_mode == "Neo Cloud External"
-    trend_bull := ext_neo_cloud > ext_neo_cloud[1]
-    trend_bear := ext_neo_cloud < ext_neo_cloud[1]
+    trend_bull := ext_neo_lag > ext_neo_lead  // Lag > Lead = Bullish → allow Long
+    trend_bear := ext_neo_lag < ext_neo_lead  // Lag < Lead = Bearish → allow Short
 
 bool trend_allow_long = trend_mode == "Aus" or trend_bull
 bool trend_allow_short = trend_mode == "Aus" or trend_bear
@@ -190,6 +192,14 @@ was_in_upper := in_upper_zone
 bool beyond_lower = low < zone_long_dca
 bool beyond_upper = high > zone_short_dca
 
+// DCA Zone Touch Detection (nur erster Kontakt mit S3/R3)
+var bool was_beyond_lower = false
+var bool was_beyond_upper = false
+bool beyond_lower_touch = beyond_lower and not was_beyond_lower
+bool beyond_upper_touch = beyond_upper and not was_beyond_upper
+was_beyond_lower := beyond_lower
+was_beyond_upper := beyond_upper
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ▌ POSITION TRACKING
@@ -200,6 +210,7 @@ var float long_avg = 0.0
 var float long_entry_price = 0.0
 var int long_dca = 0
 var int long_bar = 0
+var int long_last_dca_bar = 0
 var float long_sl = 0.0
 var bool long_trail_exited = false
 
@@ -207,6 +218,7 @@ var float short_qty = 0.0
 var float short_avg = 0.0
 var float short_entry_price = 0.0
 var int short_dca = 0
+var int short_last_dca_bar = 0
 var int short_bar = 0
 var float short_sl = 0.0
 var bool short_trail_exited = false
@@ -252,10 +264,23 @@ float base_usd = total_usd / sum_mult
 calc_qty(float usd) => usd * 20 / close
 
 calc_sl_long(float avg) =>
-    use_dynamic_sl ? avg - atr_val * dynamic_sl_mult : avg * (1 - sl_pct / 100)
+    if use_dynamic_sl
+        avg - atr_val * dynamic_sl_mult
+    else if dca_mode == "Zone-basiert" and long_dca < max_dca
+        // Bei Zone-DCA: SL unter S3 setzen, damit DCA füllen kann
+        float zone_sl = zone_long_dca * (1 - sl_pct / 100)
+        math.min(zone_sl, avg * (1 - sl_pct / 100))
+    else
+        avg * (1 - sl_pct / 100)
 
 calc_sl_short(float avg) =>
-    use_dynamic_sl ? avg + atr_val * dynamic_sl_mult : avg * (1 + sl_pct / 100)
+    if use_dynamic_sl
+        avg + atr_val * dynamic_sl_mult
+    else if dca_mode == "Zone-basiert" and short_dca < max_dca
+        float zone_sl = zone_short_dca * (1 + sl_pct / 100)
+        math.max(zone_sl, avg * (1 + sl_pct / 100))
+    else
+        avg * (1 + sl_pct / 100)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -434,10 +459,12 @@ if l_active and long_dca < max_dca and dca_trend_ok_long
                 long_avg := cost / long_qty
                 long_dca += 1
                 long_sl := calc_sl_long(long_avg)
+                long_last_dca_bar := bar_index
                 dca_this_bar := true
     else
-        // Zone-basiert: DCA bei S3 Touch
-        if beyond_lower
+        // Zone-basiert: DCA bei S3 Touch (nur erster Kontakt + Cooldown)
+        bool long_dca_ready = beyond_lower_touch or (beyond_lower and (bar_index - long_last_dca_bar) >= dca_zone_cooldown and long_last_dca_bar > 0)
+        if long_dca_ready
             float usd = base_usd * get_dca_sz(long_dca + 1)
             float qty = calc_qty(usd)
             if qty > 0
@@ -448,6 +475,7 @@ if l_active and long_dca < max_dca and dca_trend_ok_long
                 long_avg := cost / long_qty
                 long_dca += 1
                 long_sl := calc_sl_long(long_avg)
+                long_last_dca_bar := bar_index
                 dca_this_bar := true
 
 // --- Short DCA ---
@@ -466,9 +494,12 @@ if s_active and short_dca < max_dca and dca_trend_ok_short
                 short_avg := cost / short_qty
                 short_dca += 1
                 short_sl := calc_sl_short(short_avg)
+                short_last_dca_bar := bar_index
                 dca_this_bar := true
     else
-        if beyond_upper
+        // Zone-basiert: DCA bei R3 Touch (nur erster Kontakt + Cooldown)
+        bool short_dca_ready = beyond_upper_touch or (beyond_upper and (bar_index - short_last_dca_bar) >= dca_zone_cooldown and short_last_dca_bar > 0)
+        if short_dca_ready
             float usd = base_usd * get_dca_sz(short_dca + 1)
             float qty = calc_qty(usd)
             if qty > 0
@@ -479,6 +510,7 @@ if s_active and short_dca < max_dca and dca_trend_ok_short
                 short_avg := cost / short_qty
                 short_dca += 1
                 short_sl := calc_sl_short(short_avg)
+                short_last_dca_bar := bar_index
                 dca_this_bar := true
 
 
