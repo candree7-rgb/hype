@@ -77,6 +77,7 @@ string grp_sl = "═══ Stop Loss ═══"
 float sl_pct = input.float(3.0, "SL % unter/über Avg", minval=0.5, maxval=10.0, step=0.5, group=grp_sl, tooltip="Sicherheitsnetz NACH DCA.\n3% vom Avg bei 20x = 60% Verlust auf Position.\nSelten erreicht wenn DCA funktioniert.")
 bool use_dynamic_sl = input.bool(false, "Dynamic SL (ATR)", group=grp_sl, tooltip="SL = X × ATR statt fixer %")
 float dynamic_sl_mult = input.float(2.0, "ATR Multiplikator", minval=0.5, maxval=5.0, step=0.25, group=grp_sl)
+string sl_activation = input.string("Nach letztem DCA", "SL Aktivierung", options=["Immer", "Nach letztem DCA", "Nur im Profit"], group=grp_sl, tooltip="Immer: SL sofort aktiv (gefährlich, kann vor DCA triggern)\nNach letztem DCA: SL erst wenn alle DCAs aufgebraucht\nNur im Profit: SL nur als Profit-Schutz (wie Cornix)")
 
 // --- DCA Spacing ---
 string grp_dca = "═══ DCA Spacing ═══"
@@ -518,8 +519,25 @@ if s_active and short_dca < max_dca and dca_trend_ok_short
 // ▌ SCHRITT 5: STOP LOSS (NACH DCA!)
 // ══════════════════════════════════════════════════════════════════════════════
 
+// SL Aktivierung prüfen
+bool long_sl_active = false
+if sl_activation == "Immer"
+    long_sl_active := true
+else if sl_activation == "Nach letztem DCA"
+    long_sl_active := long_dca >= max_dca  // Alle DCAs aufgebraucht
+else if sl_activation == "Nur im Profit"
+    long_sl_active := close > long_avg  // Nur wenn Position im Profit
+
+bool short_sl_active = false
+if sl_activation == "Immer"
+    short_sl_active := true
+else if sl_activation == "Nach letztem DCA"
+    short_sl_active := short_dca >= max_dca
+else if sl_activation == "Nur im Profit"
+    short_sl_active := close < short_avg
+
 // --- Long SL ---
-if l_active and not dca_this_bar and bar_index > long_bar and long_sl > 0
+if l_active and not dca_this_bar and bar_index > long_bar and long_sl > 0 and long_sl_active
     if low <= long_sl
         if long_qty > 0
             strategy.order("L_SL", strategy.short, qty=long_qty, comment="L SL")
@@ -533,7 +551,7 @@ if l_active and not dca_this_bar and bar_index > long_bar and long_sl > 0
         last_close_bar := bar_index
 
 // --- Short SL ---
-if s_active and not dca_this_bar and bar_index > short_bar and short_sl > 0
+if s_active and not dca_this_bar and bar_index > short_bar and short_sl > 0 and short_sl_active
     if high >= short_sl
         if short_qty > 0
             strategy.order("S_SL", strategy.long, qty=short_qty, comment="S SL")
