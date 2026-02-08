@@ -53,9 +53,7 @@ float ext_s3 = input.source(low, "S3 (Outer Gruen - Long DCA deep)", group=grp_z
 // --- Smart Trail ---
 string grp_trail = "═══ Smart Trail ═══"
 float ext_smart_trail = input.source(close, "Smart Trail Linie", group=grp_trail, tooltip="LuxAlgo Smart Trail Plot")
-bool use_trail_exit = input.bool(true, "Smart Trail als Exit", group=grp_trail, tooltip="Trail Bear Cross → Long schliessen\nTrail Bull Cross → Short schliessen")
-bool trail_partial = input.bool(false, "Trail = Teilverkauf (statt Full)", group=grp_trail, tooltip="AN: Trail schliesst nur X%\nAUS: Trail schliesst alles")
-float trail_close_pct = input.float(50.0, "Trail Teilverkauf %", minval=10, maxval=90, step=10, group=grp_trail, tooltip="Nur wenn Teilverkauf aktiv")
+bool use_trail_exit = input.bool(true, "Smart Trail als Profit-Exit", group=grp_trail, tooltip="Trail Cross schliesst NUR wenn im Profit!\nIm Minus → hält Position, wartet auf DCA-Recovery")
 
 // --- Trend Filter ---
 string grp_trend = "═══ Trend Filter ═══"
@@ -267,7 +265,7 @@ calc_qty(float usd) => usd * 20 / close
 calc_sl_long(float avg) =>
     if use_dynamic_sl
         avg - atr_val * dynamic_sl_mult
-    else if dca_mode == "Zone-basiert" and long_dca < max_dca
+    else if dca_mode == "Zone + Spread" and long_dca < max_dca
         // Bei Zone-DCA: SL unter S3 setzen, damit DCA füllen kann
         float zone_sl = zone_long_dca * (1 - sl_pct / 100)
         math.min(zone_sl, avg * (1 - sl_pct / 100))
@@ -277,7 +275,7 @@ calc_sl_long(float avg) =>
 calc_sl_short(float avg) =>
     if use_dynamic_sl
         avg + atr_val * dynamic_sl_mult
-    else if dca_mode == "Zone-basiert" and short_dca < max_dca
+    else if dca_mode == "Zone + Spread" and short_dca < max_dca
         float zone_sl = zone_short_dca * (1 + sl_pct / 100)
         math.max(zone_sl, avg * (1 + sl_pct / 100))
     else
@@ -320,72 +318,46 @@ if s_active
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ▌ SCHRITT 2: SMART TRAIL EXIT
+// ▌ SCHRITT 2: SMART TRAIL EXIT (NUR IM PROFIT!)
 // ══════════════════════════════════════════════════════════════════════════════
 
-if use_trail_exit and l_active and trail_bear_cross and not long_trail_exited
-    if trail_partial
-        float close_qty = long_qty * trail_close_pct / 100
-        if close_qty > 0
-            strategy.order("L_TR", strategy.short, qty=close_qty, comment="L Trail " + str.tostring(trail_close_pct, "#") + "%")
-            long_qty := long_qty - close_qty
-            long_trail_exited := true
-            // SL auf Break-Even nach Trail-Teilverkauf
-            long_sl := math.max(long_sl, long_avg)
-    else
-        // Full close
-        if long_qty > 0
-            strategy.order("L_TR", strategy.short, qty=long_qty, comment="L Trail Full")
-        float pnl = close - long_avg
-        if pnl >= 0
-            wins += 1
-        else
-            losses += 1
-        long_qty := 0.0
-        long_avg := 0.0
-        long_entry_price := 0.0
-        long_dca := 0
-        long_sl := 0.0
-        long_trail_exited := false
-        last_close_bar := bar_index
-
-if use_trail_exit and s_active and trail_bull_cross and not short_trail_exited
-    if trail_partial
-        float close_qty = short_qty * trail_close_pct / 100
-        if close_qty > 0
-            strategy.order("S_TR", strategy.long, qty=close_qty, comment="S Trail " + str.tostring(trail_close_pct, "#") + "%")
-            short_qty := short_qty - close_qty
-            short_trail_exited := true
-            short_sl := math.min(short_sl, short_avg)
-    else
-        if short_qty > 0
-            strategy.order("S_TR", strategy.long, qty=short_qty, comment="S Trail Full")
-        float pnl = short_avg - close
-        if pnl >= 0
-            wins += 1
-        else
-            losses += 1
-        short_qty := 0.0
-        short_avg := 0.0
-        short_entry_price := 0.0
-        short_dca := 0
-        short_sl := 0.0
-        short_trail_exited := false
-        last_close_bar := bar_index
-
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ▌ SCHRITT 3: GEGENSEITE ZONE EXIT (+ Optional Flip)
-// ══════════════════════════════════════════════════════════════════════════════
-
-if use_opposite_zone_exit and l_active and upper_zone_touch
-    float pnl = close - long_avg
-    if pnl >= 0
-        wins += 1
-    else
-        losses += 1
+// Trail schliesst NUR wenn Position im Profit ist!
+// Im Minus → WARTEN auf DCA-Recovery statt Trail-Exit
+if use_trail_exit and l_active and trail_bear_cross and close > long_avg
     if long_qty > 0
-        strategy.order("L_OZ", strategy.short, qty=long_qty, comment="L OppZone")
+        strategy.order("L_TR", strategy.short, qty=long_qty, comment="L Trail+")
+    wins += 1
+    long_qty := 0.0
+    long_avg := 0.0
+    long_entry_price := 0.0
+    long_dca := 0
+    long_sl := 0.0
+    long_trail_exited := false
+    last_close_bar := bar_index
+
+if use_trail_exit and s_active and trail_bull_cross and close < short_avg
+    if short_qty > 0
+        strategy.order("S_TR", strategy.long, qty=short_qty, comment="S Trail+")
+    wins += 1
+    short_qty := 0.0
+    short_avg := 0.0
+    short_entry_price := 0.0
+    short_dca := 0
+    short_sl := 0.0
+    short_trail_exited := false
+    last_close_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SCHRITT 3: GEGENSEITE ZONE EXIT (NUR IM PROFIT!)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Gegenseite schliesst NUR wenn Position im Profit!
+// Im Minus → HALTEN und DCA weiter kaufen lassen
+if use_opposite_zone_exit and l_active and upper_zone_touch and close > long_avg
+    if long_qty > 0
+        strategy.order("L_OZ", strategy.short, qty=long_qty, comment="L OppZone+")
+    wins += 1
     long_qty := 0.0
     long_avg := 0.0
     long_entry_price := 0.0
@@ -406,14 +378,10 @@ if use_opposite_zone_exit and l_active and upper_zone_touch
             short_trail_exited := false
             short_bar := bar_index
 
-if use_opposite_zone_exit and s_active and lower_zone_touch
-    float pnl = short_avg - close
-    if pnl >= 0
-        wins += 1
-    else
-        losses += 1
+if use_opposite_zone_exit and s_active and lower_zone_touch and close < short_avg
     if short_qty > 0
-        strategy.order("S_OZ", strategy.long, qty=short_qty, comment="S OppZone")
+        strategy.order("S_OZ", strategy.long, qty=short_qty, comment="S OppZone+")
+    wins += 1
     short_qty := 0.0
     short_avg := 0.0
     short_entry_price := 0.0
@@ -541,7 +509,11 @@ if l_active and not dca_this_bar and bar_index > long_bar and long_sl > 0 and lo
     if low <= long_sl
         if long_qty > 0
             strategy.order("L_SL", strategy.short, qty=long_qty, comment="L SL")
-        losses += 1
+        // SL nach vollem DCA: Stop liegt oft über Avg → Win/BE
+        if long_sl >= long_avg
+            wins += 1  // Stop über Avg = Profit (Cornix-Mechanik)
+        else
+            losses += 1  // Echter Loss (selten)
         long_qty := 0.0
         long_avg := 0.0
         long_entry_price := 0.0
@@ -555,7 +527,10 @@ if s_active and not dca_this_bar and bar_index > short_bar and short_sl > 0 and 
     if high >= short_sl
         if short_qty > 0
             strategy.order("S_SL", strategy.long, qty=short_qty, comment="S SL")
-        losses += 1
+        if short_sl <= short_avg
+            wins += 1  // Stop unter Avg = Profit (Cornix-Mechanik)
+        else
+            losses += 1
         short_qty := 0.0
         short_avg := 0.0
         short_entry_price := 0.0
