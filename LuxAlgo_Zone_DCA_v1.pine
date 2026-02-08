@@ -86,7 +86,7 @@ float dca_3 = input.float(10.0, "E4 Abstand % (Fixed)", group=grp_dca)
 float dca_4 = input.float(15.0, "E5 Abstand % (Fixed)", group=grp_dca)
 float dca_5 = input.float(21.0, "E6 Abstand % (Fixed)", group=grp_dca)
 float zone_spread = input.float(3.0, "Zone-Spread % (zwischen DCAs)", minval=1.0, maxval=10.0, step=0.5, group=grp_dca, tooltip="Nur Zone+Spread: Abstand zwischen DCAs unter S3.\nE2=S3, E3=S3-3%, E4=S3-6%, E5=S3-9%, E6=S3-12%")
-int max_dca = input.int(3, "Max DCA Stufen", minval=0, maxval=5, group=grp_dca, tooltip="0 = kein DCA (nur E1)\n3 = 4 Entries (1+2+4+8=15x, empfohlen)\n5 = volle 6 Entries (1+2+4+8+16+32=63x)")
+int max_dca = input.int(5, "Max DCA Stufen", minval=0, maxval=5, group=grp_dca, tooltip="5 = volle 6 Entries wie Cornix (empfohlen)\nAlle 6 = quasi nie, aber Versicherung\n0 = kein DCA (nur E1, gefährlich)")
 
 // --- DCA Sizing ---
 string grp_sz = "═══ DCA Sizing (Exponentiell) ═══"
@@ -99,7 +99,7 @@ float sz_6 = input.float(32.0, "E6 Mult", group=grp_sz, tooltip="32x E1")
 
 // --- Account ---
 string grp_acc = "═══ Account ═══"
-float equity_pct = input.float(15.0, "Equity % TOTAL pro Trade", minval=1.0, maxval=50.0, step=1.0, group=grp_acc, tooltip="Gesamt-Budget für alle Entries.\nWird automatisch gesplittet nach max_dca.\n15% / 15 (bei 3 DCA) = 1% pro E1\n× 20x = $480 Notional bei $2400")
+float equity_pct = input.float(30.0, "Equity % TOTAL pro Trade", minval=1.0, maxval=80.0, step=1.0, group=grp_acc, tooltip="Gesamt-Budget für alle Entries (Margin).\nWird automatisch gesplittet nach DCA-Stufen.\n30% bei 5 DCA (63x): E1=$228 Notional\n50% bei 5 DCA (63x): E1=$380 Notional\nHöher = mehr Profit pro Trade, mehr Risiko")
 int cooldown = input.int(2, "Cooldown Bars", minval=0, maxval=20, group=grp_acc)
 int max_slots = input.int(2, "Max gleichzeitige Trades", minval=1, maxval=4, group=grp_acc, tooltip="1 = nur Long ODER Short\n2 = Long + Short gleichzeitig")
 
