@@ -66,13 +66,13 @@ bool trend_blocks_entry_only = input.bool(true, "Trend blockt nur neue Entries (
 
 // --- Take Profit ---
 string grp_tp = "═══ Take Profit ═══"
-float tp_pct = input.float(0.8, "TP % vom Avg", minval=0.1, maxval=5.0, step=0.1, group=grp_tp, tooltip="Cornix: 0.8% bei 20x = 16% Gewinn\nGrösserer TP = weniger Trades, mehr pro Trade")
+float tp_pct = input.float(2.0, "TP % vom Avg", minval=0.1, maxval=5.0, step=0.1, group=grp_tp, tooltip="Zone-Entry = am Support → grösserer Move möglich.\n2% × 20x = 40% Gewinn pro Trade.\nKleiner = mehr Trades, grösser = mehr pro Trade")
 bool use_opposite_zone_exit = input.bool(true, "Gegenseite Zone = Full Exit", group=grp_tp, tooltip="Long schliesst bei R1 Touch\nShort schliesst bei S1 Touch\n+ Optional Flip")
 bool use_hedge_flip = input.bool(false, "Flip bei Gegenseite", group=grp_tp, tooltip="Nach Full Exit auf Gegenseite: sofort neuen Trade öffnen")
 
 // --- Stop Loss ---
 string grp_sl = "═══ Stop Loss ═══"
-float sl_pct = input.float(3.0, "SL % unter/über Avg", minval=0.5, maxval=10.0, step=0.5, group=grp_sl, tooltip="Sicherheitsnetz NACH DCA.\n3% vom Avg bei 20x = 60% Verlust auf Position.\nSelten erreicht wenn DCA funktioniert.")
+float sl_pct = input.float(5.0, "SL % unter/über Avg", minval=0.5, maxval=15.0, step=0.5, group=grp_sl, tooltip="Sicherheitsnetz NACH letztem DCA.\n5% vom Avg bei 20x = 100% Verlust auf Position.\nAber nach DCA liegt Stop oft über Avg → Profit!")
 bool use_dynamic_sl = input.bool(false, "Dynamic SL (ATR)", group=grp_sl, tooltip="SL = X × ATR statt fixer %")
 float dynamic_sl_mult = input.float(2.0, "ATR Multiplikator", minval=0.5, maxval=5.0, step=0.25, group=grp_sl)
 string sl_activation = input.string("Nach letztem DCA", "SL Aktivierung", options=["Immer", "Nach letztem DCA", "Nur im Profit"], group=grp_sl, tooltip="Immer: SL sofort aktiv (gefährlich, kann vor DCA triggern)\nNach letztem DCA: SL erst wenn alle DCAs aufgebraucht\nNur im Profit: SL nur als Profit-Schutz (wie Cornix)")
@@ -86,7 +86,7 @@ float dca_3 = input.float(10.0, "E4 Abstand % (Fixed)", group=grp_dca)
 float dca_4 = input.float(15.0, "E5 Abstand % (Fixed)", group=grp_dca)
 float dca_5 = input.float(21.0, "E6 Abstand % (Fixed)", group=grp_dca)
 float zone_spread = input.float(3.0, "Zone-Spread % (zwischen DCAs)", minval=1.0, maxval=10.0, step=0.5, group=grp_dca, tooltip="Nur Zone+Spread: Abstand zwischen DCAs unter S3.\nE2=S3, E3=S3-3%, E4=S3-6%, E5=S3-9%, E6=S3-12%")
-int max_dca = input.int(5, "Max DCA Stufen", minval=0, maxval=5, group=grp_dca, tooltip="0 = kein DCA (nur E1)\n3-4 empfohlen bei Zone-Entry\n5 = volle 6 Entries")
+int max_dca = input.int(3, "Max DCA Stufen", minval=0, maxval=5, group=grp_dca, tooltip="0 = kein DCA (nur E1)\n3 = 4 Entries (1+2+4+8=15x, empfohlen)\n5 = volle 6 Entries (1+2+4+8+16+32=63x)")
 
 // --- DCA Sizing ---
 string grp_sz = "═══ DCA Sizing (Exponentiell) ═══"
@@ -99,7 +99,7 @@ float sz_6 = input.float(32.0, "E6 Mult", group=grp_sz, tooltip="32x E1")
 
 // --- Account ---
 string grp_acc = "═══ Account ═══"
-float equity_pct = input.float(5.0, "Equity % TOTAL pro Trade", minval=1.0, maxval=30.0, step=0.5, group=grp_acc, tooltip="Gesamt-Budget für E1-E6.\nWird automatisch gesplittet.\n5% × 20x = 100% max Notional")
+float equity_pct = input.float(15.0, "Equity % TOTAL pro Trade", minval=1.0, maxval=50.0, step=1.0, group=grp_acc, tooltip="Gesamt-Budget für alle Entries.\nWird automatisch gesplittet nach max_dca.\n15% / 15 (bei 3 DCA) = 1% pro E1\n× 20x = $480 Notional bei $2400")
 int cooldown = input.int(2, "Cooldown Bars", minval=0, maxval=20, group=grp_acc)
 int max_slots = input.int(2, "Max gleichzeitige Trades", minval=1, maxval=4, group=grp_acc, tooltip="1 = nur Long ODER Short\n2 = Long + Short gleichzeitig")
 
@@ -255,8 +255,8 @@ get_dca_sz(int lvl) =>
         5 => sz_6
         => 1.0
 
-// Total Budget Split (Cornix-Logik)
-float sum_mult = sz_1 + sz_2 + sz_3 + sz_4 + sz_5 + sz_6
+// Total Budget Split - DYNAMISCH basierend auf max_dca
+float sum_mult = sz_1 + (max_dca >= 1 ? sz_2 : 0) + (max_dca >= 2 ? sz_3 : 0) + (max_dca >= 3 ? sz_4 : 0) + (max_dca >= 4 ? sz_5 : 0) + (max_dca >= 5 ? sz_6 : 0)
 float total_usd = strategy.equity * equity_pct / 100
 float base_usd = total_usd / sum_mult
 
@@ -683,11 +683,12 @@ if barstate.islast
     table.cell(t, 2, 7, "Exp", text_color=#aaaaaa, text_size=size.tiny)
     table.cell(t, 3, 7, str.tostring(l_exp + s_exp, "#.#") + "%", text_color=(l_exp + s_exp) > 200 ? #F44336 : #aaaaaa, text_size=size.tiny)
 
-    // DCA Mode
+    // DCA Mode + E1 Size
+    float e1_notional = base_usd * sz_1 * 20
     table.cell(t, 0, 8, "DCA", text_color=#aaaaaa, text_size=size.tiny)
     table.cell(t, 1, 8, dca_mode == "Fixed %" ? "FIX" : "ZONE", text_color=#00d4ff, text_size=size.tiny)
-    table.cell(t, 2, 8, "Max", text_color=#aaaaaa, text_size=size.tiny)
-    table.cell(t, 3, 8, str.tostring(max_dca) + " (" + str.tostring(sum_mult, "#") + "x)", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 2, 8, "E1$", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 3, 8, str.tostring(e1_notional, "#") + " (" + str.tostring(sum_mult, "#") + "x)", text_color=#aaaaaa, text_size=size.tiny)
 
     // Trail
     table.cell(t, 0, 9, "Trail", text_color=#aaaaaa, text_size=size.tiny)
