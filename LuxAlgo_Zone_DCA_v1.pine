@@ -665,17 +665,19 @@ if barstate.islast
     table.cell(t, 2, 5, "Mode", text_color=#aaaaaa, text_size=size.tiny)
     table.cell(t, 3, 5, trend_mode == "Aus" ? "---" : trend_mode == "EMA" ? "EMA" : "NEO", text_color=#00d4ff, text_size=size.tiny)
 
-    // WR
-    int total = wins + losses
-    float wr = total > 0 ? wins * 100.0 / total : 0.0
+    // WR - ECHTE Zahlen von TradingView Strategy Engine
+    int tv_wins = strategy.wintrades
+    int tv_losses = strategy.losstrades
+    int tv_total = strategy.closedtrades
+    float tv_wr = tv_total > 0 ? tv_wins * 100.0 / tv_total : 0.0
     table.cell(t, 0, 6, "WR", text_color=#aaaaaa, text_size=size.tiny)
-    table.cell(t, 1, 6, str.tostring(wr, "#.#") + "%", text_color=wr > 90 ? #4CAF50 : wr > 70 ? #FF9800 : #F44336, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(tv_wr, "#.#") + "%", text_color=tv_wr > 90 ? #4CAF50 : tv_wr > 70 ? #FF9800 : #F44336, text_size=size.tiny)
     table.cell(t, 2, 6, "W/L", text_color=#aaaaaa, text_size=size.tiny)
-    table.cell(t, 3, 6, str.tostring(wins) + "/" + str.tostring(losses), text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 3, 6, str.tostring(tv_wins) + "/" + str.tostring(tv_losses), text_color=#aaaaaa, text_size=size.tiny)
 
     // Trades + Exposure
     table.cell(t, 0, 7, "Trades", text_color=#aaaaaa, text_size=size.tiny)
-    table.cell(t, 1, 7, str.tostring(total), text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(tv_total), text_color=#aaaaaa, text_size=size.tiny)
     float l_exp = l_active ? long_qty * close / strategy.equity * 100 : 0.0
     float s_exp = s_active ? short_qty * close / strategy.equity * 100 : 0.0
     table.cell(t, 2, 7, "Exp", text_color=#aaaaaa, text_size=size.tiny)
