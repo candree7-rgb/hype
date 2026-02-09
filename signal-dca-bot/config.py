@@ -4,7 +4,7 @@ Telegram Signal → Bybit DCA Trading Bot
 
 Based on Cornix reverse-engineering:
 - Exponential DCA sizing: 1:2:4:8:16:32
-- Growing DCA spacing: 3%, 4%, 5%, 6%, 7%
+- Growing DCA spacing: 5%, 5%, 6%, 7%, 7% (cumulative: 5, 10, 16, 23, 30)
 - No SL until all DCAs filled, then trail to avg
 - TP: 50% at TP1, rest trails to TP2+ or BE
 """
@@ -38,10 +38,11 @@ class BotConfig:
     dca_multipliers: list[float] = field(
         default_factory=lambda: [1, 2, 4, 8, 16, 32]
     )
-    # Spacing: growing gaps between DCA levels
-    # E1=signal entry, E2=entry-3%, E3=entry-7%, E4=entry-12%, E5=entry-18%, E6=entry-25%
+    # Spacing: growing gaps between DCA levels (Cornix-style)
+    # E1=signal, E2=entry-5%, E3=entry-10%, E4=entry-16%, E5=entry-23%, E6=entry-30%
+    # Gaps: 5%, 5%, 6%, 7%, 7% = growing spacing like Cornix
     dca_spacing_pct: list[float] = field(
-        default_factory=lambda: [0, 3, 7, 12, 18, 25]
+        default_factory=lambda: [0, 5, 10, 16, 23, 30]
     )
     max_dca_levels: int = 5  # 5 = total 6 entries (E1 + 5 DCA)
 

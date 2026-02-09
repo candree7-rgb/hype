@@ -30,6 +30,7 @@ from config import load_config, BotConfig
 from telegram_parser import parse_signal, Signal
 from trade_manager import TradeManager, TradeStatus
 from bybit_engine import BybitEngine
+from zone_data import ZoneDataManager, CoinZones, calc_smart_dca_levels
 
 # ── Logging ──
 logging.basicConfig(
@@ -43,6 +44,7 @@ logger = logging.getLogger("main")
 config: BotConfig = load_config()
 trade_mgr: TradeManager = TradeManager(config)
 bybit: BybitEngine = BybitEngine(config)
+zone_mgr: ZoneDataManager = ZoneDataManager()
 monitor_task: asyncio.Task | None = None
 batch_task: asyncio.Task | None = None
 
@@ -156,6 +158,26 @@ async def execute_signal(signal: Signal) -> dict:
 
     # Create trade in manager
     trade = trade_mgr.create_trade(signal, equity)
+
+    # Zone-snap DCA levels if zone data available
+    zones = zone_mgr.get_zones(signal.symbol)
+    if zones and zones.is_valid:
+        smart_levels = calc_smart_dca_levels(
+            signal.entry_price, config.dca_spacing_pct, zones, signal.side
+        )
+        # Update DCA prices (skip E1 at index 0)
+        for i, (price, source) in enumerate(smart_levels):
+            if i < len(trade.dca_levels):
+                if source != "entry" and source != "fixed":
+                    old_price = trade.dca_levels[i].price
+                    trade.dca_levels[i].price = price
+                    # Recalculate qty at new price
+                    trade.dca_levels[i].qty = (
+                        trade.dca_levels[i].margin * config.leverage / price
+                    )
+                    logger.info(
+                        f"DCA{i} snapped: {old_price:.4f} → {price:.4f} ({source})"
+                    )
 
     # Execute on Bybit
     success = bybit.open_trade(trade, use_limit=config.e1_limit_order)
@@ -375,6 +397,49 @@ async def flush():
     """Manually flush the signal buffer (skip waiting)."""
     results = await flush_batch()
     return JSONResponse({"status": "flushed", "results": results or []})
+
+
+@app.post("/zones/{symbol}")
+async def update_zones(symbol: str, request: Request):
+    """Update reversal zone levels for a coin.
+
+    Can be called by TradingView webhook or manually.
+    JSON body: {"s1": 111.5, "s2": 108.2, "s3": 105.0, "r1": 115.8, "r2": 118.5, "r3": 121.0}
+    """
+    body = await request.json()
+    symbol_clean = symbol.upper().replace("/", "")
+
+    zones = CoinZones(
+        symbol=symbol_clean,
+        s1=float(body.get("s1", 0) or 0),
+        s2=float(body.get("s2", 0) or 0),
+        s3=float(body.get("s3", 0) or 0),
+        r1=float(body.get("r1", 0) or 0),
+        r2=float(body.get("r2", 0) or 0),
+        r3=float(body.get("r3", 0) or 0),
+    )
+    zone_mgr.update_zones(symbol_clean, zones)
+
+    return JSONResponse({
+        "status": "ok",
+        "symbol": symbol_clean,
+        "zones": {"s1": zones.s1, "s2": zones.s2, "s3": zones.s3,
+                  "r1": zones.r1, "r2": zones.r2, "r3": zones.r3},
+    })
+
+
+@app.get("/zones")
+async def list_zones():
+    """List all cached zone data."""
+    result = {}
+    for symbol, z in zone_mgr._cache.items():
+        result[symbol] = {
+            "s1": z.s1, "s2": z.s2, "s3": z.s3,
+            "r1": z.r1, "r2": z.r2, "r3": z.r3,
+            "age_min": round(z.age_minutes, 1),
+            "valid": z.is_valid,
+        }
+    return JSONResponse(result)
 
 
 @app.get("/status")
