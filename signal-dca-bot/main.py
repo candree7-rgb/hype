@@ -44,21 +44,103 @@ config: BotConfig = load_config()
 trade_mgr: TradeManager = TradeManager(config)
 bybit: BybitEngine = BybitEngine(config)
 monitor_task: asyncio.Task | None = None
+batch_task: asyncio.Task | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ▌ SIGNAL PROCESSING
+# ▌ SIGNAL BATCH BUFFER
 # ══════════════════════════════════════════════════════════════════════════════
+# Signals come in batches (4-5 at once). We buffer for a few seconds,
+# then sort by priority (highest signal leverage = most stable = best for DCA)
+# and only take as many as we have free slots.
 
-async def process_signal(signal: Signal) -> dict:
-    """Process a parsed trading signal.
+BATCH_BUFFER_SECONDS = 5  # Wait 5s to collect all signals from a batch
 
-    1. Check if we can open
-    2. Get equity
-    3. Create trade
-    4. Execute on Bybit
+signal_buffer: list[Signal] = []
+buffer_lock = asyncio.Lock()
+_batch_flush_handle: asyncio.TimerHandle | None = None
+
+
+async def add_signal_to_batch(signal: Signal) -> dict:
+    """Add signal to batch buffer. Returns immediately.
+
+    The batch will be processed after BATCH_BUFFER_SECONDS.
     """
-    # Check slot availability
+    global _batch_flush_handle
+
+    async with buffer_lock:
+        # Check if already in buffer (duplicate)
+        for s in signal_buffer:
+            if s.symbol == signal.symbol:
+                return {"status": "duplicate", "symbol": signal.symbol_display}
+
+        signal_buffer.append(signal)
+        count = len(signal_buffer)
+        logger.info(
+            f"Signal buffered: {signal.side.upper()} {signal.symbol_display} "
+            f"(Sig Lev: {signal.signal_leverage}x) | "
+            f"Buffer: {count} signals, flushing in {BATCH_BUFFER_SECONDS}s"
+        )
+
+    # Schedule batch flush (reset timer with each new signal)
+    loop = asyncio.get_event_loop()
+    if _batch_flush_handle:
+        _batch_flush_handle.cancel()
+    _batch_flush_handle = loop.call_later(
+        BATCH_BUFFER_SECONDS,
+        lambda: asyncio.ensure_future(flush_batch())
+    )
+
+    return {"status": "buffered", "buffer_size": count}
+
+
+async def flush_batch():
+    """Process the buffered batch: sort by priority, take top N."""
+    global _batch_flush_handle
+    _batch_flush_handle = None
+
+    async with buffer_lock:
+        if not signal_buffer:
+            return
+
+        batch = list(signal_buffer)
+        signal_buffer.clear()
+
+    free_slots = config.max_simultaneous_trades - trade_mgr.active_count
+    if free_slots <= 0:
+        logger.info(f"Batch of {len(batch)} signals: NO free slots, all rejected")
+        return
+
+    # Sort by signal leverage DESCENDING (highest = most stable = best for DCA)
+    batch.sort(key=lambda s: s.signal_leverage, reverse=True)
+
+    selected = batch[:free_slots]
+    rejected = batch[free_slots:]
+
+    logger.info(
+        f"Batch processing: {len(batch)} signals → "
+        f"{len(selected)} selected, {len(rejected)} rejected | "
+        f"Priority: {', '.join(f'{s.symbol_display}({s.signal_leverage}x)' for s in selected)}"
+    )
+
+    if rejected:
+        logger.info(
+            f"Rejected (no slots): "
+            f"{', '.join(f'{s.symbol_display}({s.signal_leverage}x)' for s in rejected)}"
+        )
+
+    # Execute selected signals
+    results = []
+    for signal in selected:
+        result = await execute_signal(signal)
+        results.append(result)
+
+    return results
+
+
+async def execute_signal(signal: Signal) -> dict:
+    """Execute a single signal (open trade on Bybit)."""
+    # Check slot availability (re-check, might have changed)
     can_open, reason = trade_mgr.can_open_trade(signal.symbol)
     if not can_open:
         logger.info(f"Signal rejected: {signal.symbol_display} | {reason}")
@@ -78,13 +160,12 @@ async def process_signal(signal: Signal) -> dict:
     # Execute on Bybit
     success = bybit.open_trade(trade)
     if not success:
-        # Clean up failed trade
         trade_mgr.close_trade(trade, 0, 0, "Failed to open")
         return {"status": "error", "reason": "Order execution failed"}
 
     logger.info(
         f"Trade opened: {signal.side.upper()} {signal.symbol_display} | "
-        f"E1 @ {signal.entry_price} | "
+        f"E1 @ {signal.entry_price} | Sig Lev: {signal.signal_leverage}x | "
         f"Slots: {trade_mgr.active_count}/{config.max_simultaneous_trades}"
     )
 
@@ -94,6 +175,7 @@ async def process_signal(signal: Signal) -> dict:
         "symbol": signal.symbol_display,
         "side": signal.side,
         "e1_price": signal.entry_price,
+        "signal_leverage": signal.signal_leverage,
         "slots_used": trade_mgr.active_count,
     }
 
@@ -240,7 +322,8 @@ async def webhook(request: Request):
     if signal is None:
         return JSONResponse({"status": "ignored", "reason": "not a valid signal"})
 
-    result = await process_signal(signal)
+    # Add to batch buffer (processes after 5s delay to collect whole batch)
+    result = await add_signal_to_batch(signal)
     return JSONResponse(result)
 
 
@@ -265,10 +348,18 @@ async def close_position(symbol: str):
     return {"status": "error", "reason": f"No active trade for {symbol}"}
 
 
+@app.post("/flush")
+async def flush():
+    """Manually flush the signal buffer (skip waiting)."""
+    results = await flush_batch()
+    return JSONResponse({"status": "flushed", "results": results or []})
+
+
 @app.get("/status")
 async def status():
     """Dashboard data as JSON."""
     data = trade_mgr.get_dashboard_data()
+    data["buffer"] = len(signal_buffer)
 
     # Add equity if connected
     try:
