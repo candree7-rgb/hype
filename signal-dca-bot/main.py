@@ -427,9 +427,57 @@ async def flush():
     return JSONResponse({"status": "flushed", "results": results or []})
 
 
+@app.post("/zones/push")
+async def push_zones(request: Request):
+    """Receive zone data from TradingView Zone Pusher (symbol in body).
+
+    This is the primary endpoint for TradingView watchlist alerts, where the
+    webhook URL is fixed and the symbol comes in the JSON body.
+
+    JSON body: {"symbol": "HYPEUSDT", "s1": 111.5, "s2": 108.2, "s3": 105.0,
+                "r1": 115.8, "r2": 118.5, "r3": 121.0, "source": "luxalgo"}
+    """
+    body = await request.json()
+    raw_symbol = body.get("symbol", "")
+    if not raw_symbol:
+        return JSONResponse(
+            {"status": "error", "reason": "missing symbol in body"}, status_code=400
+        )
+
+    # Clean symbol: "HYPEUSDT.P" → "HYPEUSDT", "HYPE/USDT" → "HYPEUSDT"
+    symbol_clean = raw_symbol.upper().replace("/", "").split(".")[0]
+
+    zones = CoinZones(
+        symbol=symbol_clean,
+        s1=float(body.get("s1", 0) or 0),
+        s2=float(body.get("s2", 0) or 0),
+        s3=float(body.get("s3", 0) or 0),
+        r1=float(body.get("r1", 0) or 0),
+        r2=float(body.get("r2", 0) or 0),
+        r3=float(body.get("r3", 0) or 0),
+        source=body.get("source", "luxalgo"),
+    )
+    zone_mgr.update_zones(symbol_clean, zones)
+
+    logger.info(
+        f"Zone push: {symbol_clean} ({zones.source}) | "
+        f"S: {zones.s1}/{zones.s2}/{zones.s3} | R: {zones.r1}/{zones.r2}/{zones.r3}"
+    )
+
+    return JSONResponse({
+        "status": "ok",
+        "symbol": symbol_clean,
+        "source": zones.source,
+        "zones": {
+            "s1": zones.s1, "s2": zones.s2, "s3": zones.s3,
+            "r1": zones.r1, "r2": zones.r2, "r3": zones.r3,
+        },
+    })
+
+
 @app.post("/zones/{symbol}")
 async def update_zones(symbol: str, request: Request):
-    """Update reversal zone levels (from TradingView webhook or manual).
+    """Update reversal zone levels (manual / direct API).
 
     JSON body: {"s1": 111.5, "s2": 108.2, "s3": 105.0, "r1": 115.8, "r2": 118.5, "r3": 121.0}
     """
