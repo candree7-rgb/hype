@@ -158,7 +158,7 @@ async def execute_signal(signal: Signal) -> dict:
     trade = trade_mgr.create_trade(signal, equity)
 
     # Execute on Bybit
-    success = bybit.open_trade(trade)
+    success = bybit.open_trade(trade, use_limit=config.e1_limit_order)
     if not success:
         trade_mgr.close_trade(trade, 0, 0, "Failed to open")
         return {"status": "error", "reason": "Order execution failed"}
@@ -197,6 +197,28 @@ async def price_monitor():
 
             for trade in active:
                 if trade.status == TradeStatus.CLOSED:
+                    continue
+
+                # ── 0. Check pending E1 limit orders ──
+                if trade.status == TradeStatus.PENDING:
+                    filled = bybit.check_e1_filled(trade)
+                    if filled:
+                        trade.status = TradeStatus.OPEN
+                        # Now place DCA limit orders
+                        bybit.place_dca_for_trade(trade)
+                        logger.info(f"E1 filled → OPEN: {trade.symbol_display}")
+                    else:
+                        # Check timeout
+                        age_min = (time.time() - trade.opened_at) / 60
+                        if age_min >= config.e1_timeout_minutes:
+                            bybit.cancel_e1(trade)
+                            trade_mgr.close_trade(trade, 0, 0,
+                                f"E1 timeout ({config.e1_timeout_minutes}min)")
+                            logger.info(
+                                f"E1 timeout: {trade.symbol_display} | "
+                                f"Slot freed after {age_min:.0f}min"
+                            )
+                    await asyncio.sleep(0.2)
                     continue
 
                 price = bybit.get_ticker_price(trade.symbol)

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class TradeStatus(str, Enum):
+    PENDING = "pending"     # E1 limit order placed, waiting for fill
     OPEN = "open"           # E1 filled, waiting for TP or DCA
     DCA_ACTIVE = "dca"      # In DCA mode (price went against us)
     TRAILING = "trailing"   # TP1 hit, trailing remainder
@@ -200,12 +201,17 @@ class TradeManager:
                 price=price,
                 qty=qty,
                 margin=margin,
-                filled=(i == 0),  # E1 fills immediately
+                filled=False,  # Nothing filled yet (limit order)
             )
             dca_levels.append(level)
 
-        # E1 is filled immediately
         e1 = dca_levels[0]
+
+        # Status depends on order type (limit = pending, market = open)
+        initial_status = (
+            TradeStatus.PENDING if self.config.e1_limit_order
+            else TradeStatus.OPEN
+        )
 
         trade = Trade(
             trade_id=trade_id,
@@ -215,9 +221,9 @@ class TradeManager:
             signal_entry=signal.entry_price,
             signal_leverage=signal.signal_leverage,
             dca_levels=dca_levels,
-            status=TradeStatus.OPEN,
-            total_qty=e1.qty,
-            total_margin=e1.margin,
+            status=initial_status,
+            total_qty=0 if initial_status == TradeStatus.PENDING else e1.qty,
+            total_margin=0 if initial_status == TradeStatus.PENDING else e1.margin,
             avg_price=signal.entry_price,
             current_dca=0,
             max_dca=self.config.max_dca_levels,

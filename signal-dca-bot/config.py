@@ -30,6 +30,8 @@ class BotConfig:
     leverage: int = 20
     equity_pct_per_trade: float = 20.0  # 20% of equity per trade
     max_simultaneous_trades: int = 6
+    e1_limit_order: bool = True         # True = Limit at signal price, False = Market
+    e1_timeout_minutes: int = 10        # Cancel E1 limit if not filled after X minutes
 
     # ── DCA Configuration ──
     # Sizing: exponential doubling (Cornix-style)

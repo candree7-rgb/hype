@@ -153,10 +153,15 @@ class BybitEngine:
         rounded = round(price // tick_size * tick_size, precision)
         return rounded
 
-    def open_trade(self, trade: Trade) -> bool:
-        """Execute E1 market order and place DCA limit orders.
+    def open_trade(self, trade: Trade, use_limit: bool = True) -> bool:
+        """Place E1 order and DCA limit orders.
 
-        Returns True if E1 was successful.
+        Args:
+            trade: Trade object with DCA levels calculated
+            use_limit: True = Limit order at signal price (no slippage)
+                       False = Market order (immediate fill)
+
+        Returns True if E1 order was placed successfully.
         """
         symbol = trade.symbol
 
@@ -174,7 +179,7 @@ class BybitEngine:
         tick_size = info["tick_size"]
         min_qty = info["min_qty"]
 
-        # ── E1: Market order ──
+        # ── E1: Limit order at signal price (or Market) ──
         e1 = trade.dca_levels[0]
         e1_qty = self.round_qty(e1.qty, qty_step)
 
@@ -187,26 +192,65 @@ class BybitEngine:
         side_str = "Buy" if trade.side == "long" else "Sell"
 
         try:
-            result = self.session.place_order(
-                category="linear",
-                symbol=symbol,
-                side=side_str,
-                orderType="Market",
-                qty=str(e1_qty),
-                timeInForce="GTC",
-                orderLinkId=f"{trade.trade_id}_E1",
-            )
-
-            order_id = result["result"]["orderId"]
-            e1.order_id = order_id
-            e1.filled = True
-            logger.info(f"E1 filled: {symbol} {side_str} {e1_qty} | Order: {order_id}")
+            if use_limit:
+                e1_price = self.round_price(trade.signal_entry, tick_size)
+                result = self.session.place_order(
+                    category="linear",
+                    symbol=symbol,
+                    side=side_str,
+                    orderType="Limit",
+                    qty=str(e1_qty),
+                    price=str(e1_price),
+                    timeInForce="GTC",
+                    orderLinkId=f"{trade.trade_id}_E1",
+                )
+                order_id = result["result"]["orderId"]
+                e1.order_id = order_id
+                e1.filled = False  # Not filled yet! Limit order pending
+                logger.info(
+                    f"E1 limit placed: {symbol} {side_str} {e1_qty} @ {e1_price} | "
+                    f"Order: {order_id}"
+                )
+            else:
+                result = self.session.place_order(
+                    category="linear",
+                    symbol=symbol,
+                    side=side_str,
+                    orderType="Market",
+                    qty=str(e1_qty),
+                    timeInForce="GTC",
+                    orderLinkId=f"{trade.trade_id}_E1",
+                )
+                order_id = result["result"]["orderId"]
+                e1.order_id = order_id
+                e1.filled = True
+                logger.info(
+                    f"E1 market filled: {symbol} {side_str} {e1_qty} | "
+                    f"Order: {order_id}"
+                )
 
         except Exception as e:
             logger.error(f"E1 order failed for {symbol}: {e}")
             return False
 
         # ── DCA: Limit orders ──
+        # For limit E1: DCA orders are placed LATER (after E1 confirms fill)
+        # For market E1: place DCA immediately
+        if use_limit and not e1.filled:
+            logger.info(f"DCA orders deferred until E1 fills for {symbol}")
+            return True
+
+        self._place_dca_orders(trade, info)
+        return True
+
+    def _place_dca_orders(self, trade: Trade, info: dict) -> None:
+        """Place all DCA limit orders for a trade."""
+        symbol = trade.symbol
+        side_str = "Buy" if trade.side == "long" else "Sell"
+        qty_step = info["qty_step"]
+        tick_size = info["tick_size"]
+        min_qty = info["min_qty"]
+
         for i in range(1, trade.max_dca + 1):
             if i >= len(trade.dca_levels):
                 break
@@ -242,7 +286,67 @@ class BybitEngine:
             except Exception as e:
                 logger.error(f"DCA{i} order failed for {symbol}: {e}")
 
+    def place_dca_for_trade(self, trade: Trade) -> bool:
+        """Place DCA orders after E1 limit fills. Called by price monitor."""
+        info = self.get_instrument_info(trade.symbol)
+        if not info:
+            return False
+        self._place_dca_orders(trade, info)
         return True
+
+    def check_e1_filled(self, trade: Trade) -> bool:
+        """Check if E1 limit order has been filled."""
+        e1 = trade.dca_levels[0]
+        if e1.filled or not e1.order_id:
+            return e1.filled
+
+        try:
+            result = self.session.get_order_history(
+                category="linear",
+                symbol=trade.symbol,
+                orderId=e1.order_id,
+            )
+            orders = result["result"]["list"]
+            if orders:
+                status = orders[0]["orderStatus"]
+                if status == "Filled":
+                    fill_price = float(orders[0]["avgPrice"])
+                    e1.filled = True
+                    e1.price = fill_price
+                    trade.avg_price = fill_price
+                    trade.total_qty = float(orders[0]["cumExecQty"])
+                    trade.total_margin = e1.margin
+                    logger.info(
+                        f"E1 limit filled: {trade.symbol} @ {fill_price} | "
+                        f"Qty: {trade.total_qty}"
+                    )
+                    return True
+                elif status in ("Cancelled", "Rejected", "Deactivated"):
+                    logger.info(f"E1 limit cancelled/rejected: {trade.symbol}")
+                    e1.order_id = ""
+                    return False
+        except Exception as e:
+            logger.error(f"Check E1 fill failed for {trade.symbol}: {e}")
+
+        return False
+
+    def cancel_e1(self, trade: Trade) -> bool:
+        """Cancel unfilled E1 limit order (timeout)."""
+        e1 = trade.dca_levels[0]
+        if e1.filled or not e1.order_id:
+            return False
+
+        try:
+            self.session.cancel_order(
+                category="linear",
+                symbol=trade.symbol,
+                orderId=e1.order_id,
+            )
+            logger.info(f"E1 limit cancelled (timeout): {trade.symbol}")
+            return True
+        except Exception as e:
+            logger.debug(f"Cancel E1 failed for {trade.symbol}: {e}")
+            return False
 
     def close_partial(self, trade: Trade, qty: float, reason: str) -> bool:
         """Close part of a position (e.g., TP1 50% close).
