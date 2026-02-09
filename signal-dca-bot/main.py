@@ -27,6 +27,7 @@ from bybit_engine import BybitEngine
 from zone_data import (
     ZoneDataManager, CoinZones, calc_smart_dca_levels, calc_swing_zones
 )
+from telegram_listener import TelegramListener
 
 # ── Logging ──
 logging.basicConfig(
@@ -41,6 +42,7 @@ config: BotConfig = load_config()
 trade_mgr: TradeManager = TradeManager(config)
 bybit: BybitEngine = BybitEngine(config)
 zone_mgr: ZoneDataManager = ZoneDataManager(config.supabase_url, config.supabase_key)
+tg_listener: TelegramListener | None = None
 monitor_task: asyncio.Task | None = None
 zone_refresh_task: asyncio.Task | None = None
 
@@ -353,12 +355,40 @@ async def zone_refresh_loop():
 # ▌ FASTAPI APP
 # ══════════════════════════════════════════════════════════════════════════
 
+async def handle_tg_close(close_cmd: dict):
+    """Handle a close signal from Telegram."""
+    symbol = close_cmd["symbol"]
+    for trade in trade_mgr.active_trades:
+        if trade.symbol == symbol or trade.symbol_display == close_cmd.get("symbol_display", ""):
+            price = bybit.get_ticker_price(trade.symbol)
+            success = bybit.close_full(trade, "TG close signal")
+            if success and price:
+                qty = trade.remaining_qty if trade.tp1_hit else trade.total_qty
+                if trade.side == "long":
+                    pnl = (price - trade.avg_price) * qty
+                else:
+                    pnl = (trade.avg_price - price) * qty
+                trade.realized_pnl += pnl
+                trade_mgr.close_trade(trade, price, trade.realized_pnl, "TG close signal")
+                logger.info(f"TG close executed: {symbol} PnL ${pnl:+.2f}")
+            return
+    logger.info(f"TG close: no active trade for {symbol}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global monitor_task, zone_refresh_task
+    global monitor_task, zone_refresh_task, tg_listener
 
     logger.info("Signal DCA Bot v2 starting...")
     config.print_summary()
+
+    # Start Telegram listener (if configured)
+    tg_listener = TelegramListener(
+        config,
+        on_signal=add_signal_to_batch,
+        on_close=handle_tg_close,
+    )
+    await tg_listener.start()
 
     monitor_task = asyncio.create_task(price_monitor())
     zone_refresh_task = asyncio.create_task(zone_refresh_loop())
@@ -369,6 +399,8 @@ async def lifespan(app: FastAPI):
         monitor_task.cancel()
     if zone_refresh_task:
         zone_refresh_task.cancel()
+    if tg_listener:
+        await tg_listener.stop()
     logger.info("Bot stopped")
 
 

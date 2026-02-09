@@ -25,7 +25,8 @@ class BotConfig:
     # ── Telegram ──
     telegram_api_id: int = 0
     telegram_api_hash: str = ""
-    telegram_channel: str = ""  # VIP Club channel name or ID
+    telegram_string_session: str = ""  # Generated via: python telegram_listener.py
+    telegram_channel: str = ""  # VIP Club channel name, username, or numeric ID
 
     # ── Capital & Risk ──
     leverage: int = 20
@@ -172,6 +173,7 @@ def load_config() -> BotConfig:
         bybit_testnet=os.getenv("BYBIT_TESTNET", "true").lower() == "true",
         telegram_api_id=int(os.getenv("TELEGRAM_API_ID", "0")),
         telegram_api_hash=os.getenv("TELEGRAM_API_HASH", ""),
+        telegram_string_session=os.getenv("TELEGRAM_STRING_SESSION", ""),
         telegram_channel=os.getenv("TELEGRAM_CHANNEL", ""),
         leverage=int(os.getenv("LEVERAGE", "20")),
         equity_pct_per_trade=float(os.getenv("EQUITY_PCT", "20")),
