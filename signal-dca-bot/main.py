@@ -1,25 +1,19 @@
 """
-Signal DCA Bot v1 - Main Application
-
-Telegram Signal → Bybit DCA Trading Bot
+Signal DCA Bot v2 - Main Application
 
 Architecture:
-1. Telegram Listener → parses VIP Club signals
-2. Trade Manager → slot management, DCA logic, TP/trail
-3. Bybit Engine → executes orders on Bybit
-4. Price Monitor → polls prices, checks TP/DCA/Stop
-5. Dashboard → /status endpoint for monitoring
-
-Flow:
-  Signal received → parse → check slot → open E1 + DCA limits
-  → poll prices → TP1 hit → close 50% → trail rest
-  → DCA triggered → update avg → trail to BE
-  → all closed → slot free → next signal
+  1. Signal in (webhook/telegram) → parse → batch buffer → execute
+  2. Price Monitor polls every 2s:
+     - PENDING: check E1 fill, timeout
+     - OPEN (E1 only): check TP1 → close 50%, trail rest
+     - TRAILING: check trail callback (floor=TP1)
+     - DCA_ACTIVE: check hard SL, check BE-trail, check next DCA
+     - BE_TRAILING: check trail callback from avg
+  3. Zone Refresh every 15min: auto-calc swing H/L for active symbols
 """
 
 import asyncio
 import logging
-import json
 import time
 from contextlib import asynccontextmanager
 
@@ -30,7 +24,9 @@ from config import load_config, BotConfig
 from telegram_parser import parse_signal, Signal
 from trade_manager import TradeManager, TradeStatus
 from bybit_engine import BybitEngine
-from zone_data import ZoneDataManager, CoinZones, calc_smart_dca_levels
+from zone_data import (
+    ZoneDataManager, CoinZones, calc_smart_dca_levels, calc_swing_zones
+)
 
 # ── Logging ──
 logging.basicConfig(
@@ -44,19 +40,16 @@ logger = logging.getLogger("main")
 config: BotConfig = load_config()
 trade_mgr: TradeManager = TradeManager(config)
 bybit: BybitEngine = BybitEngine(config)
-zone_mgr: ZoneDataManager = ZoneDataManager()
+zone_mgr: ZoneDataManager = ZoneDataManager(config.supabase_url, config.supabase_key)
 monitor_task: asyncio.Task | None = None
-batch_task: asyncio.Task | None = None
+zone_refresh_task: asyncio.Task | None = None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 # ▌ SIGNAL BATCH BUFFER
-# ══════════════════════════════════════════════════════════════════════════════
-# Signals come in batches (4-5 at once). We buffer for a few seconds,
-# then sort by priority (highest signal leverage = most stable = best for DCA)
-# and only take as many as we have free slots.
+# ══════════════════════════════════════════════════════════════════════════
 
-BATCH_BUFFER_SECONDS = 5  # Wait 5s to collect all signals from a batch
+BATCH_BUFFER_SECONDS = 5
 
 signal_buffer: list[Signal] = []
 buffer_lock = asyncio.Lock()
@@ -64,14 +57,10 @@ _batch_flush_handle: asyncio.TimerHandle | None = None
 
 
 async def add_signal_to_batch(signal: Signal) -> dict:
-    """Add signal to batch buffer. Returns immediately.
-
-    The batch will be processed after BATCH_BUFFER_SECONDS.
-    """
+    """Add signal to batch buffer. Processes after BATCH_BUFFER_SECONDS."""
     global _batch_flush_handle
 
     async with buffer_lock:
-        # Check if already in buffer (duplicate)
         for s in signal_buffer:
             if s.symbol == signal.symbol:
                 return {"status": "duplicate", "symbol": signal.symbol_display}
@@ -84,7 +73,6 @@ async def add_signal_to_batch(signal: Signal) -> dict:
             f"Buffer: {count} signals, flushing in {BATCH_BUFFER_SECONDS}s"
         )
 
-    # Schedule batch flush (reset timer with each new signal)
     loop = asyncio.get_event_loop()
     if _batch_flush_handle:
         _batch_flush_handle.cancel()
@@ -97,14 +85,13 @@ async def add_signal_to_batch(signal: Signal) -> dict:
 
 
 async def flush_batch():
-    """Process the buffered batch: sort by priority, take top N."""
+    """Process buffered batch: sort by priority, take top N."""
     global _batch_flush_handle
     _batch_flush_handle = None
 
     async with buffer_lock:
         if not signal_buffer:
             return
-
         batch = list(signal_buffer)
         signal_buffer.clear()
 
@@ -113,9 +100,7 @@ async def flush_batch():
         logger.info(f"Batch of {len(batch)} signals: NO free slots, all rejected")
         return
 
-    # Sort by signal leverage DESCENDING (highest = most stable = best for DCA)
     batch.sort(key=lambda s: s.signal_leverage, reverse=True)
-
     selected = batch[:free_slots]
     rejected = batch[free_slots:]
 
@@ -125,13 +110,6 @@ async def flush_batch():
         f"Priority: {', '.join(f'{s.symbol_display}({s.signal_leverage}x)' for s in selected)}"
     )
 
-    if rejected:
-        logger.info(
-            f"Rejected (no slots): "
-            f"{', '.join(f'{s.symbol_display}({s.signal_leverage}x)' for s in rejected)}"
-        )
-
-    # Execute selected signals
     results = []
     for signal in selected:
         result = await execute_signal(signal)
@@ -142,13 +120,11 @@ async def flush_batch():
 
 async def execute_signal(signal: Signal) -> dict:
     """Execute a single signal (open trade on Bybit)."""
-    # Check slot availability (re-check, might have changed)
     can_open, reason = trade_mgr.can_open_trade(signal.symbol)
     if not can_open:
         logger.info(f"Signal rejected: {signal.symbol_display} | {reason}")
         return {"status": "rejected", "reason": reason}
 
-    # Get current equity
     equity = bybit.get_equity()
     if equity <= 0:
         logger.error("Cannot get equity, skipping signal")
@@ -156,22 +132,35 @@ async def execute_signal(signal: Signal) -> dict:
 
     logger.info(f"Current equity: ${equity:.2f}")
 
-    # Create trade in manager
+    # Create trade
     trade = trade_mgr.create_trade(signal, equity)
 
-    # Zone-snap DCA levels if zone data available
-    zones = zone_mgr.get_zones(signal.symbol)
-    if zones and zones.is_valid:
-        smart_levels = calc_smart_dca_levels(
-            signal.entry_price, config.dca_spacing_pct, zones, signal.side
-        )
-        # Update DCA prices (skip E1 at index 0)
-        for i, (price, source) in enumerate(smart_levels):
-            if i < len(trade.dca_levels):
-                if source != "entry" and source != "fixed":
+    # Zone-snap DCA levels
+    if config.zone_snap_enabled:
+        zones = zone_mgr.get_zones(signal.symbol)
+
+        # Fallback: auto-calculate if no zones in cache/Supabase
+        if (zones is None or not zones.is_valid):
+            candles = bybit.get_klines(
+                signal.symbol, config.zone_candle_interval, config.zone_candle_count
+            )
+            if candles:
+                auto_zones = calc_swing_zones(candles)
+                if auto_zones:
+                    auto_zones.symbol = signal.symbol
+                    zone_mgr.update_from_auto_calc(signal.symbol, auto_zones)
+                    zones = auto_zones
+                    logger.info(f"Auto-zones calculated for {signal.symbol}")
+
+        if zones and zones.is_valid:
+            smart_levels = calc_smart_dca_levels(
+                signal.entry_price, config.dca_spacing_pct, zones, signal.side,
+                config.zone_snap_threshold_pct,
+            )
+            for i, (price, source) in enumerate(smart_levels):
+                if i < len(trade.dca_levels) and source not in ("entry", "fixed"):
                     old_price = trade.dca_levels[i].price
                     trade.dca_levels[i].price = price
-                    # Recalculate qty at new price
                     trade.dca_levels[i].qty = (
                         trade.dca_levels[i].margin * config.leverage / price
                     )
@@ -187,8 +176,7 @@ async def execute_signal(signal: Signal) -> dict:
 
     logger.info(
         f"Trade opened: {signal.side.upper()} {signal.symbol_display} | "
-        f"E1 @ {signal.entry_price} | Sig Lev: {signal.signal_leverage}x | "
-        f"Slots: {trade_mgr.active_count}/{config.max_simultaneous_trades}"
+        f"E1 @ {signal.entry_price} | Slots: {trade_mgr.active_count}/{config.max_simultaneous_trades}"
     )
 
     return {
@@ -197,17 +185,16 @@ async def execute_signal(signal: Signal) -> dict:
         "symbol": signal.symbol_display,
         "side": signal.side,
         "e1_price": signal.entry_price,
-        "signal_leverage": signal.signal_leverage,
         "slots_used": trade_mgr.active_count,
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ▌ PRICE MONITOR (polls prices, checks TP/DCA/Stop)
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
+# ▌ PRICE MONITOR
+# ══════════════════════════════════════════════════════════════════════════
 
 async def price_monitor():
-    """Background task: poll prices and check TP/DCA/Stop for all active trades."""
+    """Background task: poll prices and manage all trade exits."""
     logger.info("Price monitor started")
 
     while True:
@@ -221,40 +208,64 @@ async def price_monitor():
                 if trade.status == TradeStatus.CLOSED:
                     continue
 
-                # ── 0. Check pending E1 limit orders ──
+                # ── 0. PENDING: check E1 limit fill / timeout ──
                 if trade.status == TradeStatus.PENDING:
                     filled = bybit.check_e1_filled(trade)
                     if filled:
                         trade.status = TradeStatus.OPEN
-                        # Now place DCA limit orders
                         bybit.place_dca_for_trade(trade)
                         logger.info(f"E1 filled → OPEN: {trade.symbol_display}")
                     else:
-                        # Check timeout
                         age_min = (time.time() - trade.opened_at) / 60
                         if age_min >= config.e1_timeout_minutes:
                             bybit.cancel_e1(trade)
-                            trade_mgr.close_trade(trade, 0, 0,
-                                f"E1 timeout ({config.e1_timeout_minutes}min)")
-                            logger.info(
-                                f"E1 timeout: {trade.symbol_display} | "
-                                f"Slot freed after {age_min:.0f}min"
+                            trade_mgr.close_trade(
+                                trade, 0, 0,
+                                f"E1 timeout ({config.e1_timeout_minutes}min)"
                             )
                     await asyncio.sleep(0.2)
                     continue
 
+                # Get current price
                 price = bybit.get_ticker_price(trade.symbol)
                 if price is None:
                     continue
 
-                # ── 1. Check TP1 ──
-                tp_action = trade_mgr.check_tp(trade, price)
+                # ── 1. HARD SL (highest priority, DCA mode) ──
+                sl_action = trade_mgr.check_hard_sl(trade, price)
+                if sl_action:
+                    success = bybit.close_full(trade, sl_action["reason"])
+                    if success:
+                        qty = sl_action["qty"]
+                        if trade.side == "long":
+                            pnl = (price - trade.avg_price) * qty
+                        else:
+                            pnl = (trade.avg_price - price) * qty
+                        trade.realized_pnl += pnl
+                        trade_mgr.close_trade(trade, price, trade.realized_pnl, sl_action["reason"])
+                    continue
+
+                # ── 2. BE-TRAIL (DCA mode, price returned to avg) ──
+                be_action = trade_mgr.check_be_trail(trade, price)
+                if be_action:
+                    success = bybit.close_full(trade, be_action["reason"])
+                    if success:
+                        qty = be_action["qty"]
+                        if trade.side == "long":
+                            pnl = (price - trade.avg_price) * qty
+                        else:
+                            pnl = (trade.avg_price - price) * qty
+                        trade.realized_pnl += pnl
+                        trade_mgr.close_trade(trade, price, trade.realized_pnl, be_action["reason"])
+                    continue
+
+                # ── 3. TP1 (E1-only, no DCA) ──
+                tp_action = trade_mgr.check_tp1(trade, price)
                 if tp_action:
                     qty = tp_action["qty"]
                     success = bybit.close_partial(trade, qty, "TP1")
                     if success:
                         trade_mgr.record_tp1(trade, qty, price)
-                        # Calculate partial PnL
                         if trade.side == "long":
                             pnl = (price - trade.avg_price) * qty
                         else:
@@ -262,54 +273,32 @@ async def price_monitor():
                         trade.realized_pnl += pnl
                     continue
 
-                # ── 2. Check trailing (after TP1) ──
+                # ── 4. TRAILING (after TP1, E1-only) ──
                 trail_action = trade_mgr.check_trailing(trade, price)
                 if trail_action:
                     success = bybit.close_full(trade, trail_action["reason"])
                     if success:
-                        remaining = trade.remaining_qty
+                        qty = trail_action["qty"]
                         if trade.side == "long":
-                            pnl = (price - trade.avg_price) * remaining
+                            pnl = (price - trade.avg_price) * qty
                         else:
-                            pnl = (trade.avg_price - price) * remaining
+                            pnl = (trade.avg_price - price) * qty
                         trade.realized_pnl += pnl
                         trade_mgr.close_trade(trade, price, trade.realized_pnl, trail_action["reason"])
                     continue
 
-                # ── 3. Check DCA fill ──
-                # Note: DCA limit orders are on Bybit, but we also check here
-                # to update our tracking if they've been filled
+                # ── 5. DCA TRIGGER ──
                 dca_action = trade_mgr.check_dca_trigger(trade, price)
                 if dca_action:
-                    # The limit order should fill on Bybit side
-                    # We just update our tracking
                     level = dca_action["level"]
                     trade_mgr.fill_dca(trade, level, price)
-
-                    # Recalculate TP after DCA (avg changed)
-                    # Cancel old TP orders if needed, new TP from new avg
                     logger.info(
                         f"DCA{level} triggered: {trade.symbol_display} @ {price:.4f} | "
-                        f"New avg: {trade.avg_price:.4f}"
+                        f"New avg: {trade.avg_price:.4f} | SL: {trade.hard_sl_price:.4f}"
                     )
 
-                # ── 4. Check stop (after all DCAs) ──
-                stop_action = trade_mgr.check_stop(trade, price)
-                if stop_action:
-                    success = bybit.close_full(trade, stop_action["reason"])
-                    if success:
-                        total = trade.total_qty
-                        if trade.side == "long":
-                            pnl = (price - trade.avg_price) * total
-                        else:
-                            pnl = (trade.avg_price - price) * total
-                        trade.realized_pnl += pnl
-                        trade_mgr.close_trade(trade, price, trade.realized_pnl, stop_action["reason"])
-
-                # Small delay between trades to avoid rate limits
                 await asyncio.sleep(0.2)
 
-            # Poll interval
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -317,38 +306,78 @@ async def price_monitor():
             await asyncio.sleep(5)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
+# ▌ ZONE REFRESH (auto-calc swing zones for active symbols)
+# ══════════════════════════════════════════════════════════════════════════
+
+async def zone_refresh_loop():
+    """Background: refresh auto-calc zones every 15min for active symbols."""
+    logger.info("Zone refresh loop started")
+
+    while True:
+        try:
+            await asyncio.sleep(config.zone_refresh_minutes * 60)
+
+            if not config.zone_snap_enabled:
+                continue
+
+            symbols = list(set(t.symbol for t in trade_mgr.active_trades))
+            if not symbols:
+                continue
+
+            logger.info(f"Zone refresh: {len(symbols)} active symbols")
+
+            for symbol in symbols:
+                # Skip if recent LuxAlgo zones exist
+                existing = zone_mgr.get_zones(symbol)
+                if existing and existing.is_valid and existing.source == "luxalgo":
+                    continue
+
+                candles = bybit.get_klines(
+                    symbol, config.zone_candle_interval, config.zone_candle_count
+                )
+                if candles:
+                    zones = calc_swing_zones(candles)
+                    if zones:
+                        zones.symbol = symbol
+                        zone_mgr.update_from_auto_calc(symbol, zones)
+
+                await asyncio.sleep(0.5)  # Rate limit
+
+        except Exception as e:
+            logger.error(f"Zone refresh error: {e}", exc_info=True)
+            await asyncio.sleep(60)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ▌ FASTAPI APP
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start background tasks on startup."""
-    global monitor_task
+    global monitor_task, zone_refresh_task
 
-    logger.info("Signal DCA Bot v1 starting...")
+    logger.info("Signal DCA Bot v2 starting...")
     config.print_summary()
 
-    # Start price monitor
     monitor_task = asyncio.create_task(price_monitor())
+    zone_refresh_task = asyncio.create_task(zone_refresh_loop())
 
     yield
 
-    # Shutdown
     if monitor_task:
         monitor_task.cancel()
+    if zone_refresh_task:
+        zone_refresh_task.cancel()
     logger.info("Bot stopped")
 
 
-app = FastAPI(title="Signal DCA Bot v1", lifespan=lifespan)
+app = FastAPI(title="Signal DCA Bot v2", lifespan=lifespan)
 
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    """Receive signal via webhook (manual or from Telegram forwarder).
-
-    Accepts both JSON and plain text.
-    """
+    """Receive signal via webhook."""
     content_type = request.headers.get("content-type", "")
 
     if "json" in content_type:
@@ -366,7 +395,6 @@ async def webhook(request: Request):
     if signal is None:
         return JSONResponse({"status": "ignored", "reason": "not a valid signal"})
 
-    # Add to batch buffer (processes after 5s delay to collect whole batch)
     result = await add_signal_to_batch(signal)
     return JSONResponse(result)
 
@@ -379,11 +407,11 @@ async def close_position(symbol: str):
             price = bybit.get_ticker_price(trade.symbol)
             success = bybit.close_full(trade, "Manual close")
             if success and price:
-                total = trade.total_qty
+                qty = trade.remaining_qty if trade.tp1_hit else trade.total_qty
                 if trade.side == "long":
-                    pnl = (price - trade.avg_price) * total
+                    pnl = (price - trade.avg_price) * qty
                 else:
-                    pnl = (trade.avg_price - price) * total
+                    pnl = (trade.avg_price - price) * qty
                 trade.realized_pnl += pnl
                 trade_mgr.close_trade(trade, price, trade.realized_pnl, "Manual close")
                 return {"status": "closed", "symbol": symbol, "pnl": f"${pnl:+.2f}"}
@@ -394,16 +422,15 @@ async def close_position(symbol: str):
 
 @app.post("/flush")
 async def flush():
-    """Manually flush the signal buffer (skip waiting)."""
+    """Manually flush the signal buffer."""
     results = await flush_batch()
     return JSONResponse({"status": "flushed", "results": results or []})
 
 
 @app.post("/zones/{symbol}")
 async def update_zones(symbol: str, request: Request):
-    """Update reversal zone levels for a coin.
+    """Update reversal zone levels (from TradingView webhook or manual).
 
-    Can be called by TradingView webhook or manually.
     JSON body: {"s1": 111.5, "s2": 108.2, "s3": 105.0, "r1": 115.8, "r2": 118.5, "r3": 121.0}
     """
     body = await request.json()
@@ -417,14 +444,18 @@ async def update_zones(symbol: str, request: Request):
         r1=float(body.get("r1", 0) or 0),
         r2=float(body.get("r2", 0) or 0),
         r3=float(body.get("r3", 0) or 0),
+        source=body.get("source", "luxalgo"),
     )
     zone_mgr.update_zones(symbol_clean, zones)
 
     return JSONResponse({
         "status": "ok",
         "symbol": symbol_clean,
-        "zones": {"s1": zones.s1, "s2": zones.s2, "s3": zones.s3,
-                  "r1": zones.r1, "r2": zones.r2, "r3": zones.r3},
+        "source": zones.source,
+        "zones": {
+            "s1": zones.s1, "s2": zones.s2, "s3": zones.s3,
+            "r1": zones.r1, "r2": zones.r2, "r3": zones.r3,
+        },
     })
 
 
@@ -436,6 +467,7 @@ async def list_zones():
         result[symbol] = {
             "s1": z.s1, "s2": z.s2, "s3": z.s3,
             "r1": z.r1, "r2": z.r2, "r3": z.r3,
+            "source": z.source,
             "age_min": round(z.age_minutes, 1),
             "valid": z.is_valid,
         }
@@ -448,7 +480,6 @@ async def status():
     data = trade_mgr.get_dashboard_data()
     data["buffer"] = len(signal_buffer)
 
-    # Add equity if connected
     try:
         equity = bybit.get_equity()
         data["equity"] = f"${equity:,.2f}"
@@ -460,7 +491,10 @@ async def status():
         "equity_pct": config.equity_pct_per_trade,
         "max_trades": config.max_simultaneous_trades,
         "dca_levels": config.max_dca_levels,
+        "dca_mults": config.dca_multipliers[:config.max_dca_levels + 1],
         "tp1_pct": config.tp1_pct,
+        "hard_sl_pct": config.hard_sl_pct,
+        "zones": config.zone_snap_enabled,
         "testnet": config.bybit_testnet,
     }
 
@@ -469,11 +503,11 @@ async def status():
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    """Simple HTML dashboard."""
+    """HTML dashboard."""
     return """
 <!DOCTYPE html>
 <html><head>
-<title>Signal DCA Bot v1</title>
+<title>Signal DCA Bot v2</title>
 <meta charset="utf-8">
 <meta http-equiv="refresh" content="10">
 <style>
@@ -485,10 +519,11 @@ async def dashboard():
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid #21262d; }
     th { color: #8b949e; }
     .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
-    .status-open { background: #0d419d; } .status-dca { background: #9a6700; } .status-trailing { background: #1a7f37; }
+    .status-open { background: #0d419d; } .status-dca { background: #9a6700; }
+    .status-trailing { background: #1a7f37; } .status-be_trail { background: #1a7f37; }
 </style>
 </head><body>
-<h1>Signal DCA Bot v1</h1>
+<h1>Signal DCA Bot v2</h1>
 <div id="dashboard">Loading...</div>
 <script>
 async function update() {
@@ -496,37 +531,35 @@ async function update() {
     const d = await res.json();
     let html = '';
 
-    // Config
     html += '<div class="card">';
-    html += `<b class="blue">Config:</b> ${d.config.leverage}x | ${d.config.equity_pct}% per trade | Max ${d.config.max_trades} trades | ${d.config.dca_levels} DCA | TP1 ${d.config.tp1_pct}%`;
-    html += ` | ${d.config.testnet ? '<span class="yellow">TESTNET</span>' : '<span class="red">LIVE</span>'}`;
+    html += `<b class="blue">Config:</b> ${d.config.leverage}x | ${d.config.equity_pct}% per trade | `;
+    html += `Max ${d.config.max_trades} trades | ${d.config.dca_levels} DCA ${JSON.stringify(d.config.dca_mults)} | `;
+    html += `TP1 ${d.config.tp1_pct}% | SL avg-${d.config.hard_sl_pct}% | `;
+    html += `Zones: ${d.config.zones ? 'ON' : 'OFF'} | `;
+    html += d.config.testnet ? '<span class="yellow">TESTNET</span>' : '<span class="red">LIVE</span>';
     html += ` | Equity: <b>${d.equity}</b>`;
     html += '</div>';
 
-    // Stats
     html += '<div class="card">';
     html += `<b class="blue">Stats:</b> Slots: <b>${d.slots}</b> | `;
     html += `<span class="green">${d.stats.wins}W</span> / <span class="red">${d.stats.losses}L</span> / ${d.stats.breakeven}BE | `;
     html += `WR: <b>${d.stats.win_rate}</b> | PnL: <b class="${d.stats.total_pnl.includes('-') ? 'red' : 'green'}">${d.stats.total_pnl}</b>`;
     html += '</div>';
 
-    // Active Trades
     if (d.active_trades.length > 0) {
         html += '<div class="card"><b class="blue">Active Trades:</b>';
-        html += '<table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Avg</th><th>DCA</th><th>Margin</th><th>Status</th><th>Age</th></tr>';
+        html += '<table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Avg</th><th>DCA</th><th>SL</th><th>BE-Trail</th><th>Margin</th><th>Status</th><th>Age</th></tr>';
         for (const t of d.active_trades) {
-            const sideClass = t.side === 'long' ? 'green' : 'red';
-            const statusClass = t.status === 'open' ? 'status-open' : t.status === 'dca' ? 'status-dca' : 'status-trailing';
-            html += `<tr>
-                <td><b>${t.symbol}</b></td>
-                <td class="${sideClass}">${t.side.toUpperCase()}</td>
-                <td>${t.entry}</td>
-                <td>${t.avg}</td>
-                <td>${t.dca}</td>
-                <td>${t.margin}</td>
-                <td><span class="status ${statusClass}">${t.status}${t.tp1_hit ? ' TP1✓' : ''}</span></td>
-                <td>${t.age}</td>
-            </tr>`;
+            const sc = t.side === 'long' ? 'green' : 'red';
+            const stc = 'status-' + t.status;
+            html += '<tr>';
+            html += `<td><b>${t.symbol}</b></td>`;
+            html += `<td class="${sc}">${t.side.toUpperCase()}</td>`;
+            html += `<td>${t.entry}</td><td>${t.avg}</td>`;
+            html += `<td>${t.dca}</td><td>${t.sl}</td><td>${t.be_trail}</td>`;
+            html += `<td>${t.margin}</td>`;
+            html += `<td><span class="status ${stc}">${t.status}${t.tp1_hit ? ' TP1' : ''}</span></td>`;
+            html += `<td>${t.age}</td></tr>`;
         }
         html += '</table></div>';
     } else {
@@ -541,14 +574,14 @@ setInterval(update, 10000);
 </body></html>"""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 # ▌ ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import uvicorn
 
-    logger.info("Starting Signal DCA Bot v1...")
+    logger.info("Starting Signal DCA Bot v2...")
     uvicorn.run(
         "main:app",
         host=config.host,

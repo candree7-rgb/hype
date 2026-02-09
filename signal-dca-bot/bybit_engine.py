@@ -480,6 +480,39 @@ class BybitEngine:
             logger.error(f"Get position failed for {symbol}: {e}")
             return None
 
+    def get_klines(self, symbol: str, interval: str = "15", limit: int = 100) -> list[dict]:
+        """Fetch OHLC candles from Bybit.
+
+        Args:
+            symbol: e.g. "BTCUSDT"
+            interval: "1", "5", "15", "60", "240", "D"
+            limit: Number of candles (max 200)
+
+        Returns:
+            List of {"open": f, "high": f, "low": f, "close": f} oldest→newest
+        """
+        try:
+            result = self.session.get_kline(
+                category="linear",
+                symbol=symbol,
+                interval=interval,
+                limit=limit,
+            )
+            raw = result["result"]["list"]
+            # Bybit returns newest first, reverse for oldest→newest
+            candles = []
+            for c in reversed(raw):
+                candles.append({
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                })
+            return candles
+        except Exception as e:
+            logger.error(f"Failed to get klines for {symbol}: {e}")
+            return []
+
     def get_open_orders(self, symbol: str) -> list[dict]:
         """Get all open orders for a symbol."""
         try:
