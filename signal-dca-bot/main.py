@@ -343,13 +343,81 @@ async def zone_refresh_loop():
                     zones = calc_swing_zones(candles)
                     if zones:
                         zones.symbol = symbol
-                        zone_mgr.update_from_auto_calc(symbol, zones)
+                        updated = zone_mgr.update_from_auto_calc(symbol, zones)
+                        if updated:
+                            await resnap_active_dcas(symbol)
 
                 await asyncio.sleep(0.5)  # Rate limit
 
         except Exception as e:
             logger.error(f"Zone refresh error: {e}", exc_info=True)
             await asyncio.sleep(60)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ▌ DCA RE-SNAP (dynamic zone tracking)
+# ══════════════════════════════════════════════════════════════════════════
+
+MIN_RESNAP_PCT = 0.3  # Only move DCA if zone shifted > 0.3%
+
+async def resnap_active_dcas(symbol: str):
+    """Re-snap unfilled DCA orders to updated zones for a symbol.
+
+    Called after /zones/push or zone_refresh_loop updates zone data.
+    Only moves orders if the new zone price differs by > MIN_RESNAP_PCT.
+    """
+    if not config.zone_snap_enabled:
+        return
+
+    zones = zone_mgr.get_zones(symbol)
+    if not zones or not zones.is_valid:
+        return
+
+    for trade in trade_mgr.active_trades:
+        if trade.symbol != symbol:
+            continue
+
+        # Re-calculate smart DCA levels with fresh zones
+        smart_levels = calc_smart_dca_levels(
+            trade.signal_entry, config.dca_spacing_pct, zones, trade.side,
+            config.zone_snap_threshold_pct,
+        )
+
+        for i, (new_price, source) in enumerate(smart_levels):
+            if i == 0:
+                continue  # Skip E1
+            if i >= len(trade.dca_levels):
+                break
+
+            dca = trade.dca_levels[i]
+
+            # Skip already filled DCAs
+            if dca.filled:
+                continue
+
+            # Skip if no order on Bybit
+            if not dca.order_id:
+                continue
+
+            # Skip fixed-price (not zone-snapped)
+            if source in ("entry", "fixed"):
+                continue
+
+            # Check if price actually changed significantly
+            old_price = dca.price
+            pct_change = abs(new_price - old_price) / old_price * 100
+            if pct_change < MIN_RESNAP_PCT:
+                continue
+
+            # Amend the order on Bybit
+            success = bybit.amend_order_price(trade.symbol, dca.order_id, new_price)
+            if success:
+                dca.price = new_price
+                dca.qty = dca.margin * config.leverage / new_price
+                logger.info(
+                    f"DCA{i} re-snapped: {trade.symbol_display} | "
+                    f"{old_price:.4f} → {new_price:.4f} ({source}, {pct_change:.1f}% shift)"
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -473,7 +541,8 @@ async def push_zones(request: Request):
 
     TradingView alert format:
       {"symbol":"{{ticker}}","s1":{{plot("RZ S1 Band")}},"r1":{{plot("RZ R1 Band")}},
-       "r2":{{plot("RZ R2 Band")}},"r3":{{plot("RZ R3 Band")}},"rz_avg":{{plot_18}}}
+       "r2":{{plot("RZ R2 Band")}},"r3":{{plot("RZ R3 Band")}},
+       "rz_avg":{{plot("Reversal Zones Average")}}}
     """
     import json as json_lib
 
@@ -534,6 +603,9 @@ async def push_zones(request: Request):
         f"R: {zones.r1:.4f}/{zones.r2:.4f}/{zones.r3:.4f}"
         + (f" | avg: {rz_avg:.4f}" if rz_avg > 0 else "")
     )
+
+    # Re-snap any active DCA orders to updated zones
+    await resnap_active_dcas(symbol_clean)
 
     return JSONResponse({
         "status": "ok",

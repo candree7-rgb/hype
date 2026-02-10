@@ -513,6 +513,30 @@ class BybitEngine:
             logger.error(f"Failed to get klines for {symbol}: {e}")
             return []
 
+    def amend_order_price(self, symbol: str, order_id: str, new_price: float) -> bool:
+        """Amend an existing order's price (e.g., re-snap DCA to new zone).
+
+        Uses Bybit's amend_order API - faster than cancel+replace.
+        """
+        info = self.get_instrument_info(symbol)
+        if not info:
+            return False
+
+        rounded_price = self.round_price(new_price, info["tick_size"])
+
+        try:
+            self.session.amend_order(
+                category="linear",
+                symbol=symbol,
+                orderId=order_id,
+                price=str(rounded_price),
+            )
+            logger.info(f"Order amended: {order_id} → new price {rounded_price}")
+            return True
+        except Exception as e:
+            logger.error(f"Amend order failed for {order_id}: {e}")
+            return False
+
     def get_open_orders(self, symbol: str) -> list[dict]:
         """Get all open orders for a symbol."""
         try:
