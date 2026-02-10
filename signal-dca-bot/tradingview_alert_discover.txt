@@ -1,0 +1,18 @@
+TradingView Alert Template - Plot Discovery
+=============================================
+
+Use this as the alert MESSAGE in TradingView on the LuxAlgo indicator.
+URL: https://hy-production-2208.up.railway.app/zones/discover
+
+Copy everything between the --- lines:
+
+---
+{"symbol":"{{ticker}}","s1":{{plot("RZ S1 Band")}},"p0":{{plot_0}},"p1":{{plot_1}},"p2":{{plot_2}},"p3":{{plot_3}},"p4":{{plot_4}},"p5":{{plot_5}},"p6":{{plot_6}},"p7":{{plot_7}},"p8":{{plot_8}},"p9":{{plot_9}},"p10":{{plot_10}},"p11":{{plot_11}},"p12":{{plot_12}},"p13":{{plot_13}},"p14":{{plot_14}},"p15":{{plot_15}},"p16":{{plot_16}},"p17":{{plot_17}},"p18":{{plot_18}},"p19":{{plot_19}}}
+---
+
+After the alert fires once, check Railway logs.
+The endpoint logs every plot value + auto-identifies which ones look like support/resistance zones.
+
+Once identified:
+- Update the main /zones/push alert to use the correct plot indices for S2/S3
+- Delete this discovery alert

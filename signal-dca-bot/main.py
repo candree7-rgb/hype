@@ -535,6 +535,69 @@ async def push_zones(request: Request):
     })
 
 
+@app.post("/zones/discover")
+async def discover_plots(request: Request):
+    """Diagnostic: receive all 20 LuxAlgo plot values to identify S2/S3.
+
+    TradingView alert sends plot_0 through plot_19 + known S1.
+    Logs all values so you can identify which index = which zone.
+    """
+    import json as json_lib
+
+    raw = await request.body()
+    text = raw.decode("utf-8").strip()
+
+    try:
+        body = json_lib.loads(text)
+    except (json_lib.JSONDecodeError, ValueError):
+        logger.warning(f"Discover: invalid JSON: {text[:300]}")
+        return JSONResponse(
+            {"status": "error", "reason": "invalid JSON"}, status_code=400
+        )
+
+    symbol = body.get("symbol", "?")
+    s1_known = body.get("s1", "?")
+
+    # Log all plot values in a readable format
+    logger.info(f"=== PLOT DISCOVERY: {symbol} ===")
+    logger.info(f"  Known S1 = {s1_known}")
+
+    plot_values = {}
+    for i in range(20):
+        key = f"p{i}"
+        val = body.get(key, "missing")
+        plot_values[key] = val
+        logger.info(f"  plot_{i} = {val}")
+
+    # Try to identify which plots match zone prices
+    # S1 is known, so look for values near S1 that could be S2/S3
+    try:
+        s1_f = float(s1_known)
+        matches = []
+        for key, val in plot_values.items():
+            try:
+                v = float(val)
+                if v > 0 and v != s1_f:
+                    pct_diff = ((v - s1_f) / s1_f) * 100
+                    matches.append((key, v, pct_diff))
+            except (ValueError, TypeError):
+                pass
+        matches.sort(key=lambda x: x[1])
+        logger.info(f"  --- Non-zero values sorted by price ---")
+        for key, val, pct in matches:
+            label = "SUPPORT?" if val < s1_f else "RESIST?"
+            logger.info(f"  {key} = {val} ({pct:+.2f}% from S1) [{label}]")
+    except (ValueError, TypeError):
+        pass
+
+    return JSONResponse({
+        "status": "ok",
+        "symbol": symbol,
+        "s1": s1_known,
+        "plots": plot_values,
+    })
+
+
 @app.post("/zones/{symbol}")
 async def update_zones(symbol: str, request: Request):
     """Update reversal zone levels (manual / direct API).
