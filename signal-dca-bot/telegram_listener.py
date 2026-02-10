@@ -133,9 +133,9 @@ class TelegramListener:
                     logger.error(f"Error processing close: {e}", exc_info=True)
             return
 
-        # Not a signal - log for debug (truncate long messages)
-        if len(text) > 20:
-            logger.debug(f"TG ignored: {text[:60]}...")
+        # Not a signal - log for visibility (truncate long messages)
+        preview = text[:80].replace("\n", " ")
+        logger.info(f"TG msg (not signal): {preview}...")
 
 
 def generate_session():
