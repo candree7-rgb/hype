@@ -25,6 +25,7 @@ class BybitEngine:
         self.config = config
         self._session = None
         self._initialized_symbols: set[str] = set()
+        self._hedge_mode: bool = False  # Detected at first setup_symbol call
 
     @property
     def session(self):
@@ -68,6 +69,35 @@ class BybitEngine:
             logger.error(f"Failed to get equity: {e}")
             return 0.0
 
+    def detect_position_mode(self, symbol: str) -> None:
+        """Auto-detect Bybit position mode (One-Way vs Hedge).
+
+        In Hedge mode, get_positions returns 2 entries per symbol
+        (Buy side + Sell side). In One-Way mode, returns 1 entry.
+        """
+        try:
+            result = self.session.get_positions(
+                category="linear",
+                symbol=symbol,
+            )
+            positions = result["result"]["list"]
+            self._hedge_mode = len(positions) >= 2
+            mode_str = "Hedge (BothSide)" if self._hedge_mode else "One-Way"
+            logger.info(f"Position mode detected: {mode_str}")
+        except Exception as e:
+            logger.warning(f"Could not detect position mode: {e}")
+            self._hedge_mode = False
+
+    def _position_idx(self, trade_side: str) -> dict:
+        """Get positionIdx kwarg for Bybit orders.
+
+        Hedge mode: long=1, short=2
+        One-Way mode: empty dict (don't send positionIdx)
+        """
+        if not self._hedge_mode:
+            return {}
+        return {"positionIdx": 1 if trade_side == "long" else 2}
+
     def setup_symbol(self, symbol: str) -> bool:
         """Set leverage and margin mode for a symbol.
 
@@ -77,6 +107,10 @@ class BybitEngine:
             return True
 
         try:
+            # Detect position mode on first symbol setup
+            if not self._initialized_symbols:
+                self.detect_position_mode(symbol)
+
             # Set cross margin mode
             try:
                 self.session.set_margin_mode(
@@ -191,9 +225,17 @@ class BybitEngine:
 
         side_str = "Buy" if trade.side == "long" else "Sell"
 
+        pos_idx = self._position_idx(trade.side)
+
         try:
             if use_limit:
                 e1_price = self.round_price(trade.signal_entry, tick_size)
+                if e1_price <= 0:
+                    logger.error(
+                        f"E1 price rounded to 0 for {symbol} "
+                        f"(signal={trade.signal_entry}, tick={tick_size})"
+                    )
+                    return False
                 result = self.session.place_order(
                     category="linear",
                     symbol=symbol,
@@ -203,6 +245,7 @@ class BybitEngine:
                     price=str(e1_price),
                     timeInForce="GTC",
                     orderLinkId=f"{trade.trade_id}_E1",
+                    **pos_idx,
                 )
                 order_id = result["result"]["orderId"]
                 e1.order_id = order_id
@@ -220,6 +263,7 @@ class BybitEngine:
                     qty=str(e1_qty),
                     timeInForce="GTC",
                     orderLinkId=f"{trade.trade_id}_E1",
+                    **pos_idx,
                 )
                 order_id = result["result"]["orderId"]
                 e1.order_id = order_id
@@ -250,6 +294,7 @@ class BybitEngine:
         qty_step = info["qty_step"]
         tick_size = info["tick_size"]
         min_qty = info["min_qty"]
+        pos_idx = self._position_idx(trade.side)
 
         for i in range(1, trade.max_dca + 1):
             if i >= len(trade.dca_levels):
@@ -263,6 +308,13 @@ class BybitEngine:
                 logger.warning(f"DCA{i} qty too small: {dca_qty} for {symbol}, skipping")
                 continue
 
+            if dca_price <= 0:
+                logger.warning(
+                    f"DCA{i} price rounded to 0 for {symbol} "
+                    f"(raw={dca.price}, tick={tick_size}), skipping"
+                )
+                continue
+
             try:
                 result = self.session.place_order(
                     category="linear",
@@ -273,6 +325,7 @@ class BybitEngine:
                     price=str(dca_price),
                     timeInForce="GTC",
                     orderLinkId=f"{trade.trade_id}_DCA{i}",
+                    **pos_idx,
                 )
 
                 order_id = result["result"]["orderId"]
@@ -368,6 +421,8 @@ class BybitEngine:
         # Close = opposite side
         close_side = "Sell" if trade.side == "long" else "Buy"
 
+        pos_idx = self._position_idx(trade.side)
+
         try:
             result = self.session.place_order(
                 category="linear",
@@ -378,6 +433,7 @@ class BybitEngine:
                 timeInForce="GTC",
                 reduceOnly=True,
                 orderLinkId=f"{trade.trade_id}_TP1",
+                **pos_idx,
             )
 
             order_id = result["result"]["orderId"]
@@ -407,6 +463,8 @@ class BybitEngine:
         qty = self.round_qty(remaining, info["qty_step"])
         close_side = "Sell" if trade.side == "long" else "Buy"
 
+        pos_idx = self._position_idx(trade.side)
+
         try:
             result = self.session.place_order(
                 category="linear",
@@ -417,6 +475,7 @@ class BybitEngine:
                 timeInForce="GTC",
                 reduceOnly=True,
                 orderLinkId=f"{trade.trade_id}_CLOSE",
+                **pos_idx,
             )
 
             order_id = result["result"]["orderId"]
