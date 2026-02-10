@@ -1,18 +1,28 @@
-TradingView Alert Template - Plot Discovery
-=============================================
+TradingView Alert Templates for LuxAlgo Reversal Zones
+=======================================================
 
-Use this as the alert MESSAGE in TradingView on the LuxAlgo indicator.
-URL: https://hy-production-2208.up.railway.app/zones/discover
-
+## FINAL ALERT (use this one)
+URL: https://hy-production-2208.up.railway.app/zones/push
 Copy everything between the --- lines:
+
+---
+{"symbol":"{{ticker}}","s1":{{plot("RZ S1 Band")}},"r1":{{plot("RZ R1 Band")}},"r2":{{plot("RZ R2 Band")}},"r3":{{plot("RZ R3 Band")}},"rz_avg":{{plot_18}}}
+---
+
+S2/S3 are auto-calculated in the backend using symmetry:
+  S2 = 2 * RZ_Average - R2
+  S3 = 2 * RZ_Average - R3
+
+Plot mapping (INJUSDT verified 2025-02-10):
+  plot_15 = R3 Band     plot_18 = RZ Average
+  plot_16 = R2 Band     plot_19 = S1 Band
+  plot_17 = R1 Band     plot_20 = S2 Band (TradingView limit: unreachable!)
+                        plot_21 = S3 Band (TradingView limit: unreachable!)
+
+
+## DISCOVERY ALERT (for debugging only)
+URL: https://hy-production-2208.up.railway.app/zones/discover
 
 ---
 {"symbol":"{{ticker}}","s1":{{plot("RZ S1 Band")}},"p0":{{plot_0}},"p1":{{plot_1}},"p2":{{plot_2}},"p3":{{plot_3}},"p4":{{plot_4}},"p5":{{plot_5}},"p6":{{plot_6}},"p7":{{plot_7}},"p8":{{plot_8}},"p9":{{plot_9}},"p10":{{plot_10}},"p11":{{plot_11}},"p12":{{plot_12}},"p13":{{plot_13}},"p14":{{plot_14}},"p15":{{plot_15}},"p16":{{plot_16}},"p17":{{plot_17}},"p18":{{plot_18}},"p19":{{plot_19}}}
 ---
-
-After the alert fires once, check Railway logs.
-The endpoint logs every plot value + auto-identifies which ones look like support/resistance zones.
-
-Once identified:
-- Update the main /zones/push alert to use the correct plot indices for S2/S3
-- Delete this discovery alert

@@ -469,14 +469,14 @@ async def push_zones(request: Request):
     """Receive zone data from TradingView watchlist alerts.
 
     Handles both JSON and text/plain (TradingView sends text/plain).
-    Auto-calculates S2/R2 as midpoints if not provided.
+    Calculates S2/S3 from RZ Average symmetry: S2 = 2*avg - R2, S3 = 2*avg - R3.
 
-    Message format:
-      {"symbol":"HYPEUSDT","s1":25.12,"s3":23.90,"r1":26.78,"r3":28.01,"source":"luxalgo"}
+    TradingView alert format:
+      {"symbol":"{{ticker}}","s1":{{plot("RZ S1 Band")}},"r1":{{plot("RZ R1 Band")}},
+       "r2":{{plot("RZ R2 Band")}},"r3":{{plot("RZ R3 Band")}},"rz_avg":{{plot_18}}}
     """
     import json as json_lib
 
-    content_type = request.headers.get("content-type", "")
     raw = await request.body()
     text = raw.decode("utf-8").strip()
 
@@ -504,12 +504,21 @@ async def push_zones(request: Request):
     r1 = float(body.get("r1", 0) or 0)
     r2 = float(body.get("r2", 0) or 0)
     r3 = float(body.get("r3", 0) or 0)
+    rz_avg = float(body.get("rz_avg", 0) or 0)
 
-    # Auto-calculate S2/R2 as midpoints if not provided
+    # Calculate S2/S3 from RZ Average symmetry (LuxAlgo zones are symmetric)
+    # Formula: S_n = 2 * RZ_Average - R_n
+    if rz_avg > 0:
+        if s2 == 0 and r2 > 0:
+            s2 = 2 * rz_avg - r2
+            logger.info(f"S2 calculated: 2 × {rz_avg:.4f} - {r2:.4f} = {s2:.4f}")
+        if s3 == 0 and r3 > 0:
+            s3 = 2 * rz_avg - r3
+            logger.info(f"S3 calculated: 2 × {rz_avg:.4f} - {r3:.4f} = {s3:.4f}")
+
+    # Fallback: midpoint if still missing and we have s1+s3
     if s2 == 0 and s1 > 0 and s3 > 0:
         s2 = (s1 + s3) / 2
-    if r2 == 0 and r1 > 0 and r3 > 0:
-        r2 = (r1 + r3) / 2
 
     zones = CoinZones(
         symbol=symbol_clean,
@@ -521,7 +530,9 @@ async def push_zones(request: Request):
 
     logger.info(
         f"Zone push: {symbol_clean} ({zones.source}) | "
-        f"S: {zones.s1}/{zones.s2}/{zones.s3} | R: {zones.r1}/{zones.r2}/{zones.r3}"
+        f"S: {zones.s1:.4f}/{zones.s2:.4f}/{zones.s3:.4f} | "
+        f"R: {zones.r1:.4f}/{zones.r2:.4f}/{zones.r3:.4f}"
+        + (f" | avg: {rz_avg:.4f}" if rz_avg > 0 else "")
     )
 
     return JSONResponse({
@@ -532,6 +543,8 @@ async def push_zones(request: Request):
             "s1": zones.s1, "s2": zones.s2, "s3": zones.s3,
             "r1": zones.r1, "r2": zones.r2, "r3": zones.r3,
         },
+        "rz_avg": rz_avg,
+        "s2_s3_method": "symmetry" if rz_avg > 0 else "direct",
     })
 
 
