@@ -1,11 +1,11 @@
 """
 Zone Data Manager v2
 
-Primary: LuxAlgo zones from TradingView → Supabase
+Primary: LuxAlgo zones from TradingView → PostgreSQL
 Fallback: Auto-calculated swing H/L from Bybit candles
 
-Supabase table: "coin_zones"
-  symbol (PK), s1, s2, s3, r1, r2, r3, updated_at
+PostgreSQL table: "coin_zones"
+  symbol (PK), s1, s2, s3, r1, r2, r3, source, updated_at
 
 Zone-snapping: For each fixed DCA level, if a zone is within 2%,
 snap the DCA to the zone price (better bounce probability).
@@ -13,9 +13,10 @@ snap the DCA to the zone price (better bounce probability).
 
 import logging
 import time
-import os
 from dataclasses import dataclass
 from typing import Optional
+
+import database as db
 
 logger = logging.getLogger(__name__)
 
@@ -55,87 +56,65 @@ class CoinZones:
 
 
 class ZoneDataManager:
-    """Manages zone data from Supabase + auto-calc fallback."""
+    """Manages zone data from PostgreSQL + in-memory cache."""
 
-    def __init__(self, supabase_url: str = "", supabase_key: str = ""):
-        self._supabase = None
+    def __init__(self):
         self._cache: dict[str, CoinZones] = {}
-        self._supabase_url = supabase_url or os.getenv("SUPABASE_URL", "")
-        self._supabase_key = supabase_key or os.getenv("SUPABASE_KEY", "")
-        self._table_name = "coin_zones"
 
-    @property
-    def supabase(self):
-        if self._supabase is None and self._supabase_url:
-            try:
-                from supabase import create_client
-                self._supabase = create_client(self._supabase_url, self._supabase_key)
-                logger.info("Supabase connected")
-            except ImportError:
-                logger.warning("supabase-py not installed, using local cache only")
-            except Exception as e:
-                logger.error(f"Supabase connection failed: {e}")
-        return self._supabase
+    def warmup_cache(self) -> int:
+        """Load all zones from DB into memory cache. Call on startup."""
+        rows = db.get_all_zones()
+        count = 0
+        for row in rows:
+            zones = CoinZones(
+                symbol=row["symbol"],
+                s1=row["s1"], s2=row["s2"], s3=row["s3"],
+                r1=row["r1"], r2=row["r2"], r3=row["r3"],
+                updated_at=row["updated_at"],
+                source=row["source"],
+            )
+            self._cache[row["symbol"]] = zones
+            count += 1
+
+        if count > 0:
+            logger.info(f"Zone cache warmed: {count} coins loaded from DB")
+        return count
 
     def get_zones(self, symbol: str) -> Optional[CoinZones]:
-        """Get zone data. Checks cache first, then Supabase."""
+        """Get zone data. Checks cache first, then DB."""
         if symbol in self._cache and self._cache[symbol].is_valid:
             return self._cache[symbol]
 
-        if self.supabase:
-            try:
-                result = (
-                    self.supabase.table(self._table_name)
-                    .select("*")
-                    .eq("symbol", symbol)
-                    .limit(1)
-                    .execute()
+        # Try DB
+        row = db.get_zone(symbol)
+        if row:
+            zones = CoinZones(
+                symbol=symbol,
+                s1=row["s1"], s2=row["s2"], s3=row["s3"],
+                r1=row["r1"], r2=row["r2"], r3=row["r3"],
+                updated_at=row["updated_at"],
+                source=row["source"],
+            )
+            self._cache[symbol] = zones
+            if zones.is_valid:
+                logger.info(
+                    f"Zones loaded ({zones.source}): {symbol} | "
+                    f"S: {zones.s1}/{zones.s2}/{zones.s3} | "
+                    f"R: {zones.r1}/{zones.r2}/{zones.r3}"
                 )
-                if result.data:
-                    row = result.data[0]
-                    zones = CoinZones(
-                        symbol=symbol,
-                        s1=float(row.get("s1", 0) or 0),
-                        s2=float(row.get("s2", 0) or 0),
-                        s3=float(row.get("s3", 0) or 0),
-                        r1=float(row.get("r1", 0) or 0),
-                        r2=float(row.get("r2", 0) or 0),
-                        r3=float(row.get("r3", 0) or 0),
-                        updated_at=time.time(),
-                        source=row.get("source", "luxalgo"),
-                    )
-                    self._cache[symbol] = zones
-                    logger.info(
-                        f"Zones loaded ({zones.source}): {symbol} | "
-                        f"S: {zones.s1}/{zones.s2}/{zones.s3} | "
-                        f"R: {zones.r1}/{zones.r2}/{zones.r3}"
-                    )
-                    return zones
-            except Exception as e:
-                logger.error(f"Supabase query failed for {symbol}: {e}")
+                return zones
 
         return self._cache.get(symbol)
 
     def update_zones(self, symbol: str, zones: CoinZones) -> bool:
-        """Update zone data in cache and Supabase."""
+        """Update zone data in cache and DB."""
         zones.updated_at = time.time()
         self._cache[symbol] = zones
 
-        if self.supabase:
-            try:
-                data = {
-                    "symbol": symbol,
-                    "s1": zones.s1, "s2": zones.s2, "s3": zones.s3,
-                    "r1": zones.r1, "r2": zones.r2, "r3": zones.r3,
-                    "source": zones.source,
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                }
-                self.supabase.table(self._table_name).upsert(data).execute()
-                return True
-            except Exception as e:
-                logger.error(f"Supabase upsert failed for {symbol}: {e}")
-                return False
-
+        db.upsert_zone(
+            symbol, zones.s1, zones.s2, zones.s3,
+            zones.r1, zones.r2, zones.r3, zones.source,
+        )
         return True
 
     def update_from_auto_calc(self, symbol: str, zones: CoinZones) -> bool:
@@ -333,8 +312,8 @@ if __name__ == "__main__":
 
     # Test auto swing calculation
     print("\n--- Auto Swing Zones ---")
-    fake_candles = []
     import math
+    fake_candles = []
     for i in range(100):
         base = 100 + 5 * math.sin(i / 10) + 0.05 * i
         fake_candles.append({

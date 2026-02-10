@@ -83,9 +83,8 @@ class BotConfig:
     telegram_notify_chat_id: str = ""  # Chat ID for bot notifications
     telegram_bot_token: str = ""       # Bot token for sending notifications
 
-    # ── Supabase (optional, for zone persistence) ──
-    supabase_url: str = ""
-    supabase_key: str = ""
+    # ── Database (Railway PostgreSQL) ──
+    database_url: str = ""  # Set automatically by Railway when you add PostgreSQL
 
     @property
     def sum_multipliers(self) -> float:
@@ -178,8 +177,7 @@ def load_config() -> BotConfig:
         leverage=int(os.getenv("LEVERAGE", "20")),
         equity_pct_per_trade=float(os.getenv("EQUITY_PCT", "20")),
         max_simultaneous_trades=int(os.getenv("MAX_TRADES", "6")),
-        supabase_url=os.getenv("SUPABASE_URL", ""),
-        supabase_key=os.getenv("SUPABASE_KEY", ""),
+        database_url=os.getenv("DATABASE_URL", ""),
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
         telegram_notify_chat_id=os.getenv("TELEGRAM_NOTIFY_CHAT_ID", ""),

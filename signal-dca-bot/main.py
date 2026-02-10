@@ -28,6 +28,7 @@ from zone_data import (
     ZoneDataManager, CoinZones, calc_smart_dca_levels, calc_swing_zones
 )
 from telegram_listener import TelegramListener
+import database as db
 
 # ── Logging ──
 logging.basicConfig(
@@ -41,7 +42,7 @@ logger = logging.getLogger("main")
 config: BotConfig = load_config()
 trade_mgr: TradeManager = TradeManager(config)
 bybit: BybitEngine = BybitEngine(config)
-zone_mgr: ZoneDataManager = ZoneDataManager(config.supabase_url, config.supabase_key)
+zone_mgr: ZoneDataManager = ZoneDataManager()
 tg_listener: TelegramListener | None = None
 monitor_task: asyncio.Task | None = None
 zone_refresh_task: asyncio.Task | None = None
@@ -382,6 +383,10 @@ async def lifespan(app: FastAPI):
     logger.info("Signal DCA Bot v2 starting...")
     config.print_summary()
 
+    # Init database + warmup zone cache
+    db.init_tables()
+    zone_mgr.warmup_cache()
+
     # Start Telegram listener (if configured)
     tg_listener = TelegramListener(
         config,
@@ -579,6 +584,14 @@ async def status():
     }
 
     return JSONResponse(data)
+
+
+@app.get("/trades")
+async def trade_history():
+    """Recent trade history from DB."""
+    trades = db.get_recent_trades(50)
+    stats = db.get_trade_stats()
+    return JSONResponse({"stats": stats, "trades": trades})
 
 
 @app.get("/", response_class=HTMLResponse)

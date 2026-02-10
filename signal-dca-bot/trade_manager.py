@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from config import BotConfig
 from telegram_parser import Signal
+import database as db
 
 logger = logging.getLogger(__name__)
 
@@ -536,6 +537,25 @@ class TradeManager:
         self.closed_trades.append(trade)
         if trade.trade_id in self.trades:
             del self.trades[trade.trade_id]
+
+        # Persist to DB
+        db.save_trade(
+            trade_id=trade.trade_id,
+            symbol=trade.symbol,
+            side=trade.side,
+            entry_price=trade.signal_entry,
+            avg_price=trade.avg_price,
+            close_price=close_price,
+            total_qty=trade.total_qty,
+            total_margin=trade.total_margin,
+            realized_pnl=pnl,
+            max_dca=trade.current_dca,
+            tp1_hit=trade.tp1_hit,
+            close_reason=reason,
+            opened_at=trade.opened_at,
+            closed_at=trade.closed_at,
+            signal_leverage=trade.signal_leverage,
+        )
 
         total = self.total_wins + self.total_losses + self.total_breakeven
         wr = self.total_wins / total * 100 if total > 0 else 0
