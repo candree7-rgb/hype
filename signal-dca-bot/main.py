@@ -466,15 +466,29 @@ async def flush():
 
 @app.post("/zones/push")
 async def push_zones(request: Request):
-    """Receive zone data from TradingView Zone Pusher (symbol in body).
+    """Receive zone data from TradingView watchlist alerts.
 
-    This is the primary endpoint for TradingView watchlist alerts, where the
-    webhook URL is fixed and the symbol comes in the JSON body.
+    Handles both JSON and text/plain (TradingView sends text/plain).
+    Auto-calculates S2/R2 as midpoints if not provided.
 
-    JSON body: {"symbol": "HYPEUSDT", "s1": 111.5, "s2": 108.2, "s3": 105.0,
-                "r1": 115.8, "r2": 118.5, "r3": 121.0, "source": "luxalgo"}
+    Message format:
+      {"symbol":"HYPEUSDT","s1":25.12,"s3":23.90,"r1":26.78,"r3":28.01,"source":"luxalgo"}
     """
-    body = await request.json()
+    import json as json_lib
+
+    content_type = request.headers.get("content-type", "")
+    raw = await request.body()
+    text = raw.decode("utf-8").strip()
+
+    # TradingView sends text/plain, but the content is JSON
+    try:
+        body = json_lib.loads(text)
+    except (json_lib.JSONDecodeError, ValueError):
+        logger.warning(f"Zone push: invalid JSON: {text[:200]}")
+        return JSONResponse(
+            {"status": "error", "reason": "invalid JSON"}, status_code=400
+        )
+
     raw_symbol = body.get("symbol", "")
     if not raw_symbol:
         return JSONResponse(
@@ -484,14 +498,23 @@ async def push_zones(request: Request):
     # Clean symbol: "HYPEUSDT.P" → "HYPEUSDT", "HYPE/USDT" → "HYPEUSDT"
     symbol_clean = raw_symbol.upper().replace("/", "").split(".")[0]
 
+    s1 = float(body.get("s1", 0) or 0)
+    s2 = float(body.get("s2", 0) or 0)
+    s3 = float(body.get("s3", 0) or 0)
+    r1 = float(body.get("r1", 0) or 0)
+    r2 = float(body.get("r2", 0) or 0)
+    r3 = float(body.get("r3", 0) or 0)
+
+    # Auto-calculate S2/R2 as midpoints if not provided
+    if s2 == 0 and s1 > 0 and s3 > 0:
+        s2 = (s1 + s3) / 2
+    if r2 == 0 and r1 > 0 and r3 > 0:
+        r2 = (r1 + r3) / 2
+
     zones = CoinZones(
         symbol=symbol_clean,
-        s1=float(body.get("s1", 0) or 0),
-        s2=float(body.get("s2", 0) or 0),
-        s3=float(body.get("s3", 0) or 0),
-        r1=float(body.get("r1", 0) or 0),
-        r2=float(body.get("r2", 0) or 0),
-        r3=float(body.get("r3", 0) or 0),
+        s1=s1, s2=s2, s3=s3,
+        r1=r1, r2=r2, r3=r3,
         source=body.get("source", "luxalgo"),
     )
     zone_mgr.update_zones(symbol_clean, zones)
