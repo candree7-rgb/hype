@@ -204,10 +204,12 @@ def calc_smart_dca_levels(
     side: str,
     snap_threshold_pct: float = 2.0,
 ) -> list[tuple[float, str]]:
-    """Calculate DCA levels with simple zone-snapping.
+    """Calculate DCA levels with zone-lock snapping.
 
-    Simple rule: For each fixed DCA level, check if a zone is within
-    snap_threshold_pct (default 2%). If yes, use the zone instead.
+    Zone-Lock rule: DCA follows the zone WITHOUT distance limit, but ONLY
+    in the favorable direction (lower for longs, higher for shorts).
+    This gives better entries during crashes while never worsening entries.
+
     Each zone can only be used ONCE (closest DCA gets it).
 
     Args:
@@ -215,7 +217,7 @@ def calc_smart_dca_levels(
         fixed_spacing_pcts: Fixed DCA spacing [0, 5, 11, 18]
         zones: Zone data (or None)
         side: "long" or "short"
-        snap_threshold_pct: Max % distance from fixed DCA to snap (default 2%)
+        snap_threshold_pct: Not used for zone-lock (kept for API compat)
 
     Returns:
         List of (price, source) for each level including E1.
@@ -252,7 +254,9 @@ def calc_smart_dca_levels(
         ]
         available_zones = [(p, n) for p, n in available_zones if p > entry_price]
 
-    # Simple snap: for each DCA, find closest zone within threshold
+    # Zone-lock snap: for each DCA, find closest zone that gives a BETTER price
+    # Long: zone must be <= fixed price (lower = better entry)
+    # Short: zone must be >= fixed price (higher = better entry)
     used_zones: set[str] = set()
 
     for fixed_price in fixed_dcas:
@@ -263,9 +267,15 @@ def calc_smart_dca_levels(
             if zone_name in used_zones:
                 continue
 
+            # Zone-lock: only snap in favorable direction
+            if side == "long" and zone_price > fixed_price:
+                continue  # Don't snap HIGHER for longs
+            if side == "short" and zone_price < fixed_price:
+                continue  # Don't snap LOWER for shorts
+
             dist_pct = abs(zone_price - fixed_price) / fixed_price * 100
 
-            if dist_pct <= snap_threshold_pct and dist_pct < best_dist:
+            if dist_pct < best_dist:
                 best_dist = dist_pct
                 best_zone = (zone_price, zone_name)
 
@@ -273,8 +283,8 @@ def calc_smart_dca_levels(
             used_zones.add(best_zone[1])
             results.append(best_zone)
             logger.info(
-                f"DCA snapped: {fixed_price:.4f} → {best_zone[0]:.4f} "
-                f"({best_zone[1]}, {best_dist:.1f}% diff)"
+                f"DCA zone-locked: {fixed_price:.4f} → {best_zone[0]:.4f} "
+                f"({best_zone[1]}, {best_dist:.1f}% deeper)"
             )
         else:
             results.append((fixed_price, "fixed"))

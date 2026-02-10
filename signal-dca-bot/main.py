@@ -399,8 +399,8 @@ async def resnap_active_dcas(symbol: str):
             if not dca.order_id:
                 continue
 
-            # Skip fixed-price (not zone-snapped)
-            if source in ("entry", "fixed"):
+            # Skip if source is entry (E1 never moves)
+            if source == "entry":
                 continue
 
             # Check if price actually changed significantly
