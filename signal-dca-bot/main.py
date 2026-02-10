@@ -161,7 +161,7 @@ async def execute_signal(signal: Signal) -> dict:
                 config.zone_snap_threshold_pct,
             )
             for i, (price, source) in enumerate(smart_levels):
-                if i < len(trade.dca_levels) and source not in ("entry", "fixed"):
+                if i < len(trade.dca_levels) and source not in ("entry", "fixed", "filled"):
                     old_price = trade.dca_levels[i].price
                     trade.dca_levels[i].price = price
                     trade.dca_levels[i].qty = (
@@ -377,10 +377,14 @@ async def resnap_active_dcas(symbol: str):
         if trade.symbol != symbol:
             continue
 
-        # Re-calculate smart DCA levels with fresh zones
+        # Build filled mask so filled DCAs don't consume the zone snap
+        filled_mask = [dca.filled for dca in trade.dca_levels]
+
+        # Re-calculate smart DCA levels with fresh zones + filled status
         smart_levels = calc_smart_dca_levels(
             trade.signal_entry, config.dca_spacing_pct, zones, trade.side,
             config.zone_snap_threshold_pct,
+            filled_levels=filled_mask,
         )
 
         for i, (new_price, source) in enumerate(smart_levels):
@@ -399,8 +403,8 @@ async def resnap_active_dcas(symbol: str):
             if not dca.order_id:
                 continue
 
-            # Skip if source is entry (E1 never moves)
-            if source == "entry":
+            # Skip if source is entry or filled marker
+            if source in ("entry", "filled"):
                 continue
 
             # Check if price actually changed significantly

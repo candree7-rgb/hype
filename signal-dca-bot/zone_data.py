@@ -7,8 +7,9 @@ Fallback: Auto-calculated swing H/L from Bybit candles
 PostgreSQL table: "coin_zones"
   symbol (PK), s1, s2, s3, r1, r2, r3, source, updated_at
 
-Zone-snapping: For each fixed DCA level, if a zone is within 2%,
-snap the DCA to the zone price (better bounce probability).
+Zone-snapping: DCAs snap to current S1 (long) / R1 (short).
+S1/R1 are dynamic and shift with price. Only snaps in favorable
+direction (deeper entries). Resnaps every 15min as zones update.
 """
 
 import logging
@@ -194,7 +195,7 @@ def calc_swing_zones(candles: list[dict], lookback: int = 5) -> CoinZones | None
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# ▌ DCA ZONE SNAPPING
+# ▌ DCA ZONE SNAPPING (Dynamic S1/R1)
 # ══════════════════════════════════════════════════════════════════════════
 
 def calc_smart_dca_levels(
@@ -203,21 +204,29 @@ def calc_smart_dca_levels(
     zones: CoinZones | None,
     side: str,
     snap_threshold_pct: float = 2.0,
+    filled_levels: list[bool] | None = None,
 ) -> list[tuple[float, str]]:
-    """Calculate DCA levels with zone-lock snapping.
+    """Calculate DCA levels with dynamic S1/R1 zone-lock snapping.
 
-    Zone-Lock rule: DCA follows the zone WITHOUT distance limit, but ONLY
-    in the favorable direction (lower for longs, higher for shorts).
-    This gives better entries during crashes while never worsening entries.
+    S1/R1 are DYNAMIC - they shift with every candle as the reversal zone
+    moves. All DCAs snap to the CURRENT S1 (longs) or R1 (shorts).
 
-    Each zone can only be used ONCE (closest DCA gets it).
+    When DCA1 fills and price drops further, S1 moves deeper. On next
+    resnap (every 15min), DCA2 snaps to the new, deeper S1. The fixed
+    spacing [0, 5, 11, 18]% acts as minimum distance buffer - a DCA only
+    snaps when S1 has moved past its fixed trigger level.
+
+    Only ONE unfilled DCA gets the zone snap per calculation (the next
+    one in line). Filled DCAs don't consume the zone.
 
     Args:
         entry_price: E1 entry price
         fixed_spacing_pcts: Fixed DCA spacing [0, 5, 11, 18]
         zones: Zone data (or None)
         side: "long" or "short"
-        snap_threshold_pct: Not used for zone-lock (kept for API compat)
+        snap_threshold_pct: Not used (kept for API compat)
+        filled_levels: Boolean list [E1, DCA1, DCA2, DCA3] - True if filled.
+                       Filled levels don't consume the zone snap.
 
     Returns:
         List of (price, source) for each level including E1.
@@ -238,56 +247,50 @@ def calc_smart_dca_levels(
             results.append((price, "fixed"))
         return results
 
-    # Get available zones for this side
+    # Only use S1 (long) or R1 (short) - the dynamic primary reversal zone
     if side == "long":
-        available_zones = [
-            (zones.s1, "zone_s1"),
-            (zones.s2, "zone_s2"),
-            (zones.s3, "zone_s3"),
-        ]
-        available_zones = [(p, n) for p, n in available_zones if 0 < p < entry_price]
+        zone_price = zones.s1
+        zone_label = "zone_s1"
     else:
-        available_zones = [
-            (zones.r1, "zone_r1"),
-            (zones.r2, "zone_r2"),
-            (zones.r3, "zone_r3"),
-        ]
-        available_zones = [(p, n) for p, n in available_zones if p > entry_price]
+        zone_price = zones.r1
+        zone_label = "zone_r1"
 
-    # Zone-lock snap: for each DCA, find closest zone that gives a BETTER price
-    # Long: zone must be <= fixed price (lower = better entry)
-    # Short: zone must be >= fixed price (higher = better entry)
-    used_zones: set[str] = set()
+    # No valid zone price? Return fixed
+    if zone_price <= 0:
+        for price in fixed_dcas:
+            results.append((price, "fixed"))
+        return results
 
-    for fixed_price in fixed_dcas:
-        best_zone = None
-        best_dist = float("inf")
+    zone_used = False
 
-        for zone_price, zone_name in available_zones:
-            if zone_name in used_zones:
+    for i, fixed_price in enumerate(fixed_dcas):
+        level_idx = i + 1  # 1-indexed (DCA1=1, DCA2=2, DCA3=3)
+
+        # Filled levels don't consume the zone - skip them
+        if filled_levels and level_idx < len(filled_levels) and filled_levels[level_idx]:
+            results.append((fixed_price, "filled"))
+            continue
+
+        # Only ONE unfilled DCA gets the zone snap
+        if not zone_used:
+            # Zone-lock: only snap in favorable direction
+            # Long: S1 must be <= fixed price (deeper = better entry)
+            # Short: R1 must be >= fixed price (higher = better entry)
+            can_snap = (
+                (side == "long" and zone_price <= fixed_price) or
+                (side == "short" and zone_price >= fixed_price)
+            )
+            if can_snap:
+                zone_used = True
+                dist_pct = abs(zone_price - fixed_price) / fixed_price * 100
+                logger.info(
+                    f"DCA{level_idx} zone-locked to {'S1' if side == 'long' else 'R1'}: "
+                    f"{fixed_price:.4f} → {zone_price:.4f} ({dist_pct:.1f}% deeper)"
+                )
+                results.append((zone_price, zone_label))
                 continue
 
-            # Zone-lock: only snap in favorable direction
-            if side == "long" and zone_price > fixed_price:
-                continue  # Don't snap HIGHER for longs
-            if side == "short" and zone_price < fixed_price:
-                continue  # Don't snap LOWER for shorts
-
-            dist_pct = abs(zone_price - fixed_price) / fixed_price * 100
-
-            if dist_pct < best_dist:
-                best_dist = dist_pct
-                best_zone = (zone_price, zone_name)
-
-        if best_zone:
-            used_zones.add(best_zone[1])
-            results.append(best_zone)
-            logger.info(
-                f"DCA zone-locked: {fixed_price:.4f} → {best_zone[0]:.4f} "
-                f"({best_zone[1]}, {best_dist:.1f}% deeper)"
-            )
-        else:
-            results.append((fixed_price, "fixed"))
+        results.append((fixed_price, "fixed"))
 
     return results
 
@@ -296,29 +299,51 @@ def calc_smart_dca_levels(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    # Test zone snapping with 3 DCAs
-    zones = CoinZones(
-        symbol="AAVEUSDT",
-        s1=111.50, s2=108.20, s3=105.00,
-        r1=115.80, r2=118.50, r3=121.00,
-        updated_at=time.time(),
-        source="luxalgo",
-    )
-
     entry = 113.14
     spacing = [0, 5, 11, 18]
 
-    print(f"Entry: {entry}")
-    print(f"Zones: S1={zones.s1} S2={zones.s2} S3={zones.s3}")
-    print(f"Config: 3 DCAs, spacing {spacing}")
-    print()
+    # === Scenario 1: Fresh trade, S1 near DCA1 ===
+    print("=== Scenario 1: Fresh trade, S1 near DCA1 ===")
+    zones = CoinZones(
+        symbol="AAVEUSDT",
+        s1=106.50, s2=103.00, s3=99.00,
+        r1=115.80, r2=118.50, r3=121.00,
+        updated_at=time.time(), source="luxalgo",
+    )
+    print(f"Entry: {entry} | S1={zones.s1} (dynamic)")
+    print(f"Fixed DCA1={entry*0.95:.2f}, DCA2={entry*0.89:.2f}, DCA3={entry*0.82:.2f}")
 
     levels = calc_smart_dca_levels(entry, spacing, zones, "long")
     for i, (price, source) in enumerate(levels):
         label = "E1" if i == 0 else f"DCA{i}"
-        fixed = entry * (1 - spacing[i] / 100) if i > 0 else entry
-        marker = " ← ZONE SNAP" if "zone" in source else ""
-        print(f"  {label}: {price:.2f} ({source}) [fixed: {fixed:.2f}]{marker}")
+        marker = " ← S1 SNAP" if "zone" in source else ""
+        print(f"  {label}: {price:.2f} ({source}){marker}")
+
+    # === Scenario 2: DCA1 filled, S1 moved deeper ===
+    print("\n=== Scenario 2: DCA1 filled, S1 moved deeper ===")
+    zones.s1 = 99.80  # S1 shifted down as price dropped
+    filled = [False, True, False, False]  # E1=unfilled(ignored), DCA1=filled
+    print(f"S1 moved to {zones.s1} | DCA1 filled")
+
+    levels = calc_smart_dca_levels(entry, spacing, zones, "long", filled_levels=filled)
+    for i, (price, source) in enumerate(levels):
+        label = "E1" if i == 0 else f"DCA{i}"
+        marker = " ← S1 SNAP" if "zone" in source else ""
+        status = " (FILLED)" if source == "filled" else ""
+        print(f"  {label}: {price:.2f} ({source}){marker}{status}")
+
+    # === Scenario 3: DCA1+2 filled, S1 even deeper ===
+    print("\n=== Scenario 3: DCA1+2 filled, S1 even deeper ===")
+    zones.s1 = 91.50  # S1 shifted way down during crash
+    filled = [False, True, True, False]  # DCA1+2 filled
+    print(f"S1 moved to {zones.s1} | DCA1+2 filled")
+
+    levels = calc_smart_dca_levels(entry, spacing, zones, "long", filled_levels=filled)
+    for i, (price, source) in enumerate(levels):
+        label = "E1" if i == 0 else f"DCA{i}"
+        marker = " ← S1 SNAP" if "zone" in source else ""
+        status = " (FILLED)" if source == "filled" else ""
+        print(f"  {label}: {price:.2f} ({source}){marker}{status}")
 
     # Test auto swing calculation
     print("\n--- Auto Swing Zones ---")
