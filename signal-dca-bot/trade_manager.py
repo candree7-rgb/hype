@@ -489,9 +489,9 @@ class TradeManager:
     # ══════════════════════════════════════════════════════════════════════
 
     def check_hard_sl(self, trade: Trade, current_price: float) -> dict | None:
-        """Check hard stop loss. Active from DCA1+ at avg - 3%."""
-        if trade.current_dca == 0:
-            return None  # No hard SL for E1-only
+        """Check hard stop loss. Only active after ALL DCAs are filled."""
+        if trade.current_dca < trade.max_dca:
+            return None  # No SL until all DCAs filled
         if trade.hard_sl_price == 0:
             return None
 
