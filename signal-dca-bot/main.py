@@ -539,17 +539,21 @@ async def push_zones(request: Request):
     Handles both JSON and text/plain (TradingView sends text/plain).
     Calculates S2/S3 from RZ Average symmetry: S2 = 2*avg - R2, S3 = 2*avg - R3.
 
-    TradingView alert format:
-      {"symbol":"{{ticker}}","s1":{{plot("RZ S1 Band")}},"r1":{{plot("RZ R1 Band")}},
-       "r2":{{plot("RZ R2 Band")}},"r3":{{plot("RZ R3 Band")}},
-       "rz_avg":{{plot("Reversal Zones Average")}}}
+    TradingView alert format (without outer braces to bypass JSON validator):
+      "symbol":"{{ticker}}","s1":{{plot("RZ S1 Band")}},"r1":{{plot("RZ R1 Band")}},
+      "r2":{{plot("RZ R2 Band")}},"r3":{{plot("RZ R3 Band")}},
+      "rz_avg":{{plot("Reversal Zones Average")}}
     """
     import json as json_lib
 
     raw = await request.body()
     text = raw.decode("utf-8").strip()
 
-    # TradingView sends text/plain, but the content is JSON
+    # TradingView sends without outer {} to bypass JSON validator
+    # Wrap in braces if missing
+    if not text.startswith("{"):
+        text = "{" + text + "}"
+
     try:
         body = json_lib.loads(text)
     except (json_lib.JSONDecodeError, ValueError):
