@@ -594,6 +594,13 @@ async def trade_history():
     return JSONResponse({"stats": stats, "trades": trades})
 
 
+@app.get("/equity")
+async def equity_history():
+    """Equity curve data for dashboard chart."""
+    history = db.get_equity_history(90)
+    return JSONResponse({"history": history})
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     """HTML dashboard."""
