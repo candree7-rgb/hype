@@ -1,15 +1,17 @@
 """
-Signal DCA Bot v2 - Main Application
+Signal DCA Bot v2 - Multi-TP Strategy
 
 Architecture:
   1. Signal in (webhook/telegram) → parse → batch buffer → execute
-  2. Price Monitor polls every 2s:
+  2. Price Monitor polls every 2s (all exits exchange-side):
      - PENDING: check E1 fill, timeout
-     - OPEN (E1 only): check TP1 → close 50%, trail rest
-     - TRAILING: check trail callback (floor=TP1)
-     - DCA_ACTIVE: check hard SL, check BE-trail, check next DCA
-     - BE_TRAILING: check trail callback from avg
+     - OPEN: check TP1-4 fills (reduceOnly limits on Bybit)
+       → TP1 fills: SL moves to breakeven
+       → TP4 fills: trailing 20% (0.5% CB)
+     - DCA: check DCA fill → cancel TPs, set SL+BE-trail
+     - Detect position close (SL/trailing triggered by Bybit)
   3. Zone Refresh every 15min: auto-calc swing H/L for active symbols
+  4. Neo Cloud trend switch: close opposing positions on /signal/trend-switch
 """
 
 import asyncio
@@ -158,7 +160,7 @@ async def execute_signal(signal: Signal) -> dict:
         if zones and zones.is_valid:
             smart_levels = calc_smart_dca_levels(
                 signal.entry_price, config.dca_spacing_pct, zones, signal.side,
-                config.zone_snap_threshold_pct,
+                snap_min_pct=config.zone_snap_min_pct,
             )
             for i, (price, source) in enumerate(smart_levels):
                 if i < len(trade.dca_levels) and source not in ("entry", "fixed", "filled"):
@@ -200,12 +202,12 @@ async def price_monitor():
     """Background task: poll order fills and detect exchange-side closes.
 
     All exits are exchange-side (Bybit handles TP/SL/trailing):
-    - TP1: reduceOnly limit order at +1% (50% qty)
-    - Trailing: set_trading_stop(trailingStop) after TP1 fills
-    - Hard SL: set_trading_stop(stopLoss) after all DCAs filled
-    - BE-Trail: set_trading_stop(trailingStop, activePrice=avg) after DCA
+    - TP1-4: reduceOnly limit orders at signal targets (50/10/10/10%)
+    - After TP1: SL moves to breakeven (entry price)
+    - After TP4: trailing stop 0.5% CB on remaining 20%
+    - DCA: cancel TPs, hard SL at avg-3%, BE-trail (0.5% CB from avg)
     """
-    logger.info("Price monitor started")
+    logger.info("Price monitor started (Multi-TP)")
 
     while True:
         try:
@@ -225,8 +227,11 @@ async def price_monitor():
                         trade.status = TradeStatus.OPEN
                         # Place DCA orders
                         bybit.place_dca_for_trade(trade)
-                        # Place TP1 reduceOnly limit on Bybit
-                        _place_exchange_tp1(trade)
+                        # Calculate TP qtys and place Multi-TP orders
+                        trade_mgr.setup_tp_qtys(trade)
+                        _place_exchange_tps(trade)
+                        # Set initial SL at entry-3%
+                        _set_initial_sl(trade)
                         logger.info(f"E1 filled → OPEN: {trade.symbol_display}")
                     else:
                         age_min = (time.time() - trade.opened_at) / 60
@@ -239,29 +244,43 @@ async def price_monitor():
                     await asyncio.sleep(0.2)
                     continue
 
-                # ── 1. Check TP1 fill (exchange-side limit order) ──
-                if trade.tp1_order_id and not trade.tp1_hit:
-                    tp_filled, tp_fill_price = bybit.check_order_filled(
-                        trade.symbol, trade.tp1_order_id
-                    )
-                    if tp_filled:
-                        tp1_qty = trade.total_qty * config.tp1_close_pct / 100
-                        trade_mgr.record_tp1(trade, tp1_qty, tp_fill_price)
-                        if trade.side == "long":
-                            pnl = (tp_fill_price - trade.avg_price) * tp1_qty
-                        else:
-                            pnl = (trade.avg_price - tp_fill_price) * tp1_qty
-                        trade.realized_pnl += pnl
-                        # Activate trailing stop on Bybit for remaining position
-                        trail_dist = tp_fill_price * config.trailing_callback_pct / 100
-                        bybit.set_trading_stop(
-                            trade.symbol, trade.side,
-                            trailing_stop=trail_dist,
+                # ── 1. Check Multi-TP fills (exchange-side limit orders) ──
+                if trade.status == TradeStatus.OPEN and trade.current_dca == 0:
+                    for tp_idx in range(len(trade.tp_prices)):
+                        if trade.tp_filled[tp_idx] or not trade.tp_order_ids[tp_idx]:
+                            continue
+                        tp_filled, tp_fill_price = bybit.check_order_filled(
+                            trade.symbol, trade.tp_order_ids[tp_idx]
                         )
-                        logger.info(
-                            f"TP1 filled on Bybit: {trade.symbol_display} @ {tp_fill_price:.4f} | "
-                            f"PnL: ${pnl:+.2f} | Trailing {config.trailing_callback_pct}% activated"
-                        )
+                        if tp_filled:
+                            close_qty = trade.tp_close_qtys[tp_idx] if tp_idx < len(trade.tp_close_qtys) else 0
+                            trade_mgr.record_tp_fill(trade, tp_idx, close_qty, tp_fill_price)
+
+                            # After TP1: move SL to breakeven
+                            if tp_idx == 0 and config.sl_to_be_after_tp1:
+                                bybit.set_trading_stop(
+                                    trade.symbol, trade.side,
+                                    stop_loss=trade.signal_entry,
+                                )
+                                logger.info(
+                                    f"SL → BE: {trade.symbol_display} | "
+                                    f"SL moved to entry {trade.signal_entry:.4f}"
+                                )
+
+                            # After last TP: activate trailing on remaining 20%
+                            if all(trade.tp_filled):
+                                trail_dist = tp_fill_price * config.trailing_callback_pct / 100
+                                bybit.set_trading_stop(
+                                    trade.symbol, trade.side,
+                                    trailing_stop=trail_dist,
+                                )
+                                logger.info(
+                                    f"All TPs filled → trailing: {trade.symbol_display} | "
+                                    f"Trail={config.trailing_callback_pct}% CB on "
+                                    f"{trade.remaining_qty:.6f} remaining"
+                                )
+
+                            break  # One TP per cycle
 
                 # ── 2. Check DCA fills (exchange-side limit orders) ──
                 for i in range(1, trade.max_dca + 1):
@@ -276,19 +295,17 @@ async def price_monitor():
                     if dca_filled:
                         trade_mgr.fill_dca(trade, i, dca_fill_price)
 
-                        # Cancel TP1 if unfilled (DCA mode = different exit)
-                        if trade.tp1_order_id and not trade.tp1_hit:
-                            bybit.cancel_order(trade.symbol, trade.tp1_order_id)
-                            trade.tp1_order_id = ""
+                        # Cancel all unfilled TP orders (DCA mode = different exit)
+                        _cancel_unfilled_tps(trade)
 
-                        # Set exchange-side stops
+                        # Set exchange-side stops for DCA mode
                         _set_exchange_stops_after_dca(trade)
 
                         logger.info(
-                            f"DCA{i} filled on Bybit: {trade.symbol_display} @ {dca_fill_price:.4f} | "
+                            f"DCA{i} filled: {trade.symbol_display} @ {dca_fill_price:.4f} | "
                             f"New avg: {trade.avg_price:.4f} | DCA {trade.current_dca}/{trade.max_dca}"
                         )
-                        break  # Process one DCA per cycle
+                        break  # One DCA per cycle
 
                 # ── 3. Detect position closed by exchange (SL/trailing triggered) ──
                 if trade.status in (TradeStatus.TRAILING, TradeStatus.BE_TRAILING,
@@ -297,13 +314,16 @@ async def price_monitor():
                     if pos is None or pos["size"] == 0:
                         # Position closed by Bybit (SL or trailing stop triggered)
                         price = bybit.get_ticker_price(trade.symbol) or trade.avg_price
-                        remaining = trade.remaining_qty if trade.tp1_hit else trade.total_qty
-                        if trade.side == "long":
-                            pnl = (price - trade.avg_price) * remaining
-                        else:
-                            pnl = (trade.avg_price - price) * remaining
-                        trade.realized_pnl += pnl
+                        remaining = trade.remaining_qty
+                        if remaining > 0:
+                            if trade.side == "long":
+                                pnl = (price - trade.avg_price) * remaining
+                            else:
+                                pnl = (trade.avg_price - price) * remaining
+                            trade.realized_pnl += pnl
                         reason = "Exchange stop (SL/trailing)"
+                        if trade.tps_hit > 0:
+                            reason += f" after TP{trade.tps_hit}"
                         trade_mgr.close_trade(trade, price, trade.realized_pnl, reason)
                         logger.info(
                             f"Position closed by Bybit: {trade.symbol_display} | "
@@ -320,24 +340,62 @@ async def price_monitor():
             await asyncio.sleep(5)
 
 
-def _place_exchange_tp1(trade: Trade) -> None:
-    """Place TP1 as reduceOnly limit on Bybit after E1 fills."""
-    if trade.side == "long":
-        tp1_price = trade.avg_price * (1 + config.tp1_pct / 100)
-    else:
-        tp1_price = trade.avg_price * (1 - config.tp1_pct / 100)
+def _place_exchange_tps(trade: Trade) -> None:
+    """Place Multi-TP reduceOnly limit orders on Bybit after E1 fills.
 
-    tp1_qty = trade.total_qty * config.tp1_close_pct / 100
-    order_id = bybit.place_tp_order(trade, tp1_price, tp1_qty)
-    if order_id:
-        trade.tp1_order_id = order_id
+    Places TP1-TP4 at signal target prices with configured close percentages.
+    """
+    for i, tp_price in enumerate(trade.tp_prices):
+        if i >= len(trade.tp_close_qtys):
+            break
+        qty = trade.tp_close_qtys[i]
+        order_id = bybit.place_tp_order(trade, tp_price, qty, tp_num=i + 1)
+        if order_id:
+            trade.tp_order_ids[i] = order_id
+        else:
+            logger.warning(
+                f"TP{i + 1} placement failed: {trade.symbol_display} @ {tp_price}"
+            )
+
+    placed = sum(1 for oid in trade.tp_order_ids if oid)
+    logger.info(
+        f"Multi-TP placed: {trade.symbol_display} | "
+        f"{placed}/{len(trade.tp_prices)} TPs | "
+        f"Prices: {[f'{p:.4f}' for p in trade.tp_prices]}"
+    )
+
+
+def _set_initial_sl(trade: Trade) -> None:
+    """Set initial SL at entry-3% after E1 fills."""
+    sl_pct = config.hard_sl_pct / 100
+    if trade.side == "long":
+        trade.hard_sl_price = trade.avg_price * (1 - sl_pct)
+    else:
+        trade.hard_sl_price = trade.avg_price * (1 + sl_pct)
+
+    bybit.set_trading_stop(
+        trade.symbol, trade.side,
+        stop_loss=trade.hard_sl_price,
+    )
+    logger.info(
+        f"Initial SL set: {trade.symbol_display} | "
+        f"SL={trade.hard_sl_price:.4f} (entry-{config.hard_sl_pct}%)"
+    )
+
+
+def _cancel_unfilled_tps(trade: Trade) -> None:
+    """Cancel all unfilled TP orders (when DCA fills, switch to DCA exit)."""
+    for i, order_id in enumerate(trade.tp_order_ids):
+        if order_id and not trade.tp_filled[i]:
+            bybit.cancel_order(trade.symbol, order_id)
+            trade.tp_order_ids[i] = ""
+    logger.info(f"Unfilled TPs cancelled: {trade.symbol_display} (DCA mode)")
 
 
 def _set_exchange_stops_after_dca(trade: Trade) -> None:
     """Set exchange-side SL/trailing after a DCA fills.
 
-    Before all DCAs filled: trailing only (activates at avg = BE exit)
-    After all DCAs filled: hard SL + trailing (activates at avg)
+    All DCAs filled (max_dca=1): hard SL at avg-3% + BE trailing from avg
     """
     trail_dist = trade.avg_price * config.be_trail_callback_pct / 100
 
@@ -355,7 +413,7 @@ def _set_exchange_stops_after_dca(trade: Trade) -> None:
             f"(activates at avg={trade.avg_price:.4f})"
         )
     else:
-        # More DCAs pending → trailing only (no SL, DCAs are safety net)
+        # More DCAs pending → trailing only (no hard SL, DCAs are safety net)
         bybit.set_trading_stop(
             trade.symbol, trade.side,
             trailing_stop=trail_dist,
@@ -442,7 +500,7 @@ async def resnap_active_dcas(symbol: str):
         # Re-calculate smart DCA levels with fresh zones + filled status
         smart_levels = calc_smart_dca_levels(
             trade.signal_entry, config.dca_spacing_pct, zones, trade.side,
-            config.zone_snap_threshold_pct,
+            snap_min_pct=config.zone_snap_min_pct,
             filled_levels=filled_mask,
         )
 
@@ -586,6 +644,104 @@ async def close_position(symbol: str):
             return {"status": "error", "reason": "Close order failed"}
 
     return {"status": "error", "reason": f"No active trade for {symbol}"}
+
+
+@app.post("/signal/trend-switch")
+async def trend_switch(request: Request):
+    """Neo Cloud trend switch: close opposing positions on clear reversal.
+
+    TradingView sends alert when Neo Cloud switches direction (UPTREND/DOWNTREND).
+    This is a CLEAR trend reversal, not volatile noise.
+
+    JSON body: {"symbol": "HYPEUSDT", "direction": "up"} or {"direction": "down"}
+    Text body: "HYPEUSDT up" or "HYPEUSDT down"
+
+    direction "up"   → close all SHORT positions for that symbol
+    direction "down"  → close all LONG positions for that symbol
+    """
+    import json as json_lib
+
+    raw = await request.body()
+    text = raw.decode("utf-8").strip()
+
+    # Parse JSON or text format
+    symbol = ""
+    direction = ""
+
+    try:
+        if text.startswith("{"):
+            body = json_lib.loads(text)
+            symbol = body.get("symbol", "").upper().replace("/", "").split(".")[0]
+            direction = body.get("direction", "").lower()
+        else:
+            # Text format: "HYPEUSDT up" or "HYPEUSDT down"
+            parts = text.split()
+            if len(parts) >= 2:
+                symbol = parts[0].upper().replace("/", "").split(".")[0]
+                direction = parts[1].lower()
+    except Exception:
+        pass
+
+    if not symbol or direction not in ("up", "down"):
+        return JSONResponse(
+            {"status": "error", "reason": f"Invalid: symbol={symbol}, direction={direction}"},
+            status_code=400,
+        )
+
+    # up = bullish reversal → close shorts
+    # down = bearish reversal → close longs
+    close_side = "short" if direction == "up" else "long"
+
+    logger.info(
+        f"Neo Cloud trend switch: {symbol} → {direction.upper()} | "
+        f"Closing {close_side.upper()} positions"
+    )
+
+    closed = []
+    for trade in list(trade_mgr.active_trades):
+        if trade.symbol != symbol:
+            continue
+        if trade.side != close_side:
+            continue
+
+        price = bybit.get_ticker_price(trade.symbol)
+
+        # Cancel all open orders (TPs, DCAs)
+        bybit.cancel_all_orders(trade.symbol)
+
+        success = bybit.close_full(trade, f"Neo Cloud {direction}")
+        if success and price:
+            remaining = trade.remaining_qty
+            if trade.side == "long":
+                pnl = (price - trade.avg_price) * remaining
+            else:
+                pnl = (trade.avg_price - price) * remaining
+            trade.realized_pnl += pnl
+            trade_mgr.close_trade(
+                trade, price, trade.realized_pnl,
+                f"Neo Cloud trend switch ({direction})"
+            )
+            closed.append({
+                "trade_id": trade.trade_id,
+                "symbol": trade.symbol_display,
+                "side": trade.side,
+                "pnl": f"${trade.realized_pnl:+.2f}",
+            })
+            logger.info(
+                f"Neo Cloud closed: {trade.symbol_display} {trade.side.upper()} | "
+                f"PnL: ${trade.realized_pnl:+.2f}"
+            )
+
+    if not closed:
+        logger.info(f"Neo Cloud: no {close_side} trades for {symbol}")
+
+    return JSONResponse({
+        "status": "ok",
+        "symbol": symbol,
+        "direction": direction,
+        "closed_side": close_side,
+        "closed": closed,
+    })
 
 
 @app.post("/flush")
@@ -815,7 +971,7 @@ async def status():
         "max_trades": config.max_simultaneous_trades,
         "dca_levels": config.max_dca_levels,
         "dca_mults": config.dca_multipliers[:config.max_dca_levels + 1],
-        "tp1_pct": config.tp1_pct,
+        "tp_pcts": config.tp_close_pcts,
         "hard_sl_pct": config.hard_sl_pct,
         "zones": config.zone_snap_enabled,
         "testnet": config.bybit_testnet,
@@ -872,7 +1028,7 @@ async function update() {
     html += '<div class="card">';
     html += `<b class="blue">Config:</b> ${d.config.leverage}x | ${d.config.equity_pct}% per trade | `;
     html += `Max ${d.config.max_trades} trades | ${d.config.dca_levels} DCA ${JSON.stringify(d.config.dca_mults)} | `;
-    html += `TP1 ${d.config.tp1_pct}% | SL avg-${d.config.hard_sl_pct}% | `;
+    html += `TP: ${d.config.tp_pcts.map((p,i) => 'TP'+(i+1)+'='+p+'%').join(', ')} | SL avg-${d.config.hard_sl_pct}% | `;
     html += `Zones: ${d.config.zones ? 'ON' : 'OFF'} | `;
     html += d.config.testnet ? '<span class="yellow">TESTNET</span>' : '<span class="red">LIVE</span>';
     html += ` | Equity: <b>${d.equity}</b>`;
@@ -886,7 +1042,7 @@ async function update() {
 
     if (d.active_trades.length > 0) {
         html += '<div class="card"><b class="blue">Active Trades:</b>';
-        html += '<table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Avg</th><th>DCA</th><th>SL</th><th>BE-Trail</th><th>Margin</th><th>Status</th><th>Age</th></tr>';
+        html += '<table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Avg</th><th>DCA</th><th>TPs</th><th>SL</th><th>Margin</th><th>Status</th><th>Age</th></tr>';
         for (const t of d.active_trades) {
             const sc = t.side === 'long' ? 'green' : 'red';
             const stc = 'status-' + t.status;
@@ -894,9 +1050,9 @@ async function update() {
             html += `<td><b>${t.symbol}</b></td>`;
             html += `<td class="${sc}">${t.side.toUpperCase()}</td>`;
             html += `<td>${t.entry}</td><td>${t.avg}</td>`;
-            html += `<td>${t.dca}</td><td>${t.sl}</td><td>${t.be_trail}</td>`;
+            html += `<td>${t.dca}</td><td class="green">${t.tps}</td><td>${t.sl}</td>`;
             html += `<td>${t.margin}</td>`;
-            html += `<td><span class="status ${stc}">${t.status}${t.tp1_hit ? ' TP1' : ''}</span></td>`;
+            html += `<td><span class="status ${stc}">${t.status}</span></td>`;
             html += `<td>${t.age}</td></tr>`;
         }
         html += '</table></div>';

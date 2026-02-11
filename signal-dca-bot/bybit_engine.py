@@ -633,8 +633,15 @@ class BybitEngine:
     # ▌ EXCHANGE-SIDE TP / SL / TRAILING
     # ══════════════════════════════════════════════════════════════════════
 
-    def place_tp_order(self, trade: Trade, tp_price: float, qty: float) -> str | None:
+    def place_tp_order(self, trade: Trade, tp_price: float, qty: float,
+                       tp_num: int = 1) -> str | None:
         """Place TP as reduceOnly limit order on Bybit.
+
+        Args:
+            trade: The trade
+            tp_price: TP target price
+            qty: Quantity to close
+            tp_num: TP number (1-4) for orderLinkId
 
         Returns order_id if successful, None otherwise.
         """
@@ -646,11 +653,11 @@ class BybitEngine:
         qty = self.round_qty(qty, info["qty_step"])
 
         if qty < info["min_qty"]:
-            logger.warning(f"TP qty too small: {qty} for {trade.symbol}")
+            logger.warning(f"TP{tp_num} qty too small: {qty} for {trade.symbol}")
             return None
 
         if tp_price <= 0:
-            logger.warning(f"TP price rounded to 0 for {trade.symbol}")
+            logger.warning(f"TP{tp_num} price rounded to 0 for {trade.symbol}")
             return None
 
         close_side = "Sell" if trade.side == "long" else "Buy"
@@ -666,17 +673,17 @@ class BybitEngine:
                 price=str(tp_price),
                 timeInForce="GTC",
                 reduceOnly=True,
-                orderLinkId=f"{trade.trade_id}_TP1",
+                orderLinkId=f"{trade.trade_id}_TP{tp_num}",
                 **pos_idx,
             )
             order_id = result["result"]["orderId"]
             logger.info(
-                f"TP1 placed: {trade.symbol} {close_side} {qty} @ {tp_price} | "
+                f"TP{tp_num} placed: {trade.symbol} {close_side} {qty} @ {tp_price} | "
                 f"Order: {order_id}"
             )
             return order_id
         except Exception as e:
-            logger.error(f"TP1 order failed for {trade.symbol}: {e}")
+            logger.error(f"TP{tp_num} order failed for {trade.symbol}: {e}")
             return None
 
     def set_trading_stop(self, symbol: str, trade_side: str,

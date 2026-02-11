@@ -3,11 +3,14 @@ Signal DCA Bot v2 - Configuration
 Telegram Signal → Bybit DCA Trading Bot
 
 Strategy:
-- 3 DCAs [1, 2, 4, 8] with growing spacing [0, 5, 11, 18]
-- 50% close at TP1, trail rest from TP1 floor (0.5% CB)
-- BE-Trail from DCA1+ (0.5% CB when price returns to avg)
-- Hard SL at avg - 3% from DCA1
-- Zone-snapping: auto-calculated swing H/L from Bybit candles
+- 1 DCA [1, 2] at entry-5% (zone-snapped to S1/R1 with 2% min)
+- Multi-TP: TP1 50%, TP2 10%, TP3 10%, TP4 10% (signal targets)
+- Trail remaining 20% after TP4 (0.5% CB)
+- SL-to-BE after TP1 fills
+- DCA exit: BE-Trail from avg (0.5% CB)
+- Hard SL at avg-3%
+- Neo Cloud trend switch: close on clear reversal
+- Zone-snapping: S1/R1 dynamic zones from LuxAlgo/Bybit candles
 """
 
 from dataclasses import dataclass, field
@@ -36,34 +39,34 @@ class BotConfig:
     e1_timeout_minutes: int = 10        # Cancel E1 limit if not filled after X minutes
 
     # ── DCA Configuration ──
-    # Sizing: exponential doubling [1, 2, 4, 8] = sum 15
+    # 1 DCA: E1 + DCA1 with sizing [1, 2] = sum 3
     dca_multipliers: list[float] = field(
-        default_factory=lambda: [1, 2, 4, 8]
+        default_factory=lambda: [1, 2]
     )
-    # Spacing: growing gaps (5%, 6%, 7%)
-    # E1=signal, DCA1=entry-5%, DCA2=entry-11%, DCA3=entry-18%
+    # DCA1 at entry-5% (before zone snap)
     dca_spacing_pct: list[float] = field(
-        default_factory=lambda: [0, 5, 11, 18]
+        default_factory=lambda: [0, 5]
     )
-    max_dca_levels: int = 3  # 3 DCAs = total 4 entries (E1 + DCA1-3)
+    max_dca_levels: int = 1  # 1 DCA = total 2 entries (E1 + DCA1)
 
-    # ── Take Profit (E1-only trades, no DCA) ──
-    tp1_pct: float = 1.0        # TP1 at 1% from entry
-    tp1_close_pct: float = 50.0 # Close 50% at TP1
-    trailing_callback_pct: float = 0.5  # Trail remaining 50% with 0.5% CB
-    # After TP1: trail floor = TP1 level (remaining can never close below TP1 profit)
+    # ── Multi-TP (E1-only mode, uses signal targets) ──
+    # Close portions at signal's TP1-TP4 price targets.
+    # Remaining position trails after last TP.
+    tp_close_pcts: list[float] = field(
+        default_factory=lambda: [50, 10, 10, 10]  # TP1=50%, TP2=10%, TP3=10%, TP4=10%
+    )
+    trailing_callback_pct: float = 0.5  # 0.5% CB for trail after all TPs
+    sl_to_be_after_tp1: bool = True     # Move SL to breakeven after TP1 fills
 
-    # ── DCA Exit (BE-Trail, activates from DCA1+) ──
+    # ── DCA Exit (BE-Trail, activates from DCA1) ──
     be_trail_callback_pct: float = 0.5  # Trail from avg with 0.5% CB
-    # When price returns to avg after DCA → activate trailing
-    # Close 100% on callback
 
-    # ── Hard Stop Loss (from DCA1+) ──
-    hard_sl_pct: float = 3.0  # SL at avg - 3% (always active from DCA1)
+    # ── Hard Stop Loss ──
+    hard_sl_pct: float = 3.0  # SL at entry/avg - 3%
 
     # ── Zone Snapping ──
     zone_snap_enabled: bool = True
-    zone_snap_threshold_pct: float = 2.0  # Max 2% diff to snap DCA to zone
+    zone_snap_min_pct: float = 2.0        # Min distance for zone snap (hybrid mode)
     zone_refresh_minutes: int = 15        # Refresh zones every 15min
     zone_candle_count: int = 100          # Candles to analyze for swing H/L
     zone_candle_interval: str = "15"      # 15min candles
@@ -129,7 +132,7 @@ class BotConfig:
         total_notional = total_budget * self.leverage
 
         print(f"╔══════════════════════════════════════════════╗")
-        print(f"║  SIGNAL DCA BOT v2 - CONFIG                  ║")
+        print(f"║  SIGNAL DCA BOT v2 - Multi-TP CONFIG         ║")
         print(f"╠══════════════════════════════════════════════╣")
         print(f"║  Equity:         ${equity:,.0f}")
         print(f"║  Leverage:       {self.leverage}x")
@@ -137,30 +140,30 @@ class BotConfig:
         print(f"║  Budget/Trade:   {self.equity_pct_per_trade}% = ${total_budget:,.0f}")
         print(f"║  Max Notional:   ${total_notional:,.0f}")
         print(f"║")
-        print(f"║  DCA Mults:      {self.dca_multipliers[:self.max_dca_levels+1]}")
+        print(f"║  DCA:            {self.max_dca_levels} DCA {self.dca_multipliers[:self.max_dca_levels+1]} (sum={sm})")
         print(f"║  DCA Spacing:    {self.dca_spacing_pct[:self.max_dca_levels+1]}%")
-        print(f"║  Sum Mults:      {sm}")
+        print(f"║  E1 Margin:      ${e1m:.2f} → ${e1n:.2f} notional")
         print(f"║")
-        print(f"║  E1 Margin:      ${e1m:.2f}")
-        print(f"║  E1 Notional:    ${e1n:.2f}")
-        print(f"║  TP1 ({self.tp1_pct}%):      ${e1n * self.tp1_pct / 100:.2f} profit")
+        print(f"║  Multi-TP (signal targets):")
+        tp_labels = [f"TP{i+1}={p}%" for i, p in enumerate(self.tp_close_pcts)]
+        trail_pct = 100 - sum(self.tp_close_pcts)
+        print(f"║    {', '.join(tp_labels)}, Trail={trail_pct}%")
+        print(f"║    SL-to-BE after TP1: {'YES' if self.sl_to_be_after_tp1 else 'NO'}")
+        print(f"║    Trail CB: {self.trailing_callback_pct}%")
         print(f"║")
-        print(f"║  Exit Logic:")
-        print(f"║    E1 only:  50% close TP1, trail rest (0.5% CB, floor=TP1)")
-        print(f"║    DCA1+:    BE-Trail (0.5% CB when price returns to avg)")
-        print(f"║    Hard SL:  Avg - {self.hard_sl_pct}% from DCA1")
+        print(f"║  DCA Exit:       BE-Trail ({self.be_trail_callback_pct}% CB from avg)")
+        print(f"║  Hard SL:        Entry/Avg - {self.hard_sl_pct}%")
+        print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")
+        print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")
         print(f"║")
-        print(f"║  DCA Levels (Long entry at $100):")
+        print(f"║  Example (Long @ $100, E1 only):")
         for i in range(self.max_dca_levels + 1):
             p = self.dca_price(100, i, "long")
             m = self.dca_margin(equity, i)
             n = m * self.leverage
             label = "E1" if i == 0 else f"DCA{i}"
             print(f"║    {label}: ${p:.2f}  {self.dca_multipliers[i]:>2.0f}x  ${m:.2f} margin  ${n:.2f} notional")
-        print(f"║")
-        print(f"║  Max Loss (all DCAs + SL): ${total_notional * self.hard_sl_pct / 100:.2f} = {self.equity_pct_per_trade * self.hard_sl_pct / 100 * self.leverage:.1f}% equity")
-        print(f"║  Zones:          {'ON (auto swing H/L)' if self.zone_snap_enabled else 'OFF'}")
-        print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")
+        print(f"║  Max Loss (SL):  ${total_notional * self.hard_sl_pct / 100:.2f}")
         print(f"╚══════════════════════════════════════════════╝")
 
 
