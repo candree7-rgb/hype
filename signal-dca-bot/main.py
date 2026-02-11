@@ -784,15 +784,15 @@ async def flush():
 
 @app.post("/zones/push")
 async def push_zones(request: Request):
-    """Receive zone data from TradingView watchlist alerts.
+    """Receive zone data + Neo Cloud from LuxAlgo alert scripting.
 
-    Handles both JSON and text/plain (TradingView sends text/plain).
-    Calculates S2/S3 from RZ Average symmetry: S2 = 2*avg - R2, S3 = 2*avg - R3.
+    Combined endpoint: zones + neo cloud in one alert.
+    Neo Cloud trend switch is detected server-side (neo_lead vs neo_lag).
 
-    TradingView alert format (without outer braces to bypass JSON validator):
-      "symbol":"{{ticker}}","s1":{{plot("RZ S1 Band")}},"r1":{{plot("RZ R1 Band")}},
-      "r2":{{plot("RZ R2 Band")}},"r3":{{plot("RZ R3 Band")}},
-      "rz_avg":{{plot("Reversal Zones Average")}}
+    LuxAlgo alert script (fires on Neo Cloud cross):
+      @alert("\"symbol\":\"{{ticker}}\",\"s1\":{rz_s1},\"r1\":{rz_r1},\"r2\":{rz_r2},\"r3\":{rz_r3},\"neo_lead\":{neo_lead},\"neo_lag\":{neo_lag}") = {neo_lead} cross {neo_lag}
+
+    Also accepts legacy format (zone-only, no neo cloud).
     """
     import json as json_lib
 
@@ -834,10 +834,8 @@ async def push_zones(request: Request):
     if rz_avg > 0:
         if s2 == 0 and r2 > 0:
             s2 = 2 * rz_avg - r2
-            logger.info(f"S2 calculated: 2 × {rz_avg:.4f} - {r2:.4f} = {s2:.4f}")
         if s3 == 0 and r3 > 0:
             s3 = 2 * rz_avg - r3
-            logger.info(f"S3 calculated: 2 × {rz_avg:.4f} - {r3:.4f} = {s3:.4f}")
 
     # Fallback: midpoint if still missing and we have s1+s3
     if s2 == 0 and s1 > 0 and s3 > 0:
@@ -852,26 +850,99 @@ async def push_zones(request: Request):
     zone_mgr.update_zones(symbol_clean, zones)
 
     logger.info(
-        f"Zone push: {symbol_clean} ({zones.source}) | "
-        f"S: {zones.s1:.4f}/{zones.s2:.4f}/{zones.s3:.4f} | "
-        f"R: {zones.r1:.4f}/{zones.r2:.4f}/{zones.r3:.4f}"
-        + (f" | avg: {rz_avg:.4f}" if rz_avg > 0 else "")
+        f"Zone push: {symbol_clean} | "
+        f"S1={zones.s1:.4f} R1={zones.r1:.4f}"
     )
 
     # Re-snap any active DCA orders to updated zones
     await resnap_active_dcas(symbol_clean)
 
-    return JSONResponse({
+    # ── Neo Cloud trend detection (optional fields) ──
+    neo_result = None
+    neo_lead = body.get("neo_lead")
+    neo_lag = body.get("neo_lag")
+
+    if neo_lead is not None and neo_lag is not None:
+        try:
+            neo_lead = float(neo_lead)
+            neo_lag = float(neo_lag)
+        except (ValueError, TypeError):
+            neo_lead = neo_lag = None
+
+    if neo_lead is not None and neo_lag is not None and neo_lead != 0:
+        # Determine current trend from Neo Cloud values
+        new_direction = "up" if neo_lead > neo_lag else "down"
+
+        # Check if trend CHANGED (switch)
+        old_direction = db.get_neo_cloud(symbol_clean)
+        db.upsert_neo_cloud(symbol_clean, new_direction)
+
+        if old_direction and old_direction != new_direction:
+            # TREND SWITCH detected → close opposing positions
+            close_side = "short" if new_direction == "up" else "long"
+            logger.info(
+                f"NEO CLOUD SWITCH: {symbol_clean} {old_direction.upper()} → "
+                f"{new_direction.upper()} | Closing {close_side.upper()} positions"
+            )
+
+            closed = []
+            for trade in list(trade_mgr.active_trades):
+                if trade.symbol != symbol_clean or trade.side != close_side:
+                    continue
+
+                price = bybit.get_ticker_price(trade.symbol)
+                bybit.cancel_all_orders(trade.symbol)
+                success = bybit.close_full(trade, f"Neo Cloud {new_direction}")
+
+                if success and price:
+                    remaining = trade.remaining_qty
+                    if trade.side == "long":
+                        pnl = (price - trade.avg_price) * remaining
+                    else:
+                        pnl = (trade.avg_price - price) * remaining
+                    trade.realized_pnl += pnl
+                    trade_mgr.close_trade(
+                        trade, price, trade.realized_pnl,
+                        f"Neo Cloud switch ({new_direction})"
+                    )
+                    closed.append({
+                        "trade_id": trade.trade_id,
+                        "side": trade.side,
+                        "pnl": f"${trade.realized_pnl:+.2f}",
+                    })
+                    logger.info(
+                        f"Neo Cloud closed: {trade.symbol_display} {trade.side.upper()} | "
+                        f"PnL: ${trade.realized_pnl:+.2f}"
+                    )
+
+            neo_result = {
+                "switch": True,
+                "from": old_direction,
+                "to": new_direction,
+                "closed": closed,
+            }
+        else:
+            neo_result = {
+                "switch": False,
+                "direction": new_direction,
+                "neo_lead": neo_lead,
+                "neo_lag": neo_lag,
+            }
+            if not old_direction:
+                logger.info(
+                    f"Neo Cloud init: {symbol_clean} → {new_direction.upper()} "
+                    f"(lead={neo_lead:.4f}, lag={neo_lag:.4f})"
+                )
+
+    result = {
         "status": "ok",
         "symbol": symbol_clean,
-        "source": zones.source,
-        "zones": {
-            "s1": zones.s1, "s2": zones.s2, "s3": zones.s3,
-            "r1": zones.r1, "r2": zones.r2, "r3": zones.r3,
-        },
-        "rz_avg": rz_avg,
-        "s2_s3_method": "symmetry" if rz_avg > 0 else "direct",
-    })
+        "zones": {"s1": zones.s1, "r1": zones.r1},
+    }
+    if neo_result:
+        result["neo_cloud"] = neo_result
+
+    return JSONResponse(result)
 
 
 @app.post("/zones/discover")
