@@ -94,6 +94,17 @@ CREATE INDEX IF NOT EXISTS idx_equity_date ON daily_equity(date);
 
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- NEO CLOUD TRENDS: Track lead/lag direction per symbol for switch detection
+-- ══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS neo_cloud_trends (
+    symbol          VARCHAR(30) PRIMARY KEY,
+    direction       VARCHAR(10) NOT NULL,       -- 'up' or 'down'
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- AUTO-UPDATE TRIGGER
 -- ══════════════════════════════════════════════════════════════════════════
 
