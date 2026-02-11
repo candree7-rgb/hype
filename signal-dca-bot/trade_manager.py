@@ -369,24 +369,30 @@ class TradeManager:
 
     def close_trade(self, trade: Trade, close_price: float, pnl: float, reason: str) -> None:
         """Mark a trade as fully closed."""
+        was_filled = trade.total_qty > 0  # Entry was filled on exchange
+
         trade.status = TradeStatus.CLOSED
         trade.closed_at = time.time()
         trade.realized_pnl = pnl
 
-        if pnl > 0.01:
-            self.total_wins += 1
-        elif pnl < -0.01:
-            self.total_losses += 1
-        else:
-            self.total_breakeven += 1
-
-        self.total_pnl += pnl
+        if was_filled:
+            if pnl > 0.01:
+                self.total_wins += 1
+            elif pnl < -0.01:
+                self.total_losses += 1
+            else:
+                self.total_breakeven += 1
+            self.total_pnl += pnl
 
         self.closed_trades.append(trade)
         if trade.trade_id in self.trades:
             del self.trades[trade.trade_id]
 
-        # Persist to DB
+        # Only persist filled trades to DB (skip failed opens / timeouts)
+        if not was_filled:
+            logger.info(f"Trade skipped DB save (unfilled): {trade.symbol} | {reason}")
+            return
+
         db.save_trade(
             trade_id=trade.trade_id,
             symbol=trade.symbol,
