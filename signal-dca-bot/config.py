@@ -36,7 +36,7 @@ class BotConfig:
     equity_pct_per_trade: float = 5.0   # 5% of equity per trade
     max_simultaneous_trades: int = 6
     e1_limit_order: bool = True         # True = Limit at signal price, False = Market
-    e1_timeout_minutes: int = 10        # Cancel E1 limit if not filled after X minutes
+    e1_timeout_minutes: int = 30        # Cancel E1 limit if not filled after X minutes
 
     # ── Neo Cloud Trend Filter ──
     neo_cloud_filter: bool = True       # Only take trades matching Neo Cloud trend
