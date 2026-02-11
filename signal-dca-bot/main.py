@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from config import load_config, BotConfig
 from telegram_parser import parse_signal, Signal
-from trade_manager import TradeManager, TradeStatus
+from trade_manager import TradeManager, TradeStatus, Trade
 from bybit_engine import BybitEngine
 from zone_data import (
     ZoneDataManager, CoinZones, calc_smart_dca_levels, calc_swing_zones
