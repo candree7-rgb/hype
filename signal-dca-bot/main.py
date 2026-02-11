@@ -813,9 +813,10 @@ async def push_zones(request: Request):
         )
 
     raw_symbol = body.get("symbol", "")
-    if not raw_symbol:
+    if not raw_symbol or raw_symbol.upper() in ("NAN", "NULL", ""):
         return JSONResponse(
-            {"status": "error", "reason": "missing symbol in body"}, status_code=400
+            {"status": "error", "reason": "Symbol missing or NaN. LuxAlgo has no {{ticker}} placeholder - hardcode the symbol in your @alert() script, e.g. \"symbol\":\"HYPEUSDT\""},
+            status_code=400,
         )
 
     # Clean symbol: "HYPEUSDT.P" → "HYPEUSDT", "HYPE/USDT" → "HYPEUSDT"
