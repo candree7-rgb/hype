@@ -276,12 +276,35 @@ class TradeManager:
         )
 
     def _update_hard_sl(self, trade: Trade) -> None:
-        """Update hard stop loss based on current avg price."""
+        """Update hard stop loss: DCA fill price - 3%.
+
+        Always calculated from the deepest DCA fill price, not avg.
+        This prevents SL from being above current price when DCA is deep.
+        (With avg-3%, DCA deeper than -8.5% would put SL above fill price!)
+        """
         sl_pct = self.config.hard_sl_pct / 100
-        if trade.side == "long":
-            trade.hard_sl_price = trade.avg_price * (1 - sl_pct)
+
+        # Find the deepest filled DCA price
+        deepest_fill = None
+        for dca in trade.dca_levels[1:]:
+            if dca.filled and dca.price > 0:
+                if trade.side == "long":
+                    deepest_fill = min(deepest_fill, dca.price) if deepest_fill else dca.price
+                else:
+                    deepest_fill = max(deepest_fill, dca.price) if deepest_fill else dca.price
+
+        if deepest_fill:
+            # SL at DCA fill price - 3% (always safe, always below fill)
+            if trade.side == "long":
+                trade.hard_sl_price = deepest_fill * (1 - sl_pct)
+            else:
+                trade.hard_sl_price = deepest_fill * (1 + sl_pct)
         else:
-            trade.hard_sl_price = trade.avg_price * (1 + sl_pct)
+            # No DCA filled yet (shouldn't happen, but fallback to avg)
+            if trade.side == "long":
+                trade.hard_sl_price = trade.avg_price * (1 - sl_pct)
+            else:
+                trade.hard_sl_price = trade.avg_price * (1 + sl_pct)
 
     # ══════════════════════════════════════════════════════════════════════
     # ▌ MULTI-TP: Record TP fill (exchange-side)

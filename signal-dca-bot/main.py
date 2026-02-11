@@ -1085,6 +1085,9 @@ async def status():
         "dca_levels": config.max_dca_levels,
         "dca_mults": config.dca_multipliers[:config.max_dca_levels + 1],
         "tp_pcts": config.tp_close_pcts,
+        "trail_pct": 100 - sum(config.tp_close_pcts),
+        "trail_cb": config.trailing_callback_pct,
+        "safety_sl_pct": config.safety_sl_pct,
         "hard_sl_pct": config.hard_sl_pct,
         "zones": config.zone_snap_enabled,
         "neo_cloud": config.neo_cloud_filter,
@@ -1142,7 +1145,7 @@ async function update() {
     html += '<div class="card">';
     html += `<b class="blue">Config:</b> ${d.config.leverage}x | ${d.config.equity_pct}% eq/trade | `;
     html += `Max ${d.config.max_trades} trades | ${d.config.dca_levels} DCA ${JSON.stringify(d.config.dca_mults)} | `;
-    html += `TP: ${d.config.tp_pcts.map((p,i) => 'TP'+(i+1)+'='+p+'%').join(', ')} | SL avg-${d.config.hard_sl_pct}% | `;
+    html += `TP: ${d.config.tp_pcts.map((p,i) => 'TP'+(i+1)+'='+p+'%').join(', ')} + Trail ${d.config.trail_pct}% (${d.config.trail_cb}% CB) | Safety SL entry-${d.config.safety_sl_pct}% → DCA SL avg-${d.config.hard_sl_pct}% | `;
     html += `Neo Cloud: ${d.config.neo_cloud ? 'ON' : 'OFF'} | `;
     html += `Zones: ${d.config.zones ? 'ON' : 'OFF'} | `;
     html += d.config.testnet ? '<span class="yellow">TESTNET</span>' : '<span class="red">LIVE</span>';

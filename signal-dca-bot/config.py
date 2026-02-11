@@ -58,7 +58,7 @@ class BotConfig:
     tp_close_pcts: list[float] = field(
         default_factory=lambda: [50, 10, 10, 10]  # TP1=50%, TP2=10%, TP3=10%, TP4=10%
     )
-    trailing_callback_pct: float = 0.5  # 0.5% CB for trail after all TPs
+    trailing_callback_pct: float = 1.0  # 1% CB for trail after all TPs (room for runners)
     sl_to_be_after_tp1: bool = True     # Move SL to breakeven after TP1 fills
 
     # ── DCA Exit (BE-Trail, activates from DCA1) ──
