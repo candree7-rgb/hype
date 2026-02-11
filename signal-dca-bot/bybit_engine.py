@@ -171,11 +171,22 @@ class BybitEngine:
             logger.error(f"Failed to get instrument info for {symbol}: {e}")
             return None
 
+    def _tick_precision(self, step: float) -> int:
+        """Get decimal precision from tick/step size.
+
+        Handles scientific notation (1e-05 → 5 decimals).
+        """
+        # Format without scientific notation: 1e-05 → "0.00001"
+        s = f"{step:.10f}".rstrip('0')
+        if '.' in s:
+            return len(s.split('.')[-1])
+        return 0
+
     def round_qty(self, qty: float, qty_step: float) -> float:
         """Round quantity to valid step size."""
         if qty_step <= 0:
             return qty
-        precision = len(str(qty_step).rstrip('0').split('.')[-1]) if '.' in str(qty_step) else 0
+        precision = self._tick_precision(qty_step)
         rounded = round(qty // qty_step * qty_step, precision)
         return rounded
 
@@ -183,7 +194,7 @@ class BybitEngine:
         """Round price to valid tick size."""
         if tick_size <= 0:
             return price
-        precision = len(str(tick_size).rstrip('0').split('.')[-1]) if '.' in str(tick_size) else 0
+        precision = self._tick_precision(tick_size)
         rounded = round(price // tick_size * tick_size, precision)
         return rounded
 
