@@ -1,14 +1,15 @@
 """
-Signal DCA Bot v2 - Multi-TP Strategy
+Signal DCA Bot v2 - Multi-TP Strategy (Two-Tier SL)
 
 Architecture:
   1. Signal in (webhook/telegram) → parse → batch buffer → execute
   2. Price Monitor polls every 2s (all exits exchange-side):
      - PENDING: check E1 fill, timeout
-     - OPEN: check TP1-4 fills (reduceOnly limits on Bybit)
-       → TP1 fills: SL moves to breakeven
+     - OPEN: Safety SL at entry-10% (gives DCA room)
+       → check TP1-4 fills (reduceOnly limits on Bybit)
+       → TP1 fills: SL → breakeven, cancel DCA orders
        → TP4 fills: trailing 20% (0.5% CB)
-     - DCA: check DCA fill → cancel TPs, set SL+BE-trail
+     - DCA fills (before TP1): cancel TPs, hard SL at avg-3%, BE-trail
      - Detect position close (SL/trailing triggered by Bybit)
   3. Zone Refresh every 15min: auto-calc swing H/L for active symbols
   4. Neo Cloud trend switch: close opposing positions on /signal/trend-switch
@@ -216,11 +217,12 @@ async def execute_signal(signal: Signal) -> dict:
 async def price_monitor():
     """Background task: poll order fills and detect exchange-side closes.
 
-    All exits are exchange-side (Bybit handles TP/SL/trailing):
+    Two-tier SL (all exits exchange-side):
+    - Safety SL at entry-10% initially (gives DCA room to fill at -5%)
     - TP1-4: reduceOnly limit orders at signal targets (50/10/10/10%)
-    - After TP1: SL moves to breakeven (entry price)
+    - After TP1: SL → breakeven, cancel DCA orders (profit protection mode)
     - After TP4: trailing stop 0.5% CB on remaining 20%
-    - DCA: cancel TPs, hard SL at avg-3%, BE-trail (0.5% CB from avg)
+    - DCA fills (before TP1): cancel TPs, hard SL at avg-3%, BE-trail from avg
     """
     logger.info("Price monitor started (Multi-TP)")
 
@@ -271,15 +273,22 @@ async def price_monitor():
                             close_qty = trade.tp_close_qtys[tp_idx] if tp_idx < len(trade.tp_close_qtys) else 0
                             trade_mgr.record_tp_fill(trade, tp_idx, close_qty, tp_fill_price)
 
-                            # After TP1: move SL to breakeven
+                            # After TP1: move SL to breakeven + cancel DCA
                             if tp_idx == 0 and config.sl_to_be_after_tp1:
                                 bybit.set_trading_stop(
                                     trade.symbol, trade.side,
                                     stop_loss=trade.signal_entry,
                                 )
+                                trade.hard_sl_price = trade.signal_entry
+                                # Cancel DCA orders - no longer needed after TP1
+                                # (SL at BE protects remaining position)
+                                for dca in trade.dca_levels[1:]:
+                                    if dca.order_id and not dca.filled:
+                                        bybit.cancel_order(trade.symbol, dca.order_id)
+                                        dca.order_id = ""
                                 logger.info(
                                     f"SL → BE: {trade.symbol_display} | "
-                                    f"SL moved to entry {trade.signal_entry:.4f}"
+                                    f"SL={trade.signal_entry:.4f} | DCAs cancelled"
                                 )
 
                             # After last TP: activate trailing on remaining 20%
@@ -381,8 +390,12 @@ def _place_exchange_tps(trade: Trade) -> None:
 
 
 def _set_initial_sl(trade: Trade) -> None:
-    """Set initial SL at entry-3% after E1 fills."""
-    sl_pct = config.hard_sl_pct / 100
+    """Set safety SL at entry-10% after E1 fills.
+
+    Wide safety SL gives DCA room to fill at -5% before stopping out.
+    After DCA fills → SL tightens to avg-3% (in _set_exchange_stops_after_dca).
+    """
+    sl_pct = config.safety_sl_pct / 100
     if trade.side == "long":
         trade.hard_sl_price = trade.avg_price * (1 - sl_pct)
     else:
@@ -393,8 +406,8 @@ def _set_initial_sl(trade: Trade) -> None:
         stop_loss=trade.hard_sl_price,
     )
     logger.info(
-        f"Initial SL set: {trade.symbol_display} | "
-        f"SL={trade.hard_sl_price:.4f} (entry-{config.hard_sl_pct}%)"
+        f"Safety SL set: {trade.symbol_display} | "
+        f"SL={trade.hard_sl_price:.4f} (entry-{config.safety_sl_pct}%)"
     )
 
 

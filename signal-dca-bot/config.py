@@ -7,8 +7,8 @@ Strategy:
 - Multi-TP: TP1 50%, TP2 10%, TP3 10%, TP4 10% (signal targets)
 - Trail remaining 20% after TP4 (0.5% CB)
 - SL-to-BE after TP1 fills
+- Two-tier SL: Safety SL at entry-10% (pre-DCA), Hard SL at avg-3% (post-DCA)
 - DCA exit: BE-Trail from avg (0.5% CB)
-- Hard SL at avg-3%
 - Neo Cloud trend switch: close on clear reversal
 - Zone-snapping: S1/R1 dynamic zones from LuxAlgo/Bybit candles
 """
@@ -64,8 +64,11 @@ class BotConfig:
     # ── DCA Exit (BE-Trail, activates from DCA1) ──
     be_trail_callback_pct: float = 0.5  # Trail from avg with 0.5% CB
 
-    # ── Hard Stop Loss ──
-    hard_sl_pct: float = 3.0  # SL at entry/avg - 3%
+    # ── Stop Loss (two-tier) ──
+    # Pre-DCA: safety SL at entry-10% (wide, gives DCA room to fill)
+    # Post-DCA: hard SL at avg-3% (tight, protects averaged position)
+    safety_sl_pct: float = 10.0   # Initial SL before DCA fills (entry-10%)
+    hard_sl_pct: float = 3.0      # SL after DCA fills (avg-3%)
 
     # ── Zone Snapping ──
     zone_snap_enabled: bool = True
@@ -128,8 +131,9 @@ class BotConfig:
         sm = self.sum_multipliers
         budget = self.trade_budget(equity)
         notional = budget * self.leverage
-        max_loss = notional * self.hard_sl_pct / 100
         e1n = self.e1_notional(equity)
+        safety_loss = e1n * self.safety_sl_pct / 100  # E1-only, pre-DCA
+        dca_loss = notional * self.hard_sl_pct / 100   # Full position, post-DCA
 
         print(f"╔══════════════════════════════════════════════════════╗")
         print(f"║  SIGNAL DCA BOT v2 - Multi-TP                        ║")
@@ -138,7 +142,8 @@ class BotConfig:
         print(f"║  Leverage:       {self.leverage}x (fixed)")
         print(f"║  Equity/Trade:   {self.equity_pct_per_trade}% = ${budget:.0f} margin")
         print(f"║  Notional/Trade: ${notional:.0f}")
-        print(f"║  Max SL Loss:    ${max_loss:.0f} ({max_loss/equity*100:.1f}% equity)")
+        print(f"║  Max Loss (no DCA): ${safety_loss:.0f} ({safety_loss/equity*100:.1f}% eq) [entry-{self.safety_sl_pct}%]")
+        print(f"║  Max Loss (DCA):    ${dca_loss:.0f} ({dca_loss/equity*100:.1f}% eq) [avg-{self.hard_sl_pct}%]")
         print(f"║  Max Trades:     {self.max_simultaneous_trades}")
         print(f"║")
         print(f"║  DCA:            {self.max_dca_levels} DCA {self.dca_multipliers[:self.max_dca_levels+1]} (sum={sm})")
@@ -153,7 +158,8 @@ class BotConfig:
         print(f"║    Trail CB: {self.trailing_callback_pct}%")
         print(f"║")
         print(f"║  DCA Exit:       BE-Trail ({self.be_trail_callback_pct}% CB from avg)")
-        print(f"║  Hard SL:        Entry/Avg - {self.hard_sl_pct}%")
+        print(f"║  Safety SL:      Entry - {self.safety_sl_pct}% (pre-DCA)")
+        print(f"║  Hard SL:        Avg - {self.hard_sl_pct}% (post-DCA)")
         print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")
         print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")

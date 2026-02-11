@@ -1,15 +1,16 @@
 """
 Trade Manager v2 - Multi-TP Strategy
 
-Exit Logic:
+Exit Logic (two-tier SL):
   E1-only (Multi-TP from signal targets):
+    → Safety SL at entry-10% (wide, gives DCA room to fill)
     → Place TP1-TP4 as reduceOnly limits: 50%/10%/10%/10%
-    → SL at entry-3%. After TP1 fills → SL moves to breakeven
+    → After TP1 fills → SL moves to breakeven, DCA orders cancelled
     → After TP4 fills → remaining 20% trails (0.5% CB)
     → All exits are exchange-side (Bybit handles TP/SL/trailing)
 
-  DCA1 active:
-    → Cancel unfilled TPs → Hard SL at avg-3%
+  DCA1 fills (price dipped to -5% before TP1):
+    → Cancel unfilled TPs → Hard SL at avg-3% (tight)
     → BE-Trail when price returns to avg (0.5% CB)
     → Close 100% on trail callback
 
