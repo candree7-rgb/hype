@@ -42,15 +42,15 @@ class BotConfig:
     neo_cloud_filter: bool = True       # Only take trades matching Neo Cloud trend
 
     # ── DCA Configuration ──
-    # 2 DCAs: E1 + DCA1 + DCA2 with sizing [1, 2, 4] = sum 7
+    # 1 DCA: E1 + DCA1 with sizing [1, 2] = sum 3
     dca_multipliers: list[float] = field(
-        default_factory=lambda: [1, 2, 4]
+        default_factory=lambda: [1, 2]
     )
-    # DCA spacing: DCA1 at -5%, DCA2 at -11% (before zone snap)
+    # DCA1 at entry-5% (before zone snap)
     dca_spacing_pct: list[float] = field(
-        default_factory=lambda: [0, 5, 11]
+        default_factory=lambda: [0, 5]
     )
-    max_dca_levels: int = 2  # 2 DCAs = total 3 entries (E1 + DCA1 + DCA2)
+    max_dca_levels: int = 1  # 1 DCA = total 2 entries (E1 + DCA1)
 
     # ── Multi-TP (E1-only mode, uses signal targets) ──
     # Close portions at signal's TP1-TP4 price targets.
