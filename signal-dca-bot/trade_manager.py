@@ -168,9 +168,8 @@ class TradeManager:
         self._trade_counter += 1
         trade_id = f"{signal.symbol}_{int(time.time())}_{self._trade_counter}"
 
-        # Dynamic position sizing: leverage from signal, equity% from risk formula
-        leverage = self.config.effective_leverage(signal.signal_leverage)
-        total_budget = self.config.trade_budget(equity, leverage)
+        # Fixed position sizing: 5% equity, 20x leverage
+        total_budget = self.config.trade_budget(equity)
         base_margin = total_budget / self.config.sum_multipliers
 
         # Calculate DCA levels
@@ -179,7 +178,7 @@ class TradeManager:
         for i in range(self.config.max_dca_levels + 1):
             price = self.config.dca_price(signal.entry_price, i, signal.side)
             margin = base_margin * self.config.dca_multipliers[i]
-            qty = margin * leverage / price
+            qty = margin * self.config.leverage / price
 
             level = DCALevel(
                 level=i,
@@ -209,7 +208,7 @@ class TradeManager:
             side=signal.side,
             signal_entry=signal.entry_price,
             signal_leverage=signal.signal_leverage,
-            leverage=leverage,
+            leverage=self.config.leverage,
             dca_levels=dca_levels,
             status=initial_status,
             total_qty=0 if initial_status == TradeStatus.PENDING else dca_levels[0].qty,

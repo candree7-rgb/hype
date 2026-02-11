@@ -103,9 +103,9 @@ class BybitEngine:
 
         Args:
             symbol: Trading pair
-            leverage: Leverage to set (0 = use fallback from config)
+            leverage: Leverage to set (0 = use config default)
         """
-        lev = leverage if leverage > 0 else self.config.fallback_leverage
+        lev = leverage if leverage > 0 else self.config.leverage
 
         try:
             # Detect position mode on first symbol setup

@@ -984,8 +984,8 @@ async def status():
         data["equity"] = "N/A"
 
     data["config"] = {
-        "max_risk_pct": config.max_risk_pct,
-        "fallback_lev": config.fallback_leverage,
+        "leverage": config.leverage,
+        "equity_pct": config.equity_pct_per_trade,
         "max_trades": config.max_simultaneous_trades,
         "dca_levels": config.max_dca_levels,
         "dca_mults": config.dca_multipliers[:config.max_dca_levels + 1],
@@ -1045,7 +1045,7 @@ async function update() {
     let html = '';
 
     html += '<div class="card">';
-    html += `<b class="blue">Config:</b> Risk ${d.config.max_risk_pct}%/trade | Signal Lev 1:1 | `;
+    html += `<b class="blue">Config:</b> ${d.config.leverage}x | ${d.config.equity_pct}% eq/trade | `;
     html += `Max ${d.config.max_trades} trades | ${d.config.dca_levels} DCA ${JSON.stringify(d.config.dca_mults)} | `;
     html += `TP: ${d.config.tp_pcts.map((p,i) => 'TP'+(i+1)+'='+p+'%').join(', ')} | SL avg-${d.config.hard_sl_pct}% | `;
     html += `Neo Cloud: ${d.config.neo_cloud ? 'ON' : 'OFF'} | `;

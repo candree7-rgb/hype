@@ -32,9 +32,8 @@ class BotConfig:
     telegram_channel: str = ""  # VIP Club channel name, username, or numeric ID
 
     # ── Capital & Risk ──
-    max_risk_pct: float = 5.0           # Max 5% equity at risk per trade (SL loss)
-    max_leverage: int = 0               # 0 = no cap, use signal leverage 1:1
-    fallback_leverage: int = 20         # When signal has no leverage info
+    leverage: int = 20                  # Fixed leverage for all trades
+    equity_pct_per_trade: float = 5.0   # 5% of equity per trade
     max_simultaneous_trades: int = 6
     e1_limit_order: bool = True         # True = Limit at signal price, False = Market
     e1_timeout_minutes: int = 10        # Cancel E1 limit if not filled after X minutes
@@ -98,44 +97,21 @@ class BotConfig:
         """Sum of all DCA multipliers used."""
         return sum(self.dca_multipliers[:self.max_dca_levels + 1])
 
-    def effective_leverage(self, signal_leverage: int) -> int:
-        """Use signal leverage 1:1. Cap only if max_leverage > 0. Fallback if 0."""
-        if signal_leverage <= 0:
-            return self.fallback_leverage
-        if self.max_leverage > 0:
-            return min(signal_leverage, self.max_leverage)
-        return signal_leverage
+    def trade_budget(self, equity: float) -> float:
+        """Total margin budget for a trade."""
+        return equity * self.equity_pct_per_trade / 100
 
-    def equity_pct_for_trade(self, leverage: int) -> float:
-        """Dynamic equity% based on leverage.
+    def e1_margin(self, equity: float) -> float:
+        """E1 margin in USD."""
+        return self.trade_budget(equity) / self.sum_multipliers
 
-        Formula: equity_pct = max_risk_pct / (leverage × hard_sl_pct / 100)
-        This ensures max loss per trade = max_risk_pct of equity.
-        """
-        denom = leverage * self.hard_sl_pct / 100
-        if denom <= 0:
-            return 1.0
-        return self.max_risk_pct / denom
-
-    def trade_budget(self, equity: float, leverage: int) -> float:
-        """Total margin budget for a trade given dynamic sizing."""
-        return equity * self.equity_pct_for_trade(leverage) / 100
-
-    def e1_margin(self, equity: float, leverage: int = 0) -> float:
-        """E1 margin in USD given current equity and leverage."""
-        lev = leverage if leverage > 0 else self.fallback_leverage
-        budget = self.trade_budget(equity, lev)
-        return budget / self.sum_multipliers
-
-    def e1_notional(self, equity: float, leverage: int = 0) -> float:
+    def e1_notional(self, equity: float) -> float:
         """E1 notional (leveraged) in USD."""
-        lev = leverage if leverage > 0 else self.fallback_leverage
-        return self.e1_margin(equity, lev) * lev
+        return self.e1_margin(equity) * self.leverage
 
-    def dca_margin(self, equity: float, level: int, leverage: int = 0) -> float:
+    def dca_margin(self, equity: float, level: int) -> float:
         """Margin for a specific DCA level (0=E1, 1=DCA1, etc.)."""
-        base = self.e1_margin(equity, leverage)
-        return base * self.dca_multipliers[level]
+        return self.e1_margin(equity) * self.dca_multipliers[level]
 
     def dca_price(self, entry_price: float, level: int, side: str) -> float:
         """Price at which a DCA level triggers."""
@@ -150,19 +126,24 @@ class BotConfig:
     def print_summary(self, equity: float = 2400):
         """Print configuration summary with example equity."""
         sm = self.sum_multipliers
-        max_loss = equity * self.max_risk_pct / 100
+        budget = self.trade_budget(equity)
+        notional = budget * self.leverage
+        max_loss = notional * self.hard_sl_pct / 100
+        e1n = self.e1_notional(equity)
 
         print(f"╔══════════════════════════════════════════════════════╗")
-        print(f"║  SIGNAL DCA BOT v2 - Multi-TP + Dynamic Sizing       ║")
+        print(f"║  SIGNAL DCA BOT v2 - Multi-TP                        ║")
         print(f"╠══════════════════════════════════════════════════════╣")
         print(f"║  Equity:         ${equity:,.0f}")
-        print(f"║  Max Risk/Trade: {self.max_risk_pct}% = ${max_loss:.0f} max SL loss")
+        print(f"║  Leverage:       {self.leverage}x (fixed)")
+        print(f"║  Equity/Trade:   {self.equity_pct_per_trade}% = ${budget:.0f} margin")
+        print(f"║  Notional/Trade: ${notional:.0f}")
+        print(f"║  Max SL Loss:    ${max_loss:.0f} ({max_loss/equity*100:.1f}% equity)")
         print(f"║  Max Trades:     {self.max_simultaneous_trades}")
-        cap_str = f"Cap {self.max_leverage}x" if self.max_leverage > 0 else "No cap (1:1)"
-        print(f"║  Leverage:       Signal 1:1 | {cap_str} | Fallback {self.fallback_leverage}x")
         print(f"║")
         print(f"║  DCA:            {self.max_dca_levels} DCA {self.dca_multipliers[:self.max_dca_levels+1]} (sum={sm})")
         print(f"║  DCA Spacing:    {self.dca_spacing_pct[:self.max_dca_levels+1]}%")
+        print(f"║  E1 Notional:    ${e1n:.0f}")
         print(f"║")
         print(f"║  Multi-TP (signal targets):")
         tp_labels = [f"TP{i+1}={p}%" for i, p in enumerate(self.tp_close_pcts)]
@@ -177,14 +158,13 @@ class BotConfig:
         print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")
         print(f"║")
-        # Show sizing for different leverages
-        for lev in [20, 25, 50, 75]:
-            eq_pct = self.equity_pct_for_trade(lev)
-            budget = self.trade_budget(equity, lev)
-            notional = budget * lev
-            e1m = budget / sm
-            e1n = e1m * lev
-            print(f"║  {lev}x: {eq_pct:.2f}% eq → ${budget:.0f} budget → E1 ${e1n:.0f} not → SL ${max_loss:.0f}")
+        print(f"║  Levels (Long @ $100):")
+        for i in range(self.max_dca_levels + 1):
+            p = self.dca_price(100, i, "long")
+            m = self.dca_margin(equity, i)
+            n = m * self.leverage
+            label = "E1" if i == 0 else f"DCA{i}"
+            print(f"║    {label}: ${p:.2f}  {self.dca_multipliers[i]:>2.0f}x  ${m:.2f} margin  ${n:.0f} notional")
         print(f"╚══════════════════════════════════════════════════════╝")
 
 
@@ -198,9 +178,8 @@ def load_config() -> BotConfig:
         telegram_api_hash=os.getenv("TELEGRAM_API_HASH", ""),
         telegram_string_session=os.getenv("TELEGRAM_STRING_SESSION", ""),
         telegram_channel=os.getenv("TELEGRAM_CHANNEL", ""),
-        max_risk_pct=float(os.getenv("MAX_RISK_PCT", "5")),
-        fallback_leverage=int(os.getenv("FALLBACK_LEVERAGE", "20")),
-        max_leverage=int(os.getenv("MAX_LEVERAGE", "0")),
+        leverage=int(os.getenv("LEVERAGE", "20")),
+        equity_pct_per_trade=float(os.getenv("EQUITY_PCT", "5")),
         max_simultaneous_trades=int(os.getenv("MAX_TRADES", "6")),
         database_url=os.getenv("DATABASE_URL", ""),
         host=os.getenv("HOST", "0.0.0.0"),
