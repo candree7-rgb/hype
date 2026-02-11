@@ -799,8 +799,18 @@ async def push_zones(request: Request):
     raw = await request.body()
     text = raw.decode("utf-8").strip()
 
-    # TradingView sends without outer {} to bypass JSON validator
-    # Wrap in braces if missing
+    # TradingView sends the full @alert() script text, not just the message.
+    # Extract JSON from: @alert("\"symbol\":\"X\",...") = condition
+    if text.startswith("@alert("):
+        # Find content between @alert(" and ") =
+        start = text.find('("')
+        end = text.find('") =')
+        if start != -1 and end != -1:
+            text = text[start + 2:end]  # Extract inner content
+            text = text.replace('\\"', '"')  # Unescape quotes
+            logger.debug(f"Extracted from @alert: {text[:100]}")
+
+    # Wrap in braces if missing (TradingView JSON bypass)
     if not text.startswith("{"):
         text = "{" + text + "}"
 
