@@ -108,6 +108,13 @@ def _init_tables_inline(conn):
             losses_count INTEGER DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS neo_cloud_trends (
+            symbol VARCHAR(30) PRIMARY KEY,
+            direction VARCHAR(10) NOT NULL,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
     cur.close()
     logger.info("DB tables created inline")
 
@@ -198,6 +205,76 @@ def get_all_zones() -> list[dict]:
     except Exception as e:
         logger.error(f"DB get_all_zones failed: {e}")
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ▌ NEO CLOUD TRENDS
+# ══════════════════════════════════════════════════════════════════════════
+
+def upsert_neo_cloud(symbol: str, direction: str) -> bool:
+    """Store Neo Cloud trend direction for a symbol.
+
+    Args:
+        symbol: e.g. "XRPUSDT"
+        direction: "up" or "down"
+    """
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO neo_cloud_trends (symbol, direction, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (symbol)
+            DO UPDATE SET direction=%s, updated_at=NOW()
+        """, (symbol, direction, direction))
+        cur.close()
+        return True
+    except Exception as e:
+        logger.error(f"DB upsert_neo_cloud failed for {symbol}: {e}")
+        return False
+
+
+def get_neo_cloud(symbol: str) -> Optional[str]:
+    """Get Neo Cloud trend direction for a symbol.
+
+    Returns "up", "down", or None if no data.
+    """
+    conn = get_connection()
+    if not conn:
+        return None
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT direction FROM neo_cloud_trends WHERE symbol = %s",
+            (symbol,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error(f"DB get_neo_cloud failed for {symbol}: {e}")
+        return None
+
+
+def get_all_neo_cloud() -> dict[str, str]:
+    """Get all Neo Cloud trends. Returns {symbol: direction}."""
+    conn = get_connection()
+    if not conn:
+        return {}
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT symbol, direction FROM neo_cloud_trends")
+        rows = cur.fetchall()
+        cur.close()
+        return {r[0]: r[1] for r in rows}
+    except Exception as e:
+        logger.error(f"DB get_all_neo_cloud failed: {e}")
+        return {}
 
 
 # ══════════════════════════════════════════════════════════════════════════

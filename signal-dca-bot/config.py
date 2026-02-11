@@ -32,22 +32,26 @@ class BotConfig:
     telegram_channel: str = ""  # VIP Club channel name, username, or numeric ID
 
     # ── Capital & Risk ──
-    leverage: int = 20
-    equity_pct_per_trade: float = 20.0  # 20% of equity per trade
+    max_risk_pct: float = 5.0           # Max 5% equity at risk per trade (SL loss)
+    max_leverage: int = 0               # 0 = no cap, use signal leverage 1:1
+    fallback_leverage: int = 20         # When signal has no leverage info
     max_simultaneous_trades: int = 6
     e1_limit_order: bool = True         # True = Limit at signal price, False = Market
     e1_timeout_minutes: int = 10        # Cancel E1 limit if not filled after X minutes
 
+    # ── Neo Cloud Trend Filter ──
+    neo_cloud_filter: bool = True       # Only take trades matching Neo Cloud trend
+
     # ── DCA Configuration ──
-    # 1 DCA: E1 + DCA1 with sizing [1, 2] = sum 3
+    # 2 DCAs: E1 + DCA1 + DCA2 with sizing [1, 2, 4] = sum 7
     dca_multipliers: list[float] = field(
-        default_factory=lambda: [1, 2]
+        default_factory=lambda: [1, 2, 4]
     )
-    # DCA1 at entry-5% (before zone snap)
+    # DCA spacing: DCA1 at -5%, DCA2 at -11% (before zone snap)
     dca_spacing_pct: list[float] = field(
-        default_factory=lambda: [0, 5]
+        default_factory=lambda: [0, 5, 11]
     )
-    max_dca_levels: int = 1  # 1 DCA = total 2 entries (E1 + DCA1)
+    max_dca_levels: int = 2  # 2 DCAs = total 3 entries (E1 + DCA1 + DCA2)
 
     # ── Multi-TP (E1-only mode, uses signal targets) ──
     # Close portions at signal's TP1-TP4 price targets.
@@ -94,23 +98,43 @@ class BotConfig:
         """Sum of all DCA multipliers used."""
         return sum(self.dca_multipliers[:self.max_dca_levels + 1])
 
-    @property
-    def base_fraction(self) -> float:
-        """E1 fraction of total budget: 1/sum."""
-        return 1.0 / self.sum_multipliers
+    def effective_leverage(self, signal_leverage: int) -> int:
+        """Use signal leverage 1:1. Cap only if max_leverage > 0. Fallback if 0."""
+        if signal_leverage <= 0:
+            return self.fallback_leverage
+        if self.max_leverage > 0:
+            return min(signal_leverage, self.max_leverage)
+        return signal_leverage
 
-    def e1_margin(self, equity: float) -> float:
-        """E1 margin in USD given current equity."""
-        total_budget = equity * self.equity_pct_per_trade / 100
-        return total_budget / self.sum_multipliers
+    def equity_pct_for_trade(self, leverage: int) -> float:
+        """Dynamic equity% based on leverage.
 
-    def e1_notional(self, equity: float) -> float:
+        Formula: equity_pct = max_risk_pct / (leverage × hard_sl_pct / 100)
+        This ensures max loss per trade = max_risk_pct of equity.
+        """
+        denom = leverage * self.hard_sl_pct / 100
+        if denom <= 0:
+            return 1.0
+        return self.max_risk_pct / denom
+
+    def trade_budget(self, equity: float, leverage: int) -> float:
+        """Total margin budget for a trade given dynamic sizing."""
+        return equity * self.equity_pct_for_trade(leverage) / 100
+
+    def e1_margin(self, equity: float, leverage: int = 0) -> float:
+        """E1 margin in USD given current equity and leverage."""
+        lev = leverage if leverage > 0 else self.fallback_leverage
+        budget = self.trade_budget(equity, lev)
+        return budget / self.sum_multipliers
+
+    def e1_notional(self, equity: float, leverage: int = 0) -> float:
         """E1 notional (leveraged) in USD."""
-        return self.e1_margin(equity) * self.leverage
+        lev = leverage if leverage > 0 else self.fallback_leverage
+        return self.e1_margin(equity, lev) * lev
 
-    def dca_margin(self, equity: float, level: int) -> float:
+    def dca_margin(self, equity: float, level: int, leverage: int = 0) -> float:
         """Margin for a specific DCA level (0=E1, 1=DCA1, etc.)."""
-        base = self.e1_margin(equity)
+        base = self.e1_margin(equity, leverage)
         return base * self.dca_multipliers[level]
 
     def dca_price(self, entry_price: float, level: int, side: str) -> float:
@@ -126,23 +150,19 @@ class BotConfig:
     def print_summary(self, equity: float = 2400):
         """Print configuration summary with example equity."""
         sm = self.sum_multipliers
-        e1m = self.e1_margin(equity)
-        e1n = self.e1_notional(equity)
-        total_budget = equity * self.equity_pct_per_trade / 100
-        total_notional = total_budget * self.leverage
+        max_loss = equity * self.max_risk_pct / 100
 
-        print(f"╔══════════════════════════════════════════════╗")
-        print(f"║  SIGNAL DCA BOT v2 - Multi-TP CONFIG         ║")
-        print(f"╠══════════════════════════════════════════════╣")
+        print(f"╔══════════════════════════════════════════════════════╗")
+        print(f"║  SIGNAL DCA BOT v2 - Multi-TP + Dynamic Sizing       ║")
+        print(f"╠══════════════════════════════════════════════════════╣")
         print(f"║  Equity:         ${equity:,.0f}")
-        print(f"║  Leverage:       {self.leverage}x")
+        print(f"║  Max Risk/Trade: {self.max_risk_pct}% = ${max_loss:.0f} max SL loss")
         print(f"║  Max Trades:     {self.max_simultaneous_trades}")
-        print(f"║  Budget/Trade:   {self.equity_pct_per_trade}% = ${total_budget:,.0f}")
-        print(f"║  Max Notional:   ${total_notional:,.0f}")
+        cap_str = f"Cap {self.max_leverage}x" if self.max_leverage > 0 else "No cap (1:1)"
+        print(f"║  Leverage:       Signal 1:1 | {cap_str} | Fallback {self.fallback_leverage}x")
         print(f"║")
         print(f"║  DCA:            {self.max_dca_levels} DCA {self.dca_multipliers[:self.max_dca_levels+1]} (sum={sm})")
         print(f"║  DCA Spacing:    {self.dca_spacing_pct[:self.max_dca_levels+1]}%")
-        print(f"║  E1 Margin:      ${e1m:.2f} → ${e1n:.2f} notional")
         print(f"║")
         print(f"║  Multi-TP (signal targets):")
         tp_labels = [f"TP{i+1}={p}%" for i, p in enumerate(self.tp_close_pcts)]
@@ -154,17 +174,18 @@ class BotConfig:
         print(f"║  DCA Exit:       BE-Trail ({self.be_trail_callback_pct}% CB from avg)")
         print(f"║  Hard SL:        Entry/Avg - {self.hard_sl_pct}%")
         print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")
+        print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")
         print(f"║")
-        print(f"║  Example (Long @ $100, E1 only):")
-        for i in range(self.max_dca_levels + 1):
-            p = self.dca_price(100, i, "long")
-            m = self.dca_margin(equity, i)
-            n = m * self.leverage
-            label = "E1" if i == 0 else f"DCA{i}"
-            print(f"║    {label}: ${p:.2f}  {self.dca_multipliers[i]:>2.0f}x  ${m:.2f} margin  ${n:.2f} notional")
-        print(f"║  Max Loss (SL):  ${total_notional * self.hard_sl_pct / 100:.2f}")
-        print(f"╚══════════════════════════════════════════════╝")
+        # Show sizing for different leverages
+        for lev in [20, 25, 50, 75]:
+            eq_pct = self.equity_pct_for_trade(lev)
+            budget = self.trade_budget(equity, lev)
+            notional = budget * lev
+            e1m = budget / sm
+            e1n = e1m * lev
+            print(f"║  {lev}x: {eq_pct:.2f}% eq → ${budget:.0f} budget → E1 ${e1n:.0f} not → SL ${max_loss:.0f}")
+        print(f"╚══════════════════════════════════════════════════════╝")
 
 
 def load_config() -> BotConfig:
@@ -177,8 +198,9 @@ def load_config() -> BotConfig:
         telegram_api_hash=os.getenv("TELEGRAM_API_HASH", ""),
         telegram_string_session=os.getenv("TELEGRAM_STRING_SESSION", ""),
         telegram_channel=os.getenv("TELEGRAM_CHANNEL", ""),
-        leverage=int(os.getenv("LEVERAGE", "20")),
-        equity_pct_per_trade=float(os.getenv("EQUITY_PCT", "20")),
+        max_risk_pct=float(os.getenv("MAX_RISK_PCT", "5")),
+        fallback_leverage=int(os.getenv("FALLBACK_LEVERAGE", "20")),
+        max_leverage=int(os.getenv("MAX_LEVERAGE", "0")),
         max_simultaneous_trades=int(os.getenv("MAX_TRADES", "6")),
         database_url=os.getenv("DATABASE_URL", ""),
         host=os.getenv("HOST", "0.0.0.0"),

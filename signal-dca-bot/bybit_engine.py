@@ -98,13 +98,14 @@ class BybitEngine:
             return {}
         return {"positionIdx": 1 if trade_side == "long" else 2}
 
-    def setup_symbol(self, symbol: str) -> bool:
+    def setup_symbol(self, symbol: str, leverage: int = 0) -> bool:
         """Set leverage and margin mode for a symbol.
 
-        Only runs once per symbol per session.
+        Args:
+            symbol: Trading pair
+            leverage: Leverage to set (0 = use fallback from config)
         """
-        if symbol in self._initialized_symbols:
-            return True
+        lev = leverage if leverage > 0 else self.config.fallback_leverage
 
         try:
             # Detect position mode on first symbol setup
@@ -121,19 +122,19 @@ class BybitEngine:
             except Exception:
                 pass  # Already set
 
-            # Set leverage
+            # Set leverage (always update, may differ per trade)
             try:
                 self.session.set_leverage(
                     category="linear",
                     symbol=symbol,
-                    buyLeverage=str(self.config.leverage),
-                    sellLeverage=str(self.config.leverage),
+                    buyLeverage=str(lev),
+                    sellLeverage=str(lev),
                 )
             except Exception:
-                pass  # Already set
+                pass  # Already set to same value
 
             self._initialized_symbols.add(symbol)
-            logger.info(f"Symbol setup: {symbol} | Cross {self.config.leverage}x")
+            logger.info(f"Symbol setup: {symbol} | Cross {lev}x")
             return True
 
         except Exception as e:
@@ -210,8 +211,8 @@ class BybitEngine:
         """
         symbol = trade.symbol
 
-        # Setup symbol (leverage, margin mode)
-        if not self.setup_symbol(symbol):
+        # Setup symbol (leverage from signal, margin mode)
+        if not self.setup_symbol(symbol, trade.leverage):
             return False
 
         # Get instrument info for rounding

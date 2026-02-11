@@ -130,6 +130,21 @@ async def execute_signal(signal: Signal) -> dict:
         logger.info(f"Signal rejected: {signal.symbol_display} | {reason}")
         return {"status": "rejected", "reason": reason}
 
+    # Neo Cloud trend filter: skip counter-trend signals
+    if config.neo_cloud_filter:
+        neo_trend = db.get_neo_cloud(signal.symbol)
+        if neo_trend:
+            # Long signal requires "up" trend, Short requires "down"
+            expected = "up" if signal.side == "long" else "down"
+            if neo_trend != expected:
+                reason = f"Neo Cloud filter: {signal.side} vs trend={neo_trend}"
+                logger.info(
+                    f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | "
+                    f"Neo Cloud says {neo_trend.upper()} → SKIP"
+                )
+                return {"status": "filtered", "reason": reason}
+        # No Neo Cloud data for this symbol → allow trade (no filter)
+
     equity = bybit.get_equity()
     if equity <= 0:
         logger.error("Cannot get equity, skipping signal")
@@ -167,7 +182,7 @@ async def execute_signal(signal: Signal) -> dict:
                     old_price = trade.dca_levels[i].price
                     trade.dca_levels[i].price = price
                     trade.dca_levels[i].qty = (
-                        trade.dca_levels[i].margin * config.leverage / price
+                        trade.dca_levels[i].margin * trade.leverage / price
                     )
                     logger.info(
                         f"DCA{i} snapped: {old_price:.4f} → {price:.4f} ({source})"
@@ -534,7 +549,7 @@ async def resnap_active_dcas(symbol: str):
             success = bybit.amend_order_price(trade.symbol, dca.order_id, new_price)
             if success:
                 dca.price = new_price
-                dca.qty = dca.margin * config.leverage / new_price
+                dca.qty = dca.margin * trade.leverage / new_price
                 logger.info(
                     f"DCA{i} re-snapped: {trade.symbol_display} | "
                     f"{old_price:.4f} → {new_price:.4f} ({source}, {pct_change:.1f}% shift)"
@@ -688,13 +703,16 @@ async def trend_switch(request: Request):
             status_code=400,
         )
 
+    # Store trend in DB for signal filtering
+    db.upsert_neo_cloud(symbol, direction)
+
     # up = bullish reversal → close shorts
     # down = bearish reversal → close longs
     close_side = "short" if direction == "up" else "long"
 
     logger.info(
         f"Neo Cloud trend switch: {symbol} → {direction.upper()} | "
-        f"Closing {close_side.upper()} positions"
+        f"Closing {close_side.upper()} positions | Stored in DB"
     )
 
     closed = []
@@ -966,14 +984,15 @@ async def status():
         data["equity"] = "N/A"
 
     data["config"] = {
-        "leverage": config.leverage,
-        "equity_pct": config.equity_pct_per_trade,
+        "max_risk_pct": config.max_risk_pct,
+        "fallback_lev": config.fallback_leverage,
         "max_trades": config.max_simultaneous_trades,
         "dca_levels": config.max_dca_levels,
         "dca_mults": config.dca_multipliers[:config.max_dca_levels + 1],
         "tp_pcts": config.tp_close_pcts,
         "hard_sl_pct": config.hard_sl_pct,
         "zones": config.zone_snap_enabled,
+        "neo_cloud": config.neo_cloud_filter,
         "testnet": config.bybit_testnet,
     }
 
@@ -1026,9 +1045,10 @@ async function update() {
     let html = '';
 
     html += '<div class="card">';
-    html += `<b class="blue">Config:</b> ${d.config.leverage}x | ${d.config.equity_pct}% per trade | `;
+    html += `<b class="blue">Config:</b> Risk ${d.config.max_risk_pct}%/trade | Signal Lev 1:1 | `;
     html += `Max ${d.config.max_trades} trades | ${d.config.dca_levels} DCA ${JSON.stringify(d.config.dca_mults)} | `;
     html += `TP: ${d.config.tp_pcts.map((p,i) => 'TP'+(i+1)+'='+p+'%').join(', ')} | SL avg-${d.config.hard_sl_pct}% | `;
+    html += `Neo Cloud: ${d.config.neo_cloud ? 'ON' : 'OFF'} | `;
     html += `Zones: ${d.config.zones ? 'ON' : 'OFF'} | `;
     html += d.config.testnet ? '<span class="yellow">TESTNET</span>' : '<span class="red">LIVE</span>';
     html += ` | Equity: <b>${d.equity}</b>`;
