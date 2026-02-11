@@ -72,7 +72,7 @@ class BotConfig:
 
     # ── Zone Snapping ──
     zone_snap_enabled: bool = True
-    zone_snap_min_pct: float = 2.0        # Min distance for zone snap (hybrid mode)
+    zone_snap_min_pct: float = 3.0        # Min distance for zone snap (S1/R1 only if >3%)
     zone_refresh_minutes: int = 15        # Refresh zones every 15min
     zone_candle_count: int = 100          # Candles to analyze for swing H/L
     zone_candle_interval: str = "15"      # 15min candles
