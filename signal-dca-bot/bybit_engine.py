@@ -628,3 +628,138 @@ class BybitEngine:
         except Exception as e:
             logger.error(f"Get orders failed for {symbol}: {e}")
             return []
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ▌ EXCHANGE-SIDE TP / SL / TRAILING
+    # ══════════════════════════════════════════════════════════════════════
+
+    def place_tp_order(self, trade: Trade, tp_price: float, qty: float) -> str | None:
+        """Place TP as reduceOnly limit order on Bybit.
+
+        Returns order_id if successful, None otherwise.
+        """
+        info = self.get_instrument_info(trade.symbol)
+        if not info:
+            return None
+
+        tp_price = self.round_price(tp_price, info["tick_size"])
+        qty = self.round_qty(qty, info["qty_step"])
+
+        if qty < info["min_qty"]:
+            logger.warning(f"TP qty too small: {qty} for {trade.symbol}")
+            return None
+
+        if tp_price <= 0:
+            logger.warning(f"TP price rounded to 0 for {trade.symbol}")
+            return None
+
+        close_side = "Sell" if trade.side == "long" else "Buy"
+        pos_idx = self._position_idx(trade.side)
+
+        try:
+            result = self.session.place_order(
+                category="linear",
+                symbol=trade.symbol,
+                side=close_side,
+                orderType="Limit",
+                qty=str(qty),
+                price=str(tp_price),
+                timeInForce="GTC",
+                reduceOnly=True,
+                orderLinkId=f"{trade.trade_id}_TP1",
+                **pos_idx,
+            )
+            order_id = result["result"]["orderId"]
+            logger.info(
+                f"TP1 placed: {trade.symbol} {close_side} {qty} @ {tp_price} | "
+                f"Order: {order_id}"
+            )
+            return order_id
+        except Exception as e:
+            logger.error(f"TP1 order failed for {trade.symbol}: {e}")
+            return None
+
+    def set_trading_stop(self, symbol: str, trade_side: str,
+                         stop_loss: float = 0, trailing_stop: float = 0,
+                         active_price: float = 0) -> bool:
+        """Set exchange-side SL and/or trailing stop via Bybit API.
+
+        Args:
+            symbol: Trading pair
+            trade_side: "long" or "short"
+            stop_loss: SL price (0 = don't change)
+            trailing_stop: Trailing distance in price units (0 = don't change)
+            active_price: Price at which trailing activates (0 = immediate)
+        """
+        pos_idx = self._position_idx(trade_side)
+
+        body = {
+            "category": "linear",
+            "symbol": symbol,
+            "tpslMode": "Full",
+        }
+        body.update(pos_idx)
+
+        info = self.get_instrument_info(symbol)
+        if not info:
+            return False
+
+        if stop_loss > 0:
+            body["stopLoss"] = str(self.round_price(stop_loss, info["tick_size"]))
+        if trailing_stop > 0:
+            body["trailingStop"] = str(self.round_price(trailing_stop, info["tick_size"]))
+        if active_price > 0:
+            body["activePrice"] = str(self.round_price(active_price, info["tick_size"]))
+
+        try:
+            self.session.set_trading_stop(**body)
+            parts = []
+            if stop_loss > 0:
+                parts.append(f"SL={stop_loss:.4f}")
+            if trailing_stop > 0:
+                parts.append(f"Trail={trailing_stop:.4f}")
+            if active_price > 0:
+                parts.append(f"ActiveAt={active_price:.4f}")
+            logger.info(f"Trading stop set: {symbol} | {' | '.join(parts)}")
+            return True
+        except Exception as e:
+            err_str = str(e)
+            if "34040" in err_str:
+                logger.debug(f"Trading stop unchanged for {symbol}")
+                return True
+            logger.error(f"Set trading stop failed for {symbol}: {e}")
+            return False
+
+    def check_order_filled(self, symbol: str, order_id: str) -> tuple[bool, float]:
+        """Check if an order has been filled.
+
+        Returns (is_filled, fill_price).
+        """
+        try:
+            result = self.session.get_order_history(
+                category="linear",
+                symbol=symbol,
+                orderId=order_id,
+            )
+            orders = result["result"]["list"]
+            if orders:
+                status = orders[0]["orderStatus"]
+                if status == "Filled":
+                    fill_price = float(orders[0]["avgPrice"])
+                    return True, fill_price
+        except Exception as e:
+            logger.error(f"Check order fill failed for {order_id}: {e}")
+        return False, 0.0
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        """Cancel a single order by ID."""
+        try:
+            self.session.cancel_order(
+                category="linear",
+                symbol=symbol,
+                orderId=order_id,
+            )
+            return True
+        except Exception as e:
+            logger.debug(f"Cancel order {order_id} failed: {e}")
+            return False

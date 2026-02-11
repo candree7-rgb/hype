@@ -83,6 +83,7 @@ class Trade:
     hard_sl_price: float = 0.0
 
     # Orders
+    tp1_order_id: str = ""          # Bybit order ID for TP1 reduceOnly limit
     dca_order_ids: list[str] = field(default_factory=list)
 
     # Timing

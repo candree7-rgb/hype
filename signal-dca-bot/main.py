@@ -197,7 +197,14 @@ async def execute_signal(signal: Signal) -> dict:
 # ══════════════════════════════════════════════════════════════════════════
 
 async def price_monitor():
-    """Background task: poll prices and manage all trade exits."""
+    """Background task: poll order fills and detect exchange-side closes.
+
+    All exits are exchange-side (Bybit handles TP/SL/trailing):
+    - TP1: reduceOnly limit order at +1% (50% qty)
+    - Trailing: set_trading_stop(trailingStop) after TP1 fills
+    - Hard SL: set_trading_stop(stopLoss) after all DCAs filled
+    - BE-Trail: set_trading_stop(trailingStop, activePrice=avg) after DCA
+    """
     logger.info("Price monitor started")
 
     while True:
@@ -216,7 +223,10 @@ async def price_monitor():
                     filled = bybit.check_e1_filled(trade)
                     if filled:
                         trade.status = TradeStatus.OPEN
+                        # Place DCA orders
                         bybit.place_dca_for_trade(trade)
+                        # Place TP1 reduceOnly limit on Bybit
+                        _place_exchange_tp1(trade)
                         logger.info(f"E1 filled → OPEN: {trade.symbol_display}")
                     else:
                         age_min = (time.time() - trade.opened_at) / 60
@@ -229,76 +239,77 @@ async def price_monitor():
                     await asyncio.sleep(0.2)
                     continue
 
-                # Get current price
-                price = bybit.get_ticker_price(trade.symbol)
-                if price is None:
-                    continue
-
-                # ── 1. HARD SL (highest priority, DCA mode) ──
-                sl_action = trade_mgr.check_hard_sl(trade, price)
-                if sl_action:
-                    success = bybit.close_full(trade, sl_action["reason"])
-                    if success:
-                        qty = sl_action["qty"]
-                        if trade.side == "long":
-                            pnl = (price - trade.avg_price) * qty
-                        else:
-                            pnl = (trade.avg_price - price) * qty
-                        trade.realized_pnl += pnl
-                        trade_mgr.close_trade(trade, price, trade.realized_pnl, sl_action["reason"])
-                    continue
-
-                # ── 2. BE-TRAIL (DCA mode, price returned to avg) ──
-                be_action = trade_mgr.check_be_trail(trade, price)
-                if be_action:
-                    success = bybit.close_full(trade, be_action["reason"])
-                    if success:
-                        qty = be_action["qty"]
-                        if trade.side == "long":
-                            pnl = (price - trade.avg_price) * qty
-                        else:
-                            pnl = (trade.avg_price - price) * qty
-                        trade.realized_pnl += pnl
-                        trade_mgr.close_trade(trade, price, trade.realized_pnl, be_action["reason"])
-                    continue
-
-                # ── 3. TP1 (E1-only, no DCA) ──
-                tp_action = trade_mgr.check_tp1(trade, price)
-                if tp_action:
-                    qty = tp_action["qty"]
-                    success = bybit.close_partial(trade, qty, "TP1")
-                    if success:
-                        trade_mgr.record_tp1(trade, qty, price)
-                        if trade.side == "long":
-                            pnl = (price - trade.avg_price) * qty
-                        else:
-                            pnl = (trade.avg_price - price) * qty
-                        trade.realized_pnl += pnl
-                    continue
-
-                # ── 4. TRAILING (after TP1, E1-only) ──
-                trail_action = trade_mgr.check_trailing(trade, price)
-                if trail_action:
-                    success = bybit.close_full(trade, trail_action["reason"])
-                    if success:
-                        qty = trail_action["qty"]
-                        if trade.side == "long":
-                            pnl = (price - trade.avg_price) * qty
-                        else:
-                            pnl = (trade.avg_price - price) * qty
-                        trade.realized_pnl += pnl
-                        trade_mgr.close_trade(trade, price, trade.realized_pnl, trail_action["reason"])
-                    continue
-
-                # ── 5. DCA TRIGGER ──
-                dca_action = trade_mgr.check_dca_trigger(trade, price)
-                if dca_action:
-                    level = dca_action["level"]
-                    trade_mgr.fill_dca(trade, level, price)
-                    logger.info(
-                        f"DCA{level} triggered: {trade.symbol_display} @ {price:.4f} | "
-                        f"New avg: {trade.avg_price:.4f} | SL: {trade.hard_sl_price:.4f}"
+                # ── 1. Check TP1 fill (exchange-side limit order) ──
+                if trade.tp1_order_id and not trade.tp1_hit:
+                    tp_filled, tp_fill_price = bybit.check_order_filled(
+                        trade.symbol, trade.tp1_order_id
                     )
+                    if tp_filled:
+                        tp1_qty = trade.total_qty * config.tp1_close_pct / 100
+                        trade_mgr.record_tp1(trade, tp1_qty, tp_fill_price)
+                        if trade.side == "long":
+                            pnl = (tp_fill_price - trade.avg_price) * tp1_qty
+                        else:
+                            pnl = (trade.avg_price - tp_fill_price) * tp1_qty
+                        trade.realized_pnl += pnl
+                        # Activate trailing stop on Bybit for remaining position
+                        trail_dist = tp_fill_price * config.trailing_callback_pct / 100
+                        bybit.set_trading_stop(
+                            trade.symbol, trade.side,
+                            trailing_stop=trail_dist,
+                        )
+                        logger.info(
+                            f"TP1 filled on Bybit: {trade.symbol_display} @ {tp_fill_price:.4f} | "
+                            f"PnL: ${pnl:+.2f} | Trailing {config.trailing_callback_pct}% activated"
+                        )
+
+                # ── 2. Check DCA fills (exchange-side limit orders) ──
+                for i in range(1, trade.max_dca + 1):
+                    if i >= len(trade.dca_levels):
+                        break
+                    dca = trade.dca_levels[i]
+                    if dca.filled or not dca.order_id:
+                        continue
+                    dca_filled, dca_fill_price = bybit.check_order_filled(
+                        trade.symbol, dca.order_id
+                    )
+                    if dca_filled:
+                        trade_mgr.fill_dca(trade, i, dca_fill_price)
+
+                        # Cancel TP1 if unfilled (DCA mode = different exit)
+                        if trade.tp1_order_id and not trade.tp1_hit:
+                            bybit.cancel_order(trade.symbol, trade.tp1_order_id)
+                            trade.tp1_order_id = ""
+
+                        # Set exchange-side stops
+                        _set_exchange_stops_after_dca(trade)
+
+                        logger.info(
+                            f"DCA{i} filled on Bybit: {trade.symbol_display} @ {dca_fill_price:.4f} | "
+                            f"New avg: {trade.avg_price:.4f} | DCA {trade.current_dca}/{trade.max_dca}"
+                        )
+                        break  # Process one DCA per cycle
+
+                # ── 3. Detect position closed by exchange (SL/trailing triggered) ──
+                if trade.status in (TradeStatus.TRAILING, TradeStatus.BE_TRAILING,
+                                    TradeStatus.DCA_ACTIVE, TradeStatus.OPEN):
+                    pos = bybit.get_position(trade.symbol)
+                    if pos is None or pos["size"] == 0:
+                        # Position closed by Bybit (SL or trailing stop triggered)
+                        price = bybit.get_ticker_price(trade.symbol) or trade.avg_price
+                        remaining = trade.remaining_qty if trade.tp1_hit else trade.total_qty
+                        if trade.side == "long":
+                            pnl = (price - trade.avg_price) * remaining
+                        else:
+                            pnl = (trade.avg_price - price) * remaining
+                        trade.realized_pnl += pnl
+                        reason = "Exchange stop (SL/trailing)"
+                        trade_mgr.close_trade(trade, price, trade.realized_pnl, reason)
+                        logger.info(
+                            f"Position closed by Bybit: {trade.symbol_display} | "
+                            f"PnL: ${trade.realized_pnl:+.2f}"
+                        )
+                        continue
 
                 await asyncio.sleep(0.2)
 
@@ -307,6 +318,54 @@ async def price_monitor():
         except Exception as e:
             logger.error(f"Price monitor error: {e}", exc_info=True)
             await asyncio.sleep(5)
+
+
+def _place_exchange_tp1(trade: Trade) -> None:
+    """Place TP1 as reduceOnly limit on Bybit after E1 fills."""
+    if trade.side == "long":
+        tp1_price = trade.avg_price * (1 + config.tp1_pct / 100)
+    else:
+        tp1_price = trade.avg_price * (1 - config.tp1_pct / 100)
+
+    tp1_qty = trade.total_qty * config.tp1_close_pct / 100
+    order_id = bybit.place_tp_order(trade, tp1_price, tp1_qty)
+    if order_id:
+        trade.tp1_order_id = order_id
+
+
+def _set_exchange_stops_after_dca(trade: Trade) -> None:
+    """Set exchange-side SL/trailing after a DCA fills.
+
+    Before all DCAs filled: trailing only (activates at avg = BE exit)
+    After all DCAs filled: hard SL + trailing (activates at avg)
+    """
+    trail_dist = trade.avg_price * config.be_trail_callback_pct / 100
+
+    if trade.current_dca >= trade.max_dca:
+        # ALL DCAs filled → hard SL at avg-3% + BE trailing
+        bybit.set_trading_stop(
+            trade.symbol, trade.side,
+            stop_loss=trade.hard_sl_price,
+            trailing_stop=trail_dist,
+            active_price=trade.avg_price,
+        )
+        logger.info(
+            f"All DCAs filled: {trade.symbol_display} | "
+            f"SL={trade.hard_sl_price:.4f} | Trail={config.be_trail_callback_pct}% "
+            f"(activates at avg={trade.avg_price:.4f})"
+        )
+    else:
+        # More DCAs pending → trailing only (no SL, DCAs are safety net)
+        bybit.set_trading_stop(
+            trade.symbol, trade.side,
+            trailing_stop=trail_dist,
+            active_price=trade.avg_price,
+        )
+        logger.info(
+            f"DCA{trade.current_dca} stops: {trade.symbol_display} | "
+            f"Trail={config.be_trail_callback_pct}% "
+            f"(activates at avg={trade.avg_price:.4f})"
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════
