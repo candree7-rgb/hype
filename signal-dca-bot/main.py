@@ -49,6 +49,7 @@ zone_mgr: ZoneDataManager = ZoneDataManager()
 tg_listener: TelegramListener | None = None
 monitor_task: asyncio.Task | None = None
 zone_refresh_task: asyncio.Task | None = None
+safety_task: asyncio.Task | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -570,6 +571,131 @@ async def resnap_active_dcas(symbol: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# ▌ SAFETY MONITOR (periodic SL/position verification)
+# ══════════════════════════════════════════════════════════════════════════
+
+SAFETY_CHECK_INTERVAL = 30  # seconds
+
+async def safety_monitor():
+    """Background: verify all active trades have SL set on exchange.
+
+    Runs every 30s. If a position exists on Bybit but has no SL,
+    re-sets the SL. This prevents zombie positions from running unprotected.
+    Also detects orphan positions (on exchange but not tracked by bot).
+    """
+    logger.info("Safety monitor started")
+
+    # Initial orphan check on startup (wait for things to settle)
+    await asyncio.sleep(15)
+    await _check_orphan_positions()
+
+    while True:
+        try:
+            await asyncio.sleep(SAFETY_CHECK_INTERVAL)
+
+            active = trade_mgr.active_trades
+            if not active:
+                continue
+
+            for trade in active:
+                if trade.status in (TradeStatus.CLOSED, TradeStatus.PENDING):
+                    continue
+
+                # Check position on exchange
+                pos = bybit.get_position(trade.symbol)
+
+                if pos is None or pos["size"] == 0:
+                    # Position gone but trade still tracked → already handled by price_monitor
+                    continue
+
+                # Position exists - verify SL is set
+                if pos["stop_loss"] == 0 and pos["trailing_stop"] == 0:
+                    logger.warning(
+                        f"SAFETY: No SL on {trade.symbol_display} {trade.side.upper()}! "
+                        f"size={pos['size']} | Re-setting SL"
+                    )
+
+                    # Determine what SL to set based on trade state
+                    if trade.hard_sl_price and trade.hard_sl_price > 0:
+                        # Use existing hard SL
+                        bybit.set_trading_stop(
+                            trade.symbol, trade.side,
+                            stop_loss=trade.hard_sl_price,
+                        )
+                        logger.info(
+                            f"SAFETY: SL restored: {trade.symbol_display} | "
+                            f"SL={trade.hard_sl_price:.4f}"
+                        )
+                    else:
+                        # Fallback: set safety SL at entry-10%
+                        sl_pct = config.safety_sl_pct / 100
+                        if trade.side == "long":
+                            sl_price = trade.avg_price * (1 - sl_pct)
+                        else:
+                            sl_price = trade.avg_price * (1 + sl_pct)
+                        trade.hard_sl_price = sl_price
+                        bybit.set_trading_stop(
+                            trade.symbol, trade.side,
+                            stop_loss=sl_price,
+                        )
+                        logger.info(
+                            f"SAFETY: Emergency SL set: {trade.symbol_display} | "
+                            f"SL={sl_price:.4f} (fallback entry-{config.safety_sl_pct}%)"
+                        )
+
+                await asyncio.sleep(0.3)  # Rate limit
+
+        except Exception as e:
+            logger.error(f"Safety monitor error: {e}", exc_info=True)
+            await asyncio.sleep(10)
+
+
+async def _check_orphan_positions():
+    """Check for positions on Bybit not tracked by the bot.
+
+    Called once on startup. Logs warnings for any orphan positions
+    so the user knows to close them manually.
+    """
+    try:
+        all_positions = bybit.get_all_positions()
+        if not all_positions:
+            logger.info("Orphan check: no open positions on Bybit")
+            return
+
+        tracked_symbols = set()
+        for trade in trade_mgr.active_trades:
+            if trade.status != TradeStatus.CLOSED:
+                tracked_symbols.add((trade.symbol, trade.side))
+
+        orphans = []
+        for pos in all_positions:
+            key = (pos["symbol"], pos["side"])
+            if key not in tracked_symbols:
+                orphans.append(pos)
+                logger.warning(
+                    f"ORPHAN POSITION: {pos['symbol']} {pos['side'].upper()} | "
+                    f"size={pos['size']} | avg={pos['avg_price']} | "
+                    f"SL={'SET' if pos['stop_loss'] > 0 else 'NONE!'} | "
+                    f"uPnL={pos['unrealized_pnl']:+.2f} | "
+                    f"NOT tracked by bot!"
+                )
+
+        if orphans:
+            logger.warning(
+                f"ORPHAN CHECK: {len(orphans)} untracked positions found! "
+                f"Close them manually on Bybit."
+            )
+        else:
+            logger.info(
+                f"Orphan check OK: {len(all_positions)} positions, "
+                f"all tracked by bot"
+            )
+
+    except Exception as e:
+        logger.error(f"Orphan check error: {e}", exc_info=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ▌ FASTAPI APP
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -595,7 +721,7 @@ async def handle_tg_close(close_cmd: dict):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global monitor_task, zone_refresh_task, tg_listener
+    global monitor_task, zone_refresh_task, safety_task, tg_listener
 
     logger.info("Signal DCA Bot v2 starting...")
     config.print_summary()
@@ -614,6 +740,7 @@ async def lifespan(app: FastAPI):
 
     monitor_task = asyncio.create_task(price_monitor())
     zone_refresh_task = asyncio.create_task(zone_refresh_loop())
+    safety_task = asyncio.create_task(safety_monitor())
 
     yield
 
@@ -621,6 +748,8 @@ async def lifespan(app: FastAPI):
         monitor_task.cancel()
     if zone_refresh_task:
         zone_refresh_task.cancel()
+    if safety_task:
+        safety_task.cancel()
     if tg_listener:
         await tg_listener.stop()
     logger.info("Bot stopped")
@@ -735,12 +864,30 @@ async def trend_switch(request: Request):
         if trade.side != close_side:
             continue
 
-        price = bybit.get_ticker_price(trade.symbol)
-
-        # Cancel all open orders (TPs, DCAs)
+        # Cancel ALL orders first (E1 limit, DCAs, TPs)
         bybit.cancel_all_orders(trade.symbol)
 
+        # PENDING trades: E1 never filled, just cancel and remove
+        if trade.status == TradeStatus.PENDING or trade.total_qty <= 0:
+            trade_mgr.close_trade(
+                trade, 0, 0,
+                f"Neo Cloud trend switch ({direction}) - unfilled"
+            )
+            closed.append({
+                "trade_id": trade.trade_id,
+                "symbol": trade.symbol_display,
+                "side": trade.side,
+                "pnl": "$0.00 (unfilled)",
+            })
+            logger.info(
+                f"Neo Cloud cancelled unfilled: {trade.symbol_display} {trade.side.upper()}"
+            )
+            continue
+
+        # FILLED trades: close position on exchange
+        price = bybit.get_ticker_price(trade.symbol)
         success = bybit.close_full(trade, f"Neo Cloud {direction}")
+
         if success and price:
             remaining = trade.remaining_qty
             if trade.side == "long":
@@ -748,6 +895,18 @@ async def trend_switch(request: Request):
             else:
                 pnl = (trade.avg_price - price) * remaining
             trade.realized_pnl += pnl
+
+            # Verify position is actually closed
+            await asyncio.sleep(1)
+            pos = bybit.get_position(trade.symbol)
+            if pos and pos["size"] > 0:
+                logger.warning(
+                    f"Position still open after close! {trade.symbol_display} "
+                    f"size={pos['size']} - retrying"
+                )
+                bybit.close_full(trade, "Neo Cloud retry")
+                await asyncio.sleep(1)
+
             trade_mgr.close_trade(
                 trade, price, trade.realized_pnl,
                 f"Neo Cloud trend switch ({direction})"
@@ -901,8 +1060,27 @@ async def push_zones(request: Request):
                 if trade.symbol != symbol_clean or trade.side != close_side:
                     continue
 
-                price = bybit.get_ticker_price(trade.symbol)
+                # Cancel ALL orders first (E1 limit, DCAs, TPs)
                 bybit.cancel_all_orders(trade.symbol)
+
+                # PENDING trades: E1 never filled, just cancel and remove
+                if trade.status == TradeStatus.PENDING or trade.total_qty <= 0:
+                    trade_mgr.close_trade(
+                        trade, 0, 0,
+                        f"Neo Cloud switch ({new_direction}) - unfilled"
+                    )
+                    closed.append({
+                        "trade_id": trade.trade_id,
+                        "side": trade.side,
+                        "pnl": "$0.00 (unfilled)",
+                    })
+                    logger.info(
+                        f"Neo Cloud cancelled unfilled: {trade.symbol_display}"
+                    )
+                    continue
+
+                # FILLED trades: close position on exchange
+                price = bybit.get_ticker_price(trade.symbol)
                 success = bybit.close_full(trade, f"Neo Cloud {new_direction}")
 
                 if success and price:
@@ -912,6 +1090,18 @@ async def push_zones(request: Request):
                     else:
                         pnl = (trade.avg_price - price) * remaining
                     trade.realized_pnl += pnl
+
+                    # Verify position is actually closed
+                    await asyncio.sleep(1)
+                    pos = bybit.get_position(trade.symbol)
+                    if pos and pos["size"] > 0:
+                        logger.warning(
+                            f"Position still open after close! {trade.symbol} "
+                            f"size={pos['size']} - retrying"
+                        )
+                        bybit.close_full(trade, "Neo Cloud retry")
+                        await asyncio.sleep(1)
+
                     trade_mgr.close_trade(
                         trade, price, trade.realized_pnl,
                         f"Neo Cloud switch ({new_direction})"

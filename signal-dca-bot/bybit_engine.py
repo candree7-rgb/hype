@@ -468,11 +468,26 @@ class BybitEngine:
         if remaining <= 0:
             remaining = trade.total_qty
 
+        # Guard: can't close a position with 0 qty (PENDING/unfilled trades)
+        if remaining <= 0:
+            logger.warning(
+                f"close_full skipped: {trade.symbol} has 0 qty "
+                f"(status={trade.status}, reason={reason})"
+            )
+            return False
+
         info = self.get_instrument_info(trade.symbol)
         if not info:
             return False
 
         qty = self.round_qty(remaining, info["qty_step"])
+        if qty <= 0:
+            logger.warning(
+                f"close_full skipped: {trade.symbol} rounded qty=0 "
+                f"(remaining={remaining}, reason={reason})"
+            )
+            return False
+
         close_side = "Sell" if trade.side == "long" else "Buy"
 
         pos_idx = self._position_idx(trade.side)
@@ -545,11 +560,38 @@ class BybitEngine:
                         "avg_price": float(pos["avgPrice"]),
                         "unrealized_pnl": float(pos["unrealisedPnl"]),
                         "leverage": pos["leverage"],
+                        "stop_loss": float(pos.get("stopLoss", 0) or 0),
+                        "trailing_stop": float(pos.get("trailingStop", 0) or 0),
                     }
             return None
         except Exception as e:
             logger.error(f"Get position failed for {symbol}: {e}")
             return None
+
+    def get_all_positions(self) -> list[dict]:
+        """Get ALL open positions (for orphan detection)."""
+        try:
+            result = self.session.get_positions(
+                category="linear",
+                settleCoin="USDT",
+            )
+            positions = []
+            for pos in result["result"]["list"]:
+                if float(pos["size"]) > 0:
+                    positions.append({
+                        "symbol": pos["symbol"],
+                        "side": "long" if pos["side"] == "Buy" else "short",
+                        "size": float(pos["size"]),
+                        "avg_price": float(pos["avgPrice"]),
+                        "unrealized_pnl": float(pos["unrealisedPnl"]),
+                        "leverage": pos["leverage"],
+                        "stop_loss": float(pos.get("stopLoss", 0) or 0),
+                        "trailing_stop": float(pos.get("trailingStop", 0) or 0),
+                    })
+            return positions
+        except Exception as e:
+            logger.error(f"Get all positions failed: {e}")
+            return []
 
     def get_klines(self, symbol: str, interval: str = "15", limit: int = 100) -> list[dict]:
         """Fetch OHLC candles from Bybit.
