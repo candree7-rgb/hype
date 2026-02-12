@@ -8,7 +8,9 @@ Architecture:
      - OPEN: Safety SL at entry-10% (gives DCA room)
        → check TP1-4 fills (reduceOnly limits on Bybit)
        → TP1 fills: SL → breakeven, cancel DCA orders
-       → TP4 fills: trailing 20% (0.5% CB)
+       → TP2 fills: SL stays at BE (room for runners)
+       → TP3 fills: SL → TP1 price (lock profit)
+       → TP4 fills: trailing 20% (1% CB) with SL floor at TP1
      - DCA fills (before TP1): cancel TPs, hard SL at avg-3%, BE-trail
      - Detect position close (SL/trailing triggered by Bybit)
   3. Zone Refresh every 15min: auto-calc swing H/L for active symbols
@@ -222,11 +224,13 @@ async def execute_signal(signal: Signal) -> dict:
 async def price_monitor():
     """Background task: poll order fills and detect exchange-side closes.
 
-    Two-tier SL (all exits exchange-side):
+    Strategy C Hybrid SL (all exits exchange-side):
     - Safety SL at entry-10% initially (gives DCA room to fill at -5%)
     - TP1-4: reduceOnly limit orders at signal targets (50/10/10/10%)
-    - After TP1: SL → breakeven, cancel DCA orders (profit protection mode)
-    - After TP4: trailing stop 0.5% CB on remaining 20%
+    - After TP1: SL → breakeven, cancel DCA orders
+    - After TP2: SL stays at BE (let runners breathe through pullbacks)
+    - After TP3: SL → TP1 price (lock partial profit)
+    - After TP4: trailing stop 1% CB on remaining 20%, SL floor at TP1
     - DCA fills (before TP1): cancel TPs, hard SL at avg-3%, BE-trail from avg
     """
     logger.info("Price monitor started (Multi-TP)")
@@ -279,10 +283,10 @@ async def price_monitor():
                             close_qty = trade.tp_close_qtys[tp_idx] if tp_idx < len(trade.tp_close_qtys) else 0
                             trade_mgr.record_tp_fill(trade, tp_idx, close_qty, tp_fill_price)
 
-                            # ── Progressive SL Ladder ──
+                            # ── Strategy C: Hybrid SL Ladder ──
                             # TP1 → SL to BE (entry), cancel DCAs
-                            # TP2 → SL to TP1 price
-                            # TP3 → SL to TP2 price
+                            # TP2 → SL stays at BE (let runners breathe)
+                            # TP3 → SL to TP1 (lock some profit)
                             # TP4 → trailing on remaining 20%
 
                             if tp_idx == 0 and config.sl_to_be_after_tp1:
@@ -302,24 +306,32 @@ async def price_monitor():
                                     f"SL={trade.signal_entry:.4f} | DCAs cancelled"
                                 )
 
-                            elif tp_idx >= 1 and tp_idx <= 3:
-                                # TP2→SL@TP1, TP3→SL@TP2
-                                prev_tp_price = trade.tp_prices[tp_idx - 1]
-                                bybit.set_trading_stop(
-                                    trade.symbol, trade.side,
-                                    stop_loss=prev_tp_price,
-                                )
-                                trade.hard_sl_price = prev_tp_price
+                            elif tp_idx == 1:
+                                # TP2: SL stays at BE → let runners breathe
                                 trade_mgr.persist_trade(trade)
                                 logger.info(
-                                    f"TP{tp_idx+1} → SL=TP{tp_idx}: {trade.symbol_display} | "
-                                    f"SL={prev_tp_price:.4f}"
+                                    f"TP2 filled: {trade.symbol_display} | "
+                                    f"SL stays at BE={trade.hard_sl_price:.4f} (room for runners)"
                                 )
 
-                            # After last TP: activate trailing on remaining
+                            elif tp_idx == 2:
+                                # TP3: SL → TP1 price (lock profit, but not too tight)
+                                tp1_price = trade.tp_prices[0]
+                                bybit.set_trading_stop(
+                                    trade.symbol, trade.side,
+                                    stop_loss=tp1_price,
+                                )
+                                trade.hard_sl_price = tp1_price
+                                trade_mgr.persist_trade(trade)
+                                logger.info(
+                                    f"TP3 → SL=TP1: {trade.symbol_display} | "
+                                    f"SL={tp1_price:.4f} (profit locked)"
+                                )
+
+                            # After last TP (TP4): activate trailing on remaining
                             if all(trade.tp_filled):
                                 trail_dist = tp_fill_price * config.trailing_callback_pct / 100
-                                # Keep SL at last TP as floor + add trailing
+                                # Keep SL at TP1 as floor + add trailing
                                 bybit.set_trading_stop(
                                     trade.symbol, trade.side,
                                     stop_loss=trade.hard_sl_price,
@@ -768,7 +780,7 @@ async def _recover_and_check_positions():
                         )
 
             if tps_updated:
-                # Apply the SL ladder that was missed
+                # Apply Strategy C SL ladder that was missed
                 # Find the highest TP that filled
                 highest_tp = -1
                 for i in range(len(trade.tp_filled)):
@@ -777,10 +789,10 @@ async def _recover_and_check_positions():
 
                 if highest_tp >= 0:
                     if all(trade.tp_filled):
-                        # All TPs filled → trailing mode
+                        # All TPs filled → trailing mode (SL at TP1)
                         last_tp_price = trade.tp_prices[-1]
                         trail_dist = last_tp_price * config.trailing_callback_pct / 100
-                        trade.hard_sl_price = trade.tp_prices[highest_tp - 1] if highest_tp > 0 else trade.signal_entry
+                        trade.hard_sl_price = trade.tp_prices[0]  # SL at TP1
                         bybit.set_trading_stop(
                             trade.symbol, trade.side,
                             stop_loss=trade.hard_sl_price,
@@ -788,10 +800,28 @@ async def _recover_and_check_positions():
                         )
                         trade.status = TradeStatus.TRAILING
                         logger.info(
-                            f"RECOVERY: All TPs filled → trailing: {trade.symbol_display}"
+                            f"RECOVERY: All TPs filled → trailing: {trade.symbol_display} | "
+                            f"SL=TP1={trade.hard_sl_price:.4f}"
                         )
-                    elif highest_tp == 0 and config.sl_to_be_after_tp1:
-                        # TP1 filled → SL to BE, cancel DCAs
+                    elif highest_tp >= 2:
+                        # TP3+: SL → TP1 price (Strategy C)
+                        tp1_price = trade.tp_prices[0]
+                        bybit.set_trading_stop(
+                            trade.symbol, trade.side,
+                            stop_loss=tp1_price,
+                        )
+                        trade.hard_sl_price = tp1_price
+                        # Cancel DCAs if not done yet
+                        for dca in trade.dca_levels[1:]:
+                            if dca.order_id and not dca.filled:
+                                bybit.cancel_order(trade.symbol, dca.order_id)
+                                dca.order_id = ""
+                        logger.info(
+                            f"RECOVERY: TP{highest_tp+1}→SL=TP1: {trade.symbol_display} | "
+                            f"SL={tp1_price:.4f}"
+                        )
+                    elif highest_tp <= 1 and config.sl_to_be_after_tp1:
+                        # TP1 or TP2: SL stays at BE (Strategy C)
                         bybit.set_trading_stop(
                             trade.symbol, trade.side,
                             stop_loss=trade.signal_entry,
@@ -802,20 +832,8 @@ async def _recover_and_check_positions():
                                 bybit.cancel_order(trade.symbol, dca.order_id)
                                 dca.order_id = ""
                         logger.info(
-                            f"RECOVERY: TP1→SL=BE: {trade.symbol_display} | "
-                            f"SL={trade.signal_entry:.4f}"
-                        )
-                    elif highest_tp >= 1:
-                        # TP2+: SL to previous TP price
-                        prev_tp_price = trade.tp_prices[highest_tp - 1]
-                        bybit.set_trading_stop(
-                            trade.symbol, trade.side,
-                            stop_loss=prev_tp_price,
-                        )
-                        trade.hard_sl_price = prev_tp_price
-                        logger.info(
-                            f"RECOVERY: TP{highest_tp+1}→SL=TP{highest_tp}: "
-                            f"{trade.symbol_display} | SL={prev_tp_price:.4f}"
+                            f"RECOVERY: TP{highest_tp+1}→SL=BE: {trade.symbol_display} | "
+                            f"SL={trade.signal_entry:.4f} (runners breathing room)"
                         )
 
             # ── Check DCA order fills that happened during downtime ──

@@ -3,14 +3,19 @@ Signal DCA Bot v2 - Configuration
 Telegram Signal → Bybit DCA Trading Bot
 
 Strategy:
-- 1 DCA [1, 2] at entry-5% (zone-snapped to S1/R1 with 2% min)
+- 1 DCA [1, 2] at entry-5% (zone-snapped to S1/R1 with 3% min)
 - Multi-TP: TP1 50%, TP2 10%, TP3 10%, TP4 10% (signal targets)
-- Trail remaining 20% after TP4 (0.5% CB)
-- SL-to-BE after TP1 fills
+- Trail remaining 20% after TP4 (1% CB)
+- Strategy C Hybrid SL Ladder:
+    TP1 → SL = BE (entry)
+    TP2 → SL stays at BE (let runners breathe)
+    TP3 → SL = TP1 price (lock profit)
+    TP4 → Trail 1% CB with SL floor at TP1
 - Two-tier SL: Safety SL at entry-10% (pre-DCA), Hard SL at avg-3% (post-DCA)
 - DCA exit: BE-Trail from avg (0.5% CB)
 - Neo Cloud trend switch: close on clear reversal
 - Zone-snapping: S1/R1 dynamic zones from LuxAlgo/Bybit candles
+- Crash recovery: active trades persisted to PostgreSQL, full Bybit reconciliation on startup
 """
 
 from dataclasses import dataclass, field
@@ -59,7 +64,7 @@ class BotConfig:
         default_factory=lambda: [50, 10, 10, 10]  # TP1=50%, TP2=10%, TP3=10%, TP4=10%
     )
     trailing_callback_pct: float = 1.0  # 1% CB for trail after all TPs (room for runners)
-    sl_to_be_after_tp1: bool = True     # Move SL to breakeven after TP1 fills
+    sl_to_be_after_tp1: bool = True     # Strategy C: TP1→BE, TP2→stay BE, TP3→SL@TP1, TP4→trail
 
     # ── DCA Exit (BE-Trail, activates from DCA1) ──
     be_trail_callback_pct: float = 0.5  # Trail from avg with 0.5% CB
@@ -154,8 +159,8 @@ class BotConfig:
         tp_labels = [f"TP{i+1}={p}%" for i, p in enumerate(self.tp_close_pcts)]
         trail_pct = 100 - sum(self.tp_close_pcts)
         print(f"║    {', '.join(tp_labels)}, Trail={trail_pct}%")
-        print(f"║    SL-to-BE after TP1: {'YES' if self.sl_to_be_after_tp1 else 'NO'}")
-        print(f"║    Trail CB: {self.trailing_callback_pct}%")
+        print(f"║    SL Ladder (Strategy C):")
+        print(f"║      TP1→BE, TP2→stay BE, TP3→SL@TP1, TP4→Trail {self.trailing_callback_pct}% CB")
         print(f"║")
         print(f"║  DCA Exit:       BE-Trail ({self.be_trail_callback_pct}% CB from avg)")
         print(f"║  Safety SL:      Entry - {self.safety_sl_pct}% (pre-DCA)")
