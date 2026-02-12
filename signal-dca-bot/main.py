@@ -50,6 +50,7 @@ tg_listener: TelegramListener | None = None
 monitor_task: asyncio.Task | None = None
 zone_refresh_task: asyncio.Task | None = None
 safety_task: asyncio.Task | None = None
+sync_task: asyncio.Task | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -274,34 +275,54 @@ async def price_monitor():
                             close_qty = trade.tp_close_qtys[tp_idx] if tp_idx < len(trade.tp_close_qtys) else 0
                             trade_mgr.record_tp_fill(trade, tp_idx, close_qty, tp_fill_price)
 
-                            # After TP1: move SL to breakeven + cancel DCA
+                            # ── Progressive SL Ladder ──
+                            # TP1 → SL to BE (entry), cancel DCAs
+                            # TP2 → SL to TP1 price
+                            # TP3 → SL to TP2 price
+                            # TP4 → trailing on remaining 20%
+
                             if tp_idx == 0 and config.sl_to_be_after_tp1:
+                                # TP1: SL → breakeven + cancel DCAs
                                 bybit.set_trading_stop(
                                     trade.symbol, trade.side,
                                     stop_loss=trade.signal_entry,
                                 )
                                 trade.hard_sl_price = trade.signal_entry
-                                # Cancel DCA orders - no longer needed after TP1
-                                # (SL at BE protects remaining position)
                                 for dca in trade.dca_levels[1:]:
                                     if dca.order_id and not dca.filled:
                                         bybit.cancel_order(trade.symbol, dca.order_id)
                                         dca.order_id = ""
                                 logger.info(
-                                    f"SL → BE: {trade.symbol_display} | "
+                                    f"TP1 → SL=BE: {trade.symbol_display} | "
                                     f"SL={trade.signal_entry:.4f} | DCAs cancelled"
                                 )
 
-                            # After last TP: activate trailing on remaining 20%
-                            if all(trade.tp_filled):
-                                trail_dist = tp_fill_price * config.trailing_callback_pct / 100
+                            elif tp_idx >= 1 and tp_idx <= 3:
+                                # TP2→SL@TP1, TP3→SL@TP2
+                                prev_tp_price = trade.tp_prices[tp_idx - 1]
                                 bybit.set_trading_stop(
                                     trade.symbol, trade.side,
+                                    stop_loss=prev_tp_price,
+                                )
+                                trade.hard_sl_price = prev_tp_price
+                                logger.info(
+                                    f"TP{tp_idx+1} → SL=TP{tp_idx}: {trade.symbol_display} | "
+                                    f"SL={prev_tp_price:.4f}"
+                                )
+
+                            # After last TP: activate trailing on remaining
+                            if all(trade.tp_filled):
+                                trail_dist = tp_fill_price * config.trailing_callback_pct / 100
+                                # Keep SL at last TP as floor + add trailing
+                                bybit.set_trading_stop(
+                                    trade.symbol, trade.side,
+                                    stop_loss=trade.hard_sl_price,
                                     trailing_stop=trail_dist,
                                 )
+                                trade.status = TradeStatus.TRAILING
                                 logger.info(
                                     f"All TPs filled → trailing: {trade.symbol_display} | "
-                                    f"Trail={config.trailing_callback_pct}% CB on "
+                                    f"SL={trade.hard_sl_price:.4f} + Trail={config.trailing_callback_pct}% CB on "
                                     f"{trade.remaining_qty:.6f} remaining"
                                 )
 
@@ -361,7 +382,13 @@ async def price_monitor():
                             else:
                                 pnl = (trade.avg_price - price) * remaining
                             trade.realized_pnl += pnl
-                        reason = "Exchange stop (SL/trailing)"
+                        # Build specific close reason
+                        if trade.status == TradeStatus.TRAILING:
+                            reason = "Trailing stop"
+                        elif trade.tps_hit > 0:
+                            reason = f"SL (at TP{trade.tps_hit} level)"
+                        else:
+                            reason = "SL hit"
                         if trade.tps_hit > 0:
                             reason += f" after TP{trade.tps_hit}"
                         trade_mgr.close_trade(trade, price, trade.realized_pnl, reason)
@@ -711,6 +738,83 @@ async def _check_orphan_positions():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# ▌ BYBIT TRADE SYNC (catch manual closes)
+# ══════════════════════════════════════════════════════════════════════════
+
+TRADE_SYNC_INTERVAL = 120  # seconds (every 2 minutes)
+
+async def bybit_trade_sync():
+    """Background: sync closed PnL from Bybit into our DB.
+
+    Catches trades closed manually, by liquidation, or any other
+    method our bot didn't track. Queries Bybit's closed PnL endpoint
+    and saves any missing trades to our DB.
+    """
+    logger.info("Bybit trade sync started")
+    await asyncio.sleep(30)  # Wait for startup to settle
+
+    while True:
+        try:
+            await asyncio.sleep(TRADE_SYNC_INTERVAL)
+
+            records = bybit.get_closed_pnl(limit=20)
+            if not records:
+                continue
+
+            for rec in records:
+                # Check if this trade already exists in our DB
+                trade_id = f"bybit_{rec['symbol']}_{rec['side']}_{int(rec['created_time'])}"
+
+                # Check if we already have this in active trades (bot-managed)
+                is_tracked = False
+                for trade in trade_mgr.active_trades:
+                    if (trade.symbol == rec["symbol"] and
+                            trade.side == rec["side"] and
+                            trade.status != TradeStatus.CLOSED):
+                        is_tracked = True
+                        break
+
+                # Also check if already in DB (by checking recent entries)
+                existing = db.get_trade_by_symbol_time(
+                    rec["symbol"], rec["created_time"]
+                )
+                if existing:
+                    continue
+
+                # Not tracked and not in DB → save it
+                equity = bybit.get_equity() or 0
+                db.save_trade(
+                    trade_id=trade_id,
+                    symbol=rec["symbol"],
+                    side=rec["side"],
+                    entry_price=rec["entry_price"],
+                    avg_price=rec["entry_price"],
+                    close_price=rec["exit_price"],
+                    total_qty=rec["qty"],
+                    total_margin=rec["qty"] * rec["entry_price"] / config.leverage,
+                    realized_pnl=rec["closed_pnl"],
+                    max_dca=0,
+                    tp1_hit=False,
+                    close_reason=f"Bybit sync ({rec['order_type']})",
+                    opened_at=rec["created_time"],
+                    closed_at=rec["updated_time"],
+                    signal_leverage=config.leverage,
+                    equity_at_entry=equity,
+                    equity_at_close=equity,
+                    leverage=config.leverage,
+                )
+                logger.info(
+                    f"BYBIT SYNC: {rec['symbol']} {rec['side'].upper()} | "
+                    f"PnL: ${rec['closed_pnl']:+.2f} | "
+                    f"Entry: {rec['entry_price']} → Exit: {rec['exit_price']}"
+                )
+
+        except Exception as e:
+            logger.error(f"Bybit trade sync error: {e}", exc_info=True)
+            await asyncio.sleep(30)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ▌ FASTAPI APP
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -742,7 +846,7 @@ async def handle_tg_close(close_cmd: dict):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global monitor_task, zone_refresh_task, safety_task, tg_listener
+    global monitor_task, zone_refresh_task, safety_task, sync_task, tg_listener
 
     logger.info("Signal DCA Bot v2 starting...")
     config.print_summary()
@@ -762,6 +866,7 @@ async def lifespan(app: FastAPI):
     monitor_task = asyncio.create_task(price_monitor())
     zone_refresh_task = asyncio.create_task(zone_refresh_loop())
     safety_task = asyncio.create_task(safety_monitor())
+    sync_task = asyncio.create_task(bybit_trade_sync())
 
     yield
 
@@ -771,6 +876,8 @@ async def lifespan(app: FastAPI):
         zone_refresh_task.cancel()
     if safety_task:
         safety_task.cancel()
+    if sync_task:
+        sync_task.cancel()
     if tg_listener:
         await tg_listener.stop()
     logger.info("Bot stopped")

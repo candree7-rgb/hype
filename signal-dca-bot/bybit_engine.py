@@ -640,6 +640,36 @@ class BybitEngine:
             logger.error(f"Get all positions failed: {e}")
             return []
 
+    def get_closed_pnl(self, limit: int = 50) -> list[dict]:
+        """Get recently closed PnL records from Bybit.
+
+        Returns trades closed on exchange (SL, TP, manual, liquidation).
+        Used for syncing manual closes into our DB.
+        """
+        try:
+            result = self.session.get_closed_pnl(
+                category="linear",
+                limit=limit,
+            )
+            records = []
+            for r in result["result"]["list"]:
+                records.append({
+                    "symbol": r["symbol"],
+                    "side": "long" if r["side"] == "Buy" else "short",
+                    "qty": float(r["qty"]),
+                    "entry_price": float(r["avgEntryPrice"]),
+                    "exit_price": float(r["avgExitPrice"]),
+                    "closed_pnl": float(r["closedPnl"]),
+                    "order_type": r["orderType"],
+                    "leverage": r.get("leverage", ""),
+                    "created_time": int(r["createdTime"]) / 1000,  # ms → seconds
+                    "updated_time": int(r["updatedTime"]) / 1000,
+                })
+            return records
+        except Exception as e:
+            logger.error(f"Get closed PnL failed: {e}")
+            return []
+
     def get_klines(self, symbol: str, interval: str = "15", limit: int = 100) -> list[dict]:
         """Fetch OHLC candles from Bybit.
 

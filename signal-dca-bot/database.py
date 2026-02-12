@@ -332,6 +332,35 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
         return False
 
 
+def get_trade_by_symbol_time(symbol: str, created_time: float) -> bool:
+    """Check if a trade exists in DB for a symbol near a given time.
+
+    Used by Bybit sync to avoid duplicate inserts.
+    Matches within a 60-second window.
+    """
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromtimestamp(created_time, tz=timezone.utc)
+        dt_start = dt - timedelta(seconds=60)
+        dt_end = dt + timedelta(seconds=60)
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM trades WHERE symbol = %s AND opened_at BETWEEN %s AND %s LIMIT 1",
+            (symbol, dt_start, dt_end)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row is not None
+    except Exception as e:
+        logger.error(f"DB get_trade_by_symbol_time failed: {e}")
+        return False
+
+
 def get_trade_stats() -> dict:
     """Get aggregate trade stats from history."""
     conn = get_connection()

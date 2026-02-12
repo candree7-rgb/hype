@@ -10,18 +10,35 @@ function formatExitReason(closeReason: string): { label: string; variant: 'tp' |
   const reason = closeReason.toLowerCase();
   const badges: { label: string; variant: 'tp' | 'trail' | 'sl' | 'neutral' }[] = [];
 
-  if (reason.includes('tp1')) badges.push({ label: 'TP1', variant: 'tp' });
-  if (reason.includes('tp2')) badges.push({ label: 'TP2', variant: 'tp' });
-  if (reason.includes('tp3')) badges.push({ label: 'TP3', variant: 'tp' });
-  if (reason.includes('tp4')) badges.push({ label: 'TP4', variant: 'tp' });
-  if (reason.includes('trail')) badges.push({ label: 'TRAIL', variant: 'trail' });
-  if (reason.includes('be')) badges.push({ label: 'BE', variant: 'neutral' });
-  if (reason.includes('hard sl') || reason.includes('stop') || reason.includes('safety sl')) {
+  // TP badges (how many TPs were hit before close)
+  // Match "after TPX" pattern to show which TPs filled
+  const tpMatch = reason.match(/after tp(\d)/);
+  if (tpMatch) {
+    const tpNum = parseInt(tpMatch[1]);
+    for (let i = 1; i <= tpNum; i++) {
+      badges.push({ label: `TP${i}`, variant: 'tp' });
+    }
+  }
+
+  // Final close method
+  if (reason.includes('trailing stop')) {
+    badges.push({ label: 'TRAIL', variant: 'trail' });
+  } else if (reason.includes('sl hit') || reason.includes('sl (at')) {
     badges.push({ label: 'SL', variant: 'sl' });
   }
-  if (reason.includes('neo')) badges.push({ label: 'NEO', variant: 'neutral' });
-  if (reason.includes('opposite')) badges.push({ label: 'FLIP', variant: 'neutral' });
 
+  // Neo Cloud close
+  if (reason.includes('neo')) badges.push({ label: 'NEO', variant: 'neutral' });
+
+  // Manual / TG close
+  if (reason.includes('tg close') || reason.includes('manual')) {
+    badges.push({ label: 'MANUAL', variant: 'neutral' });
+  }
+
+  // Bybit sync (detected from exchange history)
+  if (reason.includes('bybit sync')) badges.push({ label: 'SYNC', variant: 'neutral' });
+
+  // Fallback
   if (badges.length === 0) {
     badges.push({ label: reason.replace(/_/g, ' ').toUpperCase().slice(0, 8), variant: 'neutral' });
   }
