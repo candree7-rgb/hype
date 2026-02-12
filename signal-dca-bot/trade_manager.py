@@ -19,6 +19,7 @@ Exit Logic (two-tier SL):
 
 import time
 import logging
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from config import BotConfig
@@ -116,6 +117,100 @@ class Trade:
         return (end - self.opened_at) / 3600
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ▌ TRADE SERIALIZATION (for DB persistence / crash recovery)
+# ══════════════════════════════════════════════════════════════════════════
+
+def trade_to_dict(trade: Trade) -> dict:
+    """Serialize a Trade object to a dict (JSON-safe)."""
+    return {
+        "trade_id": trade.trade_id,
+        "symbol": trade.symbol,
+        "symbol_display": trade.symbol_display,
+        "side": trade.side,
+        "signal_entry": trade.signal_entry,
+        "signal_leverage": trade.signal_leverage,
+        "leverage": trade.leverage,
+        "dca_levels": [
+            {
+                "level": d.level,
+                "price": d.price,
+                "qty": d.qty,
+                "margin": d.margin,
+                "filled": d.filled,
+                "order_id": d.order_id,
+            }
+            for d in trade.dca_levels
+        ],
+        "status": trade.status.value,
+        "total_qty": trade.total_qty,
+        "total_margin": trade.total_margin,
+        "avg_price": trade.avg_price,
+        "current_dca": trade.current_dca,
+        "max_dca": trade.max_dca,
+        "tp_prices": trade.tp_prices,
+        "tp_order_ids": trade.tp_order_ids,
+        "tp_filled": trade.tp_filled,
+        "tp_close_pcts": trade.tp_close_pcts,
+        "tp_close_qtys": trade.tp_close_qtys,
+        "tps_hit": trade.tps_hit,
+        "total_tp_closed_qty": trade.total_tp_closed_qty,
+        "be_trail_active": trade.be_trail_active,
+        "be_trail_peak": trade.be_trail_peak,
+        "hard_sl_price": trade.hard_sl_price,
+        "dca_order_ids": trade.dca_order_ids,
+        "opened_at": trade.opened_at,
+        "closed_at": trade.closed_at,
+        "realized_pnl": trade.realized_pnl,
+    }
+
+
+def trade_from_dict(data: dict) -> Trade:
+    """Deserialize a dict back into a Trade object."""
+    dca_levels = [
+        DCALevel(
+            level=d["level"],
+            price=d["price"],
+            qty=d["qty"],
+            margin=d["margin"],
+            filled=d["filled"],
+            order_id=d.get("order_id", ""),
+        )
+        for d in data.get("dca_levels", [])
+    ]
+
+    return Trade(
+        trade_id=data["trade_id"],
+        symbol=data["symbol"],
+        symbol_display=data["symbol_display"],
+        side=data["side"],
+        signal_entry=data["signal_entry"],
+        signal_leverage=data["signal_leverage"],
+        leverage=data.get("leverage", 20),
+        dca_levels=dca_levels,
+        status=TradeStatus(data["status"]),
+        total_qty=data.get("total_qty", 0),
+        total_margin=data.get("total_margin", 0),
+        avg_price=data.get("avg_price", 0),
+        current_dca=data.get("current_dca", 0),
+        max_dca=data.get("max_dca", 1),
+        tp_prices=data.get("tp_prices", []),
+        tp_order_ids=data.get("tp_order_ids", []),
+        tp_filled=data.get("tp_filled", []),
+        tp_close_pcts=data.get("tp_close_pcts", []),
+        tp_close_qtys=data.get("tp_close_qtys", []),
+        tps_hit=data.get("tps_hit", 0),
+        total_tp_closed_qty=data.get("total_tp_closed_qty", 0),
+        be_trail_active=data.get("be_trail_active", False),
+        be_trail_peak=data.get("be_trail_peak", 0),
+        hard_sl_price=data.get("hard_sl_price", 0),
+        dca_order_ids=data.get("dca_order_ids", []),
+        opened_at=data.get("opened_at", 0),
+        closed_at=data.get("closed_at", 0),
+        realized_pnl=data.get("realized_pnl", 0),
+    )
+
+
 class TradeManager:
     """Manages all active trades and trading logic."""
 
@@ -130,6 +225,51 @@ class TradeManager:
         self.total_losses = 0
         self.total_breakeven = 0
         self.total_pnl = 0.0
+
+    # ── Persistence ──
+
+    def persist_trade(self, trade: Trade) -> None:
+        """Save trade state to DB for crash recovery."""
+        state = trade_to_dict(trade)
+        db.save_active_trade(
+            trade_id=trade.trade_id,
+            symbol=trade.symbol,
+            side=trade.side,
+            status=trade.status.value,
+            state_json=state,
+        )
+
+    def remove_persisted_trade(self, trade_id: str) -> None:
+        """Remove trade from active_trades DB (trade closed)."""
+        db.delete_active_trade(trade_id)
+
+    def load_persisted_trades(self) -> int:
+        """Load active trades from DB on startup. Returns count loaded."""
+        rows = db.get_all_active_trades()
+        loaded = 0
+        for row in rows:
+            try:
+                trade = trade_from_dict(row["state"])
+                # Skip if already closed (shouldn't happen, but safe)
+                if trade.status == TradeStatus.CLOSED:
+                    db.delete_active_trade(trade.trade_id)
+                    continue
+                self.trades[trade.trade_id] = trade
+                # Update trade counter to avoid ID collisions
+                self._trade_counter = max(self._trade_counter, loaded + 1)
+                loaded += 1
+                logger.info(
+                    f"Recovered trade: {trade.symbol_display} {trade.side.upper()} | "
+                    f"Status: {trade.status.value} | Avg: {trade.avg_price:.4f} | "
+                    f"TPs: {trade.tps_hit}/{len(trade.tp_prices)} | "
+                    f"DCA: {trade.current_dca}/{trade.max_dca} | "
+                    f"SL: {trade.hard_sl_price:.4f}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to recover trade {row['trade_id']}: {e}")
+        if loaded:
+            logger.info(f"Trade recovery: {loaded} trades restored from DB")
+        return loaded
 
     @property
     def active_trades(self) -> list[Trade]:
@@ -387,6 +527,9 @@ class TradeManager:
         self.closed_trades.append(trade)
         if trade.trade_id in self.trades:
             del self.trades[trade.trade_id]
+
+        # Remove from active_trades persistence
+        self.remove_persisted_trade(trade.trade_id)
 
         # Only persist filled trades to DB (skip failed opens / timeouts)
         if not was_filled:

@@ -105,6 +105,23 @@ CREATE TABLE IF NOT EXISTS neo_cloud_trends (
 
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- ACTIVE TRADES: Live trade state for crash recovery (survives redeploy)
+-- ══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS active_trades (
+    trade_id        VARCHAR(100) PRIMARY KEY,
+    symbol          VARCHAR(30) NOT NULL,
+    side            VARCHAR(10) NOT NULL,
+    status          VARCHAR(20) NOT NULL,
+    state_json      JSONB NOT NULL,             -- Full Trade object serialized
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_active_trades_symbol ON active_trades(symbol);
+
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- AUTO-UPDATE TRIGGER
 -- ══════════════════════════════════════════════════════════════════════════
 

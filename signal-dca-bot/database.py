@@ -115,6 +115,14 @@ def _init_tables_inline(conn):
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS active_trades (
+            trade_id VARCHAR(100) PRIMARY KEY, symbol VARCHAR(30) NOT NULL,
+            side VARCHAR(10) NOT NULL, status VARCHAR(20) NOT NULL,
+            state_json JSONB NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
     cur.close()
     logger.info("DB tables created inline")
 
@@ -512,6 +520,99 @@ def get_equity_history(days: int = 90) -> list[dict]:
     except Exception as e:
         logger.error(f"DB get_equity_history failed: {e}")
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ▌ ACTIVE TRADE PERSISTENCE (crash recovery)
+# ══════════════════════════════════════════════════════════════════════════
+
+def save_active_trade(trade_id: str, symbol: str, side: str,
+                      status: str, state_json: dict) -> bool:
+    """Persist active trade state to DB. Upserts on trade_id."""
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        import json
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO active_trades (trade_id, symbol, side, status, state_json, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (trade_id) DO UPDATE SET
+                status=%s, state_json=%s, updated_at=NOW()
+        """, (trade_id, symbol, side, status, json.dumps(state_json),
+              status, json.dumps(state_json)))
+        cur.close()
+        return True
+    except Exception as e:
+        logger.error(f"DB save_active_trade failed for {trade_id}: {e}")
+        return False
+
+
+def delete_active_trade(trade_id: str) -> bool:
+    """Remove a trade from active_trades (trade closed)."""
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM active_trades WHERE trade_id = %s", (trade_id,))
+        cur.close()
+        return True
+    except Exception as e:
+        logger.error(f"DB delete_active_trade failed for {trade_id}: {e}")
+        return False
+
+
+def get_all_active_trades() -> list[dict]:
+    """Load all active trades from DB (for startup recovery)."""
+    conn = get_connection()
+    if not conn:
+        return []
+
+    try:
+        import json
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT trade_id, symbol, side, status, state_json "
+            "FROM active_trades ORDER BY created_at"
+        )
+        rows = cur.fetchall()
+        cur.close()
+
+        results = []
+        for r in rows:
+            state = r[4] if isinstance(r[4], dict) else json.loads(r[4])
+            results.append({
+                "trade_id": r[0],
+                "symbol": r[1],
+                "side": r[2],
+                "status": r[3],
+                "state": state,
+            })
+        return results
+    except Exception as e:
+        logger.error(f"DB get_all_active_trades failed: {e}")
+        return []
+
+
+def clear_all_active_trades() -> bool:
+    """Clear all active trades (emergency reset)."""
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM active_trades")
+        cur.close()
+        logger.info("All active trades cleared from DB")
+        return True
+    except Exception as e:
+        logger.error(f"DB clear_all_active_trades failed: {e}")
+        return False
 
 
 # ── Test ──

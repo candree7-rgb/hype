@@ -197,6 +197,9 @@ async def execute_signal(signal: Signal) -> dict:
         trade_mgr.close_trade(trade, 0, 0, "Failed to open")
         return {"status": "error", "reason": "Order execution failed"}
 
+    # Persist initial trade state
+    trade_mgr.persist_trade(trade)
+
     logger.info(
         f"Trade opened: {signal.side.upper()} {signal.symbol_display} | "
         f"E1 @ {signal.entry_price} | Slots: {trade_mgr.active_count}/{config.max_simultaneous_trades}"
@@ -251,6 +254,7 @@ async def price_monitor():
                         _place_exchange_tps(trade)
                         # Set initial SL at entry-3%
                         _set_initial_sl(trade)
+                        trade_mgr.persist_trade(trade)
                         logger.info(f"E1 filled → OPEN: {trade.symbol_display}")
                     else:
                         age_min = (time.time() - trade.opened_at) / 60
@@ -292,6 +296,7 @@ async def price_monitor():
                                     if dca.order_id and not dca.filled:
                                         bybit.cancel_order(trade.symbol, dca.order_id)
                                         dca.order_id = ""
+                                trade_mgr.persist_trade(trade)
                                 logger.info(
                                     f"TP1 → SL=BE: {trade.symbol_display} | "
                                     f"SL={trade.signal_entry:.4f} | DCAs cancelled"
@@ -305,6 +310,7 @@ async def price_monitor():
                                     stop_loss=prev_tp_price,
                                 )
                                 trade.hard_sl_price = prev_tp_price
+                                trade_mgr.persist_trade(trade)
                                 logger.info(
                                     f"TP{tp_idx+1} → SL=TP{tp_idx}: {trade.symbol_display} | "
                                     f"SL={prev_tp_price:.4f}"
@@ -320,6 +326,7 @@ async def price_monitor():
                                     trailing_stop=trail_dist,
                                 )
                                 trade.status = TradeStatus.TRAILING
+                                trade_mgr.persist_trade(trade)
                                 logger.info(
                                     f"All TPs filled → trailing: {trade.symbol_display} | "
                                     f"SL={trade.hard_sl_price:.4f} + Trail={config.trailing_callback_pct}% CB on "
@@ -347,6 +354,7 @@ async def price_monitor():
                         # Set exchange-side stops for DCA mode
                         _set_exchange_stops_after_dca(trade)
 
+                        trade_mgr.persist_trade(trade)
                         logger.info(
                             f"DCA{i} filled: {trade.symbol_display} @ {dca_fill_price:.4f} | "
                             f"New avg: {trade.avg_price:.4f} | DCA {trade.current_dca}/{trade.max_dca}"
@@ -606,6 +614,7 @@ async def resnap_active_dcas(symbol: str):
             if success:
                 dca.price = new_price
                 dca.qty = dca.margin * trade.leverage / new_price
+                trade_mgr.persist_trade(trade)
                 logger.info(
                     f"DCA{i} re-snapped: {trade.symbol_display} | "
                     f"{old_price:.4f} → {new_price:.4f} ({source}, {pct_change:.1f}% shift)"
@@ -627,9 +636,9 @@ async def safety_monitor():
     """
     logger.info("Safety monitor started")
 
-    # Initial orphan check on startup (wait for things to settle)
+    # Startup recovery: load trades from DB, reconcile with Bybit
     await asyncio.sleep(15)
-    await _check_orphan_positions()
+    await _recover_and_check_positions()
 
     while True:
         try:
@@ -664,6 +673,7 @@ async def safety_monitor():
                             trade.symbol, trade.side,
                             stop_loss=trade.hard_sl_price,
                         )
+                        trade_mgr.persist_trade(trade)
                         logger.info(
                             f"SAFETY: SL restored: {trade.symbol_display} | "
                             f"SL={trade.hard_sl_price:.4f}"
@@ -680,6 +690,7 @@ async def safety_monitor():
                             trade.symbol, trade.side,
                             stop_loss=sl_price,
                         )
+                        trade_mgr.persist_trade(trade)
                         logger.info(
                             f"SAFETY: Emergency SL set: {trade.symbol_display} | "
                             f"SL={sl_price:.4f} (fallback entry-{config.safety_sl_pct}%)"
@@ -692,49 +703,192 @@ async def safety_monitor():
             await asyncio.sleep(10)
 
 
-async def _check_orphan_positions():
-    """Check for positions on Bybit not tracked by the bot.
+async def _recover_and_check_positions():
+    """Recover active trades from DB, reconcile with Bybit, detect orphans.
 
-    Called once on startup. Logs warnings for any orphan positions
-    so the user knows to close them manually.
+    Called once on startup. Replaces the old _check_orphan_positions().
+
+    Steps:
+      1. Load persisted trades from DB → restore into trade_mgr
+      2. For each recovered trade, verify position still exists on Bybit
+      3. Check which TP/DCA orders filled during downtime
+      4. Adjust trade state + SL accordingly
+      5. Detect orphan positions (on Bybit but not tracked)
     """
     try:
-        all_positions = bybit.get_all_positions()
-        if not all_positions:
-            logger.info("Orphan check: no open positions on Bybit")
-            return
+        # ── Step 1: Trades already pre-loaded in lifespan startup ──
+        active_count = trade_mgr.active_count
+        if active_count:
+            logger.info(f"RECOVERY: Reconciling {active_count} pre-loaded trades with Bybit...")
 
-        tracked_symbols = set()
-        for trade in trade_mgr.active_trades:
-            if trade.status != TradeStatus.CLOSED:
-                tracked_symbols.add((trade.symbol, trade.side))
+        # ── Step 2+3: Reconcile each recovered trade with Bybit ──
+        for trade in list(trade_mgr.active_trades):
+            pos = bybit.get_position(trade.symbol)
 
-        orphans = []
-        for pos in all_positions:
-            key = (pos["symbol"], pos["side"])
-            if key not in tracked_symbols:
-                orphans.append(pos)
-                logger.warning(
-                    f"ORPHAN POSITION: {pos['symbol']} {pos['side'].upper()} | "
-                    f"size={pos['size']} | avg={pos['avg_price']} | "
-                    f"SL={'SET' if pos['stop_loss'] > 0 else 'NONE!'} | "
-                    f"uPnL={pos['unrealized_pnl']:+.2f} | "
-                    f"NOT tracked by bot!"
+            if pos is None or pos["size"] == 0:
+                # Position was closed during downtime (SL/TP triggered by Bybit)
+                price = bybit.get_ticker_price(trade.symbol) or trade.avg_price
+                remaining = trade.remaining_qty
+                if remaining > 0:
+                    if trade.side == "long":
+                        pnl = (price - trade.avg_price) * remaining
+                    else:
+                        pnl = (trade.avg_price - price) * remaining
+                    trade.realized_pnl += pnl
+                trade_mgr.close_trade(
+                    trade, price, trade.realized_pnl,
+                    "Closed during bot downtime (exchange-side)"
                 )
+                logger.info(
+                    f"RECOVERY: {trade.symbol_display} was closed during downtime | "
+                    f"PnL: ${trade.realized_pnl:+.2f}"
+                )
+                continue
 
-        if orphans:
-            logger.warning(
-                f"ORPHAN CHECK: {len(orphans)} untracked positions found! "
-                f"Close them manually on Bybit."
-            )
-        else:
+            # Position exists - update qty from exchange (source of truth)
+            trade.total_qty = pos["size"]
+            trade.avg_price = pos["avg_price"]
+
+            # ── Check TP order fills that happened during downtime ──
+            tps_updated = False
+            if trade.status == TradeStatus.OPEN and trade.current_dca == 0:
+                for tp_idx in range(len(trade.tp_prices)):
+                    if trade.tp_filled[tp_idx] or not trade.tp_order_ids[tp_idx]:
+                        continue
+                    tp_filled, tp_fill_price = bybit.check_order_filled(
+                        trade.symbol, trade.tp_order_ids[tp_idx]
+                    )
+                    if tp_filled:
+                        close_qty = trade.tp_close_qtys[tp_idx] if tp_idx < len(trade.tp_close_qtys) else 0
+                        trade_mgr.record_tp_fill(trade, tp_idx, close_qty, tp_fill_price)
+                        tps_updated = True
+                        logger.info(
+                            f"RECOVERY: TP{tp_idx+1} was filled during downtime | "
+                            f"{trade.symbol_display} @ {tp_fill_price:.4f}"
+                        )
+
+            if tps_updated:
+                # Apply the SL ladder that was missed
+                # Find the highest TP that filled
+                highest_tp = -1
+                for i in range(len(trade.tp_filled)):
+                    if trade.tp_filled[i]:
+                        highest_tp = i
+
+                if highest_tp >= 0:
+                    if all(trade.tp_filled):
+                        # All TPs filled → trailing mode
+                        last_tp_price = trade.tp_prices[-1]
+                        trail_dist = last_tp_price * config.trailing_callback_pct / 100
+                        trade.hard_sl_price = trade.tp_prices[highest_tp - 1] if highest_tp > 0 else trade.signal_entry
+                        bybit.set_trading_stop(
+                            trade.symbol, trade.side,
+                            stop_loss=trade.hard_sl_price,
+                            trailing_stop=trail_dist,
+                        )
+                        trade.status = TradeStatus.TRAILING
+                        logger.info(
+                            f"RECOVERY: All TPs filled → trailing: {trade.symbol_display}"
+                        )
+                    elif highest_tp == 0 and config.sl_to_be_after_tp1:
+                        # TP1 filled → SL to BE, cancel DCAs
+                        bybit.set_trading_stop(
+                            trade.symbol, trade.side,
+                            stop_loss=trade.signal_entry,
+                        )
+                        trade.hard_sl_price = trade.signal_entry
+                        for dca in trade.dca_levels[1:]:
+                            if dca.order_id and not dca.filled:
+                                bybit.cancel_order(trade.symbol, dca.order_id)
+                                dca.order_id = ""
+                        logger.info(
+                            f"RECOVERY: TP1→SL=BE: {trade.symbol_display} | "
+                            f"SL={trade.signal_entry:.4f}"
+                        )
+                    elif highest_tp >= 1:
+                        # TP2+: SL to previous TP price
+                        prev_tp_price = trade.tp_prices[highest_tp - 1]
+                        bybit.set_trading_stop(
+                            trade.symbol, trade.side,
+                            stop_loss=prev_tp_price,
+                        )
+                        trade.hard_sl_price = prev_tp_price
+                        logger.info(
+                            f"RECOVERY: TP{highest_tp+1}→SL=TP{highest_tp}: "
+                            f"{trade.symbol_display} | SL={prev_tp_price:.4f}"
+                        )
+
+            # ── Check DCA order fills that happened during downtime ──
+            for i in range(1, trade.max_dca + 1):
+                if i >= len(trade.dca_levels):
+                    break
+                dca = trade.dca_levels[i]
+                if dca.filled or not dca.order_id:
+                    continue
+                dca_filled, dca_fill_price = bybit.check_order_filled(
+                    trade.symbol, dca.order_id
+                )
+                if dca_filled:
+                    trade_mgr.fill_dca(trade, i, dca_fill_price)
+                    _cancel_unfilled_tps(trade)
+                    _set_exchange_stops_after_dca(trade)
+                    logger.info(
+                        f"RECOVERY: DCA{i} was filled during downtime | "
+                        f"{trade.symbol_display} @ {dca_fill_price:.4f}"
+                    )
+
+            # ── Verify SL is set on exchange ──
+            if pos["stop_loss"] == 0 and pos["trailing_stop"] == 0:
+                if trade.hard_sl_price > 0:
+                    bybit.set_trading_stop(
+                        trade.symbol, trade.side,
+                        stop_loss=trade.hard_sl_price,
+                    )
+                    logger.warning(
+                        f"RECOVERY: SL restored: {trade.symbol_display} | "
+                        f"SL={trade.hard_sl_price:.4f}"
+                    )
+
+            # Persist updated state
+            trade_mgr.persist_trade(trade)
+
             logger.info(
-                f"Orphan check OK: {len(all_positions)} positions, "
-                f"all tracked by bot"
+                f"RECOVERY OK: {trade.symbol_display} {trade.side.upper()} | "
+                f"Status: {trade.status.value} | Qty: {pos['size']} | "
+                f"Avg: {pos['avg_price']:.4f} | SL: {trade.hard_sl_price:.4f} | "
+                f"TPs: {trade.tps_hit}/{len(trade.tp_prices)}"
             )
+
+            await asyncio.sleep(0.3)  # Rate limit
+
+        # ── Step 4: Detect orphan positions (on Bybit but not tracked) ──
+        all_positions = bybit.get_all_positions()
+        if all_positions:
+            tracked_symbols = set()
+            for trade in trade_mgr.active_trades:
+                if trade.status != TradeStatus.CLOSED:
+                    tracked_symbols.add((trade.symbol, trade.side))
+
+            for pos in all_positions:
+                key = (pos["symbol"], pos["side"])
+                if key not in tracked_symbols:
+                    logger.warning(
+                        f"ORPHAN POSITION: {pos['symbol']} {pos['side'].upper()} | "
+                        f"size={pos['size']} | avg={pos['avg_price']} | "
+                        f"SL={'SET' if pos['stop_loss'] > 0 else 'NONE!'} | "
+                        f"uPnL={pos['unrealized_pnl']:+.2f} | "
+                        f"NOT tracked by bot!"
+                    )
+
+        total_active = trade_mgr.active_count
+        total_exchange = len(all_positions) if all_positions else 0
+        logger.info(
+            f"RECOVERY COMPLETE: {total_active} active trades, "
+            f"{total_exchange} positions on Bybit"
+        )
 
     except Exception as e:
-        logger.error(f"Orphan check error: {e}", exc_info=True)
+        logger.error(f"Recovery error: {e}", exc_info=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -858,6 +1012,15 @@ async def lifespan(app: FastAPI):
     db.init_tables()
     zone_mgr.warmup_cache()
 
+    # Recover active trades from DB before starting monitors
+    # (quick load from DB, Bybit reconciliation happens in safety_monitor)
+    persisted_count = trade_mgr.load_persisted_trades()
+    if persisted_count:
+        logger.info(
+            f"Startup: {persisted_count} trades pre-loaded from DB | "
+            f"Bybit reconciliation in 15s..."
+        )
+
     # Start Telegram listener (if configured)
     tg_listener = TelegramListener(
         config,
@@ -921,7 +1084,7 @@ async def close_position(symbol: str):
             price = bybit.get_ticker_price(trade.symbol)
             success = bybit.close_full(trade, "Manual close")
             if success and price:
-                qty = trade.remaining_qty if trade.tp1_hit else trade.total_qty
+                qty = trade.remaining_qty if trade.tps_hit > 0 else trade.total_qty
                 if trade.side == "long":
                     pnl = (price - trade.avg_price) * qty
                 else:
@@ -1361,6 +1524,25 @@ async def list_zones():
             "valid": z.is_valid,
         }
     return JSONResponse(result)
+
+
+@app.post("/recovery/reset")
+async def recovery_reset():
+    """Emergency: clear all persisted active trades from DB.
+
+    Use when the bot has stale/incorrect trade state in the DB.
+    Does NOT close positions on Bybit - only clears the DB state.
+    """
+    count = trade_mgr.active_count
+    db.clear_all_active_trades()
+    # Also clear in-memory trades (they'll become orphans on next safety check)
+    trade_mgr.trades.clear()
+    logger.warning(f"RECOVERY RESET: cleared {count} active trades from DB + memory")
+    return JSONResponse({
+        "status": "ok",
+        "cleared": count,
+        "warning": "Trades cleared from bot memory. Positions still open on Bybit!",
+    })
 
 
 @app.get("/status")
