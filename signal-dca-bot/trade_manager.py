@@ -561,6 +561,7 @@ class TradeManager:
             closed_at=trade.closed_at,
             signal_leverage=trade.signal_leverage,
             equity_at_entry=trade.equity_at_entry,
+            equity_at_close=trade.equity_at_entry + pnl,
         )
 
         total = self.total_wins + self.total_losses + self.total_breakeven

@@ -167,7 +167,7 @@ export async function getStats(days?: number): Promise<Stats> {
         SUM(CASE WHEN tp_fills = 0 AND realized_pnl < 0 THEN 1 ELSE 0 END) as losses,
         SUM(CASE WHEN tp_fills >= 1 AND realized_pnl <= 0 THEN 1 ELSE 0 END) as breakeven,
         SUM(realized_pnl) as total_pnl,
-        AVG(equity_at_close) as avg_equity,
+        AVG(NULLIF(equity_at_entry, 0)) as avg_equity,
         AVG(realized_pnl) as avg_pnl,
         AVG(pnl_pct_equity) as avg_pnl_pct,
         AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl END) as avg_win,
