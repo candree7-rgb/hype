@@ -458,39 +458,44 @@ class BybitEngine:
             return False
 
     def close_full(self, trade: Trade, reason: str) -> bool:
-        """Close entire remaining position.
+        """Close entire remaining position with exchange verification.
+
+        1. Cancel ALL orders for the symbol first
+        2. Market close with our tracked qty
+        3. Verify position on exchange → if residual, force-close with exchange qty
+        4. Final verify → if STILL open, log CRITICAL for manual intervention
 
         Args:
             trade: The trade
             reason: For logging
         """
-        remaining = trade.remaining_qty
-        if remaining <= 0:
-            remaining = trade.total_qty
+        # Step 1: Cancel ALL open orders (TPs, DCAs, E1)
+        self.cancel_all_orders(trade.symbol)
 
-        # Guard: can't close a position with 0 qty (PENDING/unfilled trades)
-        if remaining <= 0:
-            logger.warning(
-                f"close_full skipped: {trade.symbol} has 0 qty "
-                f"(status={trade.status}, reason={reason})"
-            )
-            return False
+        # Step 2: Get actual position from exchange (source of truth)
+        import time
+        pos = self.get_position(trade.symbol)
+        if pos is None or pos["size"] == 0:
+            logger.info(f"close_full: {trade.symbol} already closed on exchange | {reason}")
+            return True
 
+        # Use exchange size as our close qty (NOT internal tracking)
+        exchange_size = pos["size"]
         info = self.get_instrument_info(trade.symbol)
         if not info:
             return False
 
-        qty = self.round_qty(remaining, info["qty_step"])
+        close_side = "Sell" if trade.side == "long" else "Buy"
+        pos_idx = self._position_idx(trade.side)
+
+        # Step 3: Market close with exchange qty
+        qty = self.round_qty(exchange_size, info["qty_step"])
         if qty <= 0:
             logger.warning(
-                f"close_full skipped: {trade.symbol} rounded qty=0 "
-                f"(remaining={remaining}, reason={reason})"
+                f"close_full: {trade.symbol} exchange size {exchange_size} "
+                f"rounds to 0 | {reason}"
             )
             return False
-
-        close_side = "Sell" if trade.side == "long" else "Buy"
-
-        pos_idx = self._position_idx(trade.side)
 
         try:
             result = self.session.place_order(
@@ -504,18 +509,60 @@ class BybitEngine:
                 orderLinkId=f"{trade.trade_id}_CLOSE",
                 **pos_idx,
             )
-
             order_id = result["result"]["orderId"]
-            logger.info(f"Full close: {trade.symbol} {qty} | {reason} | Order: {order_id}")
-
-            # Cancel remaining DCA limit orders
-            self._cancel_dca_orders(trade)
-
-            return True
-
+            logger.info(
+                f"Full close: {trade.symbol} {qty} (exchange size) | "
+                f"{reason} | Order: {order_id}"
+            )
         except Exception as e:
             logger.error(f"Full close failed for {trade.symbol}: {e}")
             return False
+
+        # Step 4: Verify position is REALLY closed
+        time.sleep(0.5)
+        pos_verify = self.get_position(trade.symbol)
+
+        if pos_verify and pos_verify["size"] > 0:
+            residual = pos_verify["size"]
+            logger.warning(
+                f"RESIDUAL: {trade.symbol} still has {residual} after close! "
+                f"Force-closing with exchange qty..."
+            )
+
+            # Force close with exact residual from exchange
+            residual_qty = self.round_qty(residual, info["qty_step"])
+            if residual_qty > 0:
+                try:
+                    self.session.place_order(
+                        category="linear",
+                        symbol=trade.symbol,
+                        side=close_side,
+                        orderType="Market",
+                        qty=str(residual_qty),
+                        timeInForce="GTC",
+                        reduceOnly=True,
+                        orderLinkId=f"{trade.trade_id}_FORCE",
+                        **pos_idx,
+                    )
+                    logger.info(
+                        f"Force close executed: {trade.symbol} {residual_qty}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"FORCE CLOSE FAILED: {trade.symbol} {residual_qty} | {e}"
+                    )
+
+                # Final verification
+                time.sleep(0.5)
+                pos_final = self.get_position(trade.symbol)
+                if pos_final and pos_final["size"] > 0:
+                    logger.critical(
+                        f"CRITICAL: {trade.symbol} STILL OPEN after force close! "
+                        f"size={pos_final['size']} | MANUAL INTERVENTION REQUIRED!"
+                    )
+                    return False
+
+        return True
 
     def _cancel_dca_orders(self, trade: Trade) -> None:
         """Cancel all unfilled DCA limit orders for a trade."""

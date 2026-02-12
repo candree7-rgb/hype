@@ -338,6 +338,21 @@ async def price_monitor():
                     pos = bybit.get_position(trade.symbol)
                     if pos is None or pos["size"] == 0:
                         # Position closed by Bybit (SL or trailing stop triggered)
+                        # Step 1: Cancel ALL remaining orders (TPs, DCAs)
+                        bybit.cancel_all_orders(trade.symbol)
+
+                        # Step 2: Re-verify position after cancelling orders
+                        # (cancelling reduceOnly orders can't reopen, but be safe)
+                        await asyncio.sleep(0.5)
+                        pos_verify = bybit.get_position(trade.symbol)
+                        if pos_verify and pos_verify["size"] > 0:
+                            # Residual found! Force close with exchange qty
+                            logger.warning(
+                                f"RESIDUAL after SL/trail: {trade.symbol_display} "
+                                f"size={pos_verify['size']} - force closing"
+                            )
+                            bybit.close_full(trade, "Residual after exchange stop")
+
                         price = bybit.get_ticker_price(trade.symbol) or trade.avg_price
                         remaining = trade.remaining_qty
                         if remaining > 0:
@@ -705,16 +720,22 @@ async def handle_tg_close(close_cmd: dict):
     for trade in trade_mgr.active_trades:
         if trade.symbol == symbol or trade.symbol_display == close_cmd.get("symbol_display", ""):
             price = bybit.get_ticker_price(trade.symbol)
+            # close_full() handles: cancel_all → market close → verify → force-close residual
             success = bybit.close_full(trade, "TG close signal")
-            if success and price:
-                qty = trade.remaining_qty if trade.tp1_hit else trade.total_qty
+            if price:
+                remaining = trade.remaining_qty
                 if trade.side == "long":
-                    pnl = (price - trade.avg_price) * qty
+                    pnl = (price - trade.avg_price) * remaining
                 else:
-                    pnl = (trade.avg_price - price) * qty
+                    pnl = (trade.avg_price - price) * remaining
                 trade.realized_pnl += pnl
-                trade_mgr.close_trade(trade, price, trade.realized_pnl, "TG close signal")
-                logger.info(f"TG close executed: {symbol} PnL ${pnl:+.2f}")
+            trade_mgr.close_trade(
+                trade, price or 0, trade.realized_pnl, "TG close signal"
+            )
+            logger.info(
+                f"TG close executed: {symbol} PnL ${trade.realized_pnl:+.2f} | "
+                f"success={success}"
+            )
             return
     logger.info(f"TG close: no active trade for {symbol}")
 
@@ -864,11 +885,9 @@ async def trend_switch(request: Request):
         if trade.side != close_side:
             continue
 
-        # Cancel ALL orders first (E1 limit, DCAs, TPs)
-        bybit.cancel_all_orders(trade.symbol)
-
         # PENDING trades: E1 never filled, just cancel and remove
         if trade.status == TradeStatus.PENDING or trade.total_qty <= 0:
+            bybit.cancel_all_orders(trade.symbol)
             trade_mgr.close_trade(
                 trade, 0, 0,
                 f"Neo Cloud trend switch ({direction}) - unfilled"
@@ -885,10 +904,11 @@ async def trend_switch(request: Request):
             continue
 
         # FILLED trades: close position on exchange
+        # close_full() handles: cancel_all → market close → verify → force-close residual
         price = bybit.get_ticker_price(trade.symbol)
         success = bybit.close_full(trade, f"Neo Cloud {direction}")
 
-        if success and price:
+        if price:
             remaining = trade.remaining_qty
             if trade.side == "long":
                 pnl = (price - trade.avg_price) * remaining
@@ -896,31 +916,20 @@ async def trend_switch(request: Request):
                 pnl = (trade.avg_price - price) * remaining
             trade.realized_pnl += pnl
 
-            # Verify position is actually closed
-            await asyncio.sleep(1)
-            pos = bybit.get_position(trade.symbol)
-            if pos and pos["size"] > 0:
-                logger.warning(
-                    f"Position still open after close! {trade.symbol_display} "
-                    f"size={pos['size']} - retrying"
-                )
-                bybit.close_full(trade, "Neo Cloud retry")
-                await asyncio.sleep(1)
-
-            trade_mgr.close_trade(
-                trade, price, trade.realized_pnl,
-                f"Neo Cloud trend switch ({direction})"
-            )
-            closed.append({
-                "trade_id": trade.trade_id,
-                "symbol": trade.symbol_display,
-                "side": trade.side,
-                "pnl": f"${trade.realized_pnl:+.2f}",
-            })
-            logger.info(
-                f"Neo Cloud closed: {trade.symbol_display} {trade.side.upper()} | "
-                f"PnL: ${trade.realized_pnl:+.2f}"
-            )
+        trade_mgr.close_trade(
+            trade, price or 0, trade.realized_pnl,
+            f"Neo Cloud trend switch ({direction})"
+        )
+        closed.append({
+            "trade_id": trade.trade_id,
+            "symbol": trade.symbol_display,
+            "side": trade.side,
+            "pnl": f"${trade.realized_pnl:+.2f}",
+        })
+        logger.info(
+            f"Neo Cloud closed: {trade.symbol_display} {trade.side.upper()} | "
+            f"PnL: ${trade.realized_pnl:+.2f} | success={success}"
+        )
 
     if not closed:
         logger.info(f"Neo Cloud: no {close_side} trades for {symbol}")
@@ -1060,11 +1069,9 @@ async def push_zones(request: Request):
                 if trade.symbol != symbol_clean or trade.side != close_side:
                     continue
 
-                # Cancel ALL orders first (E1 limit, DCAs, TPs)
-                bybit.cancel_all_orders(trade.symbol)
-
                 # PENDING trades: E1 never filled, just cancel and remove
                 if trade.status == TradeStatus.PENDING or trade.total_qty <= 0:
+                    bybit.cancel_all_orders(trade.symbol)
                     trade_mgr.close_trade(
                         trade, 0, 0,
                         f"Neo Cloud switch ({new_direction}) - unfilled"
@@ -1080,10 +1087,11 @@ async def push_zones(request: Request):
                     continue
 
                 # FILLED trades: close position on exchange
+                # close_full() handles: cancel_all → market close → verify → force-close residual
                 price = bybit.get_ticker_price(trade.symbol)
                 success = bybit.close_full(trade, f"Neo Cloud {new_direction}")
 
-                if success and price:
+                if price:
                     remaining = trade.remaining_qty
                     if trade.side == "long":
                         pnl = (price - trade.avg_price) * remaining
@@ -1091,30 +1099,19 @@ async def push_zones(request: Request):
                         pnl = (trade.avg_price - price) * remaining
                     trade.realized_pnl += pnl
 
-                    # Verify position is actually closed
-                    await asyncio.sleep(1)
-                    pos = bybit.get_position(trade.symbol)
-                    if pos and pos["size"] > 0:
-                        logger.warning(
-                            f"Position still open after close! {trade.symbol} "
-                            f"size={pos['size']} - retrying"
-                        )
-                        bybit.close_full(trade, "Neo Cloud retry")
-                        await asyncio.sleep(1)
-
-                    trade_mgr.close_trade(
-                        trade, price, trade.realized_pnl,
-                        f"Neo Cloud switch ({new_direction})"
-                    )
-                    closed.append({
-                        "trade_id": trade.trade_id,
-                        "side": trade.side,
-                        "pnl": f"${trade.realized_pnl:+.2f}",
-                    })
-                    logger.info(
-                        f"Neo Cloud closed: {trade.symbol_display} {trade.side.upper()} | "
-                        f"PnL: ${trade.realized_pnl:+.2f}"
-                    )
+                trade_mgr.close_trade(
+                    trade, price or 0, trade.realized_pnl,
+                    f"Neo Cloud switch ({new_direction})"
+                )
+                closed.append({
+                    "trade_id": trade.trade_id,
+                    "side": trade.side,
+                    "pnl": f"${trade.realized_pnl:+.2f}",
+                })
+                logger.info(
+                    f"Neo Cloud closed: {trade.symbol_display} {trade.side.upper()} | "
+                    f"PnL: ${trade.realized_pnl:+.2f} | success={success}"
+                )
 
             neo_result = {
                 "switch": True,
