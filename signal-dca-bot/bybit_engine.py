@@ -640,22 +640,31 @@ class BybitEngine:
             logger.error(f"Get all positions failed: {e}")
             return []
 
-    def get_closed_pnl(self, limit: int = 50) -> list[dict]:
+    def get_closed_pnl(self, limit: int = 50, start_time_ms: int = 0) -> list[dict]:
         """Get recently closed PnL records from Bybit.
 
         Returns trades closed on exchange (SL, TP, manual, liquidation).
         Used for syncing manual closes into our DB.
+
+        Note: Bybit closed PnL 'side' = closing ORDER side, not position side.
+        Buy close = was SHORT, Sell close = was LONG. We invert it.
         """
         try:
-            result = self.session.get_closed_pnl(
-                category="linear",
-                limit=limit,
-            )
+            kwargs = {
+                "category": "linear",
+                "limit": limit,
+            }
+            if start_time_ms > 0:
+                kwargs["startTime"] = start_time_ms
+
+            result = self.session.get_closed_pnl(**kwargs)
             records = []
             for r in result["result"]["list"]:
+                # INVERT: Buy closing order = short position, Sell = long
+                position_side = "short" if r["side"] == "Buy" else "long"
                 records.append({
                     "symbol": r["symbol"],
-                    "side": "long" if r["side"] == "Buy" else "short",
+                    "side": position_side,
                     "qty": float(r["qty"]),
                     "entry_price": float(r["avgEntryPrice"]),
                     "exit_price": float(r["avgExitPrice"]),

@@ -746,42 +746,45 @@ TRADE_SYNC_INTERVAL = 120  # seconds (every 2 minutes)
 async def bybit_trade_sync():
     """Background: sync closed PnL from Bybit into our DB.
 
+    Only syncs trades closed AFTER bot startup (not historical).
     Catches trades closed manually, by liquidation, or any other
-    method our bot didn't track. Queries Bybit's closed PnL endpoint
-    and saves any missing trades to our DB.
+    method our bot didn't track.
     """
     logger.info("Bybit trade sync started")
     await asyncio.sleep(30)  # Wait for startup to settle
+
+    # Only sync trades closed after bot started (prevents re-inserting deleted trades)
+    sync_start_ms = int(time.time() * 1000)
+    logger.info(f"Bybit sync: only syncing trades after {sync_start_ms}")
 
     while True:
         try:
             await asyncio.sleep(TRADE_SYNC_INTERVAL)
 
-            records = bybit.get_closed_pnl(limit=20)
+            records = bybit.get_closed_pnl(limit=20, start_time_ms=sync_start_ms)
             if not records:
                 continue
 
             for rec in records:
-                # Check if this trade already exists in our DB
-                trade_id = f"bybit_{rec['symbol']}_{rec['side']}_{int(rec['created_time'])}"
-
-                # Check if we already have this in active trades (bot-managed)
-                is_tracked = False
-                for trade in trade_mgr.active_trades:
-                    if (trade.symbol == rec["symbol"] and
-                            trade.side == rec["side"] and
-                            trade.status != TradeStatus.CLOSED):
-                        is_tracked = True
-                        break
-
-                # Also check if already in DB (by checking recent entries)
+                # Check if already in DB (by checking recent entries)
                 existing = db.get_trade_by_symbol_time(
                     rec["symbol"], rec["created_time"]
                 )
                 if existing:
                     continue
 
+                # Check if bot-managed (don't double-save)
+                is_tracked = False
+                for trade in trade_mgr.active_trades:
+                    if (trade.symbol == rec["symbol"] and
+                            trade.side == rec["side"]):
+                        is_tracked = True
+                        break
+                if is_tracked:
+                    continue
+
                 # Not tracked and not in DB → save it
+                trade_id = f"bybit_{rec['symbol']}_{rec['side']}_{int(rec['created_time'])}"
                 equity = bybit.get_equity() or 0
                 db.save_trade(
                     trade_id=trade_id,
