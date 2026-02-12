@@ -102,6 +102,9 @@ class Trade:
     # P&L
     realized_pnl: float = 0.0
 
+    # Equity snapshot (for PnL % calculation)
+    equity_at_entry: float = 0.0
+
     @property
     def is_active(self) -> bool:
         return self.status != TradeStatus.CLOSED
@@ -164,6 +167,7 @@ def trade_to_dict(trade: Trade) -> dict:
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
         "realized_pnl": trade.realized_pnl,
+        "equity_at_entry": trade.equity_at_entry,
     }
 
 
@@ -210,6 +214,7 @@ def trade_from_dict(data: dict) -> Trade:
         opened_at=data.get("opened_at", 0),
         closed_at=data.get("closed_at", 0),
         realized_pnl=data.get("realized_pnl", 0),
+        equity_at_entry=data.get("equity_at_entry", 0),
     )
 
 
@@ -364,6 +369,7 @@ class TradeManager:
             tp_filled=tp_filled,
             tp_close_pcts=tp_close_pcts[:len(tp_prices)],
             opened_at=time.time(),
+            equity_at_entry=equity,
         )
 
         self.trades[trade_id] = trade
@@ -554,6 +560,7 @@ class TradeManager:
             opened_at=trade.opened_at,
             closed_at=trade.closed_at,
             signal_leverage=trade.signal_leverage,
+            equity_at_entry=trade.equity_at_entry,
         )
 
         total = self.total_wins + self.total_losses + self.total_breakeven
