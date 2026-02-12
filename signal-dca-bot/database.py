@@ -369,6 +369,36 @@ def get_trade_by_symbol_time(symbol: str, created_time: float) -> bool:
         return False
 
 
+def get_trade_by_symbol_close_time(symbol: str, close_time: float) -> bool:
+    """Check if a trade exists in DB for a symbol near a given close time.
+
+    Used by Bybit sync to avoid duplicating bot-managed trades
+    (which have a different opened_at but matching closed_at).
+    Matches within a 120-second window on closed_at.
+    """
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromtimestamp(close_time, tz=timezone.utc)
+        dt_start = dt - timedelta(seconds=120)
+        dt_end = dt + timedelta(seconds=120)
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM trades WHERE symbol = %s AND closed_at BETWEEN %s AND %s LIMIT 1",
+            (symbol, dt_start, dt_end)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row is not None
+    except Exception as e:
+        logger.error(f"DB get_trade_by_symbol_close_time failed: {e}")
+        return False
+
+
 def get_trade_stats() -> dict:
     """Get aggregate trade stats from history."""
     conn = get_connection()

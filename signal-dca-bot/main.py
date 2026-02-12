@@ -915,12 +915,84 @@ async def _recover_and_check_positions():
 
 TRADE_SYNC_INTERVAL = 120  # seconds (every 2 minutes)
 
+
+def _aggregate_closed_pnl(records: list[dict]) -> list[dict]:
+    """Aggregate closed PnL records by (symbol, side) within time window.
+
+    Bybit returns one record per execution fill. A single close order
+    can produce multiple fills (matched against different counterparties).
+    This aggregates them into one record per position close event.
+
+    Groups records that share (symbol, side) and have close times within
+    60 seconds of each other.
+    """
+    AGGREGATE_WINDOW_SECONDS = 60
+
+    if not records:
+        return []
+
+    # Sort by symbol, side, time
+    sorted_recs = sorted(
+        records, key=lambda r: (r["symbol"], r["side"], r["created_time"])
+    )
+
+    aggregated = []
+    i = 0
+    while i < len(sorted_recs):
+        group = [sorted_recs[i]]
+        j = i + 1
+
+        # Group consecutive records with same (symbol, side) within time window
+        while j < len(sorted_recs):
+            curr = sorted_recs[j]
+            prev = group[-1]
+
+            if (curr["symbol"] == prev["symbol"] and
+                    curr["side"] == prev["side"] and
+                    abs(curr["created_time"] - prev["created_time"]) <= AGGREGATE_WINDOW_SECONDS):
+                group.append(curr)
+                j += 1
+            else:
+                break
+
+        # Aggregate the group
+        total_qty = sum(r["qty"] for r in group)
+        total_pnl = sum(r["closed_pnl"] for r in group)
+
+        # Weighted average exit price
+        if total_qty > 0:
+            avg_exit = sum(r["qty"] * r["exit_price"] for r in group) / total_qty
+        else:
+            avg_exit = group[0]["exit_price"]
+
+        aggregated.append({
+            "symbol": group[0]["symbol"],
+            "side": group[0]["side"],
+            "qty": total_qty,
+            "entry_price": group[0]["entry_price"],
+            "exit_price": avg_exit,
+            "closed_pnl": total_pnl,
+            "order_type": group[0]["order_type"],
+            "leverage": group[0]["leverage"],
+            "created_time": group[0]["created_time"],
+            "updated_time": group[-1]["updated_time"],
+            "fill_count": len(group),
+        })
+
+        i = j
+
+    return aggregated
+
+
 async def bybit_trade_sync():
     """Background: sync closed PnL from Bybit into our DB.
 
     Only syncs trades closed AFTER bot startup (not historical).
     Catches trades closed manually, by liquidation, or any other
     method our bot didn't track.
+
+    Aggregates multiple execution fills for the same position close
+    into a single trade record (Bybit returns one record per fill).
     """
     logger.info("Bybit trade sync started")
     await asyncio.sleep(30)  # Wait for startup to settle
@@ -937,12 +1009,24 @@ async def bybit_trade_sync():
             if not records:
                 continue
 
-            for rec in records:
-                # Check if already in DB (by checking recent entries)
+            # Aggregate execution fills into position-level records.
+            # A single close order can have multiple fills on Bybit.
+            aggregated = _aggregate_closed_pnl(records)
+
+            for rec in aggregated:
+                # Check if already in DB (by open time match)
                 existing = db.get_trade_by_symbol_time(
                     rec["symbol"], rec["created_time"]
                 )
                 if existing:
+                    continue
+
+                # Also check by close time (catches bot-managed trades
+                # that were saved with different opened_at)
+                existing_close = db.get_trade_by_symbol_close_time(
+                    rec["symbol"], rec["updated_time"]
+                )
+                if existing_close:
                     continue
 
                 # Check if bot-managed (don't double-save)
@@ -978,10 +1062,11 @@ async def bybit_trade_sync():
                     equity_at_close=equity,
                     leverage=config.leverage,
                 )
+                fill_info = f" ({rec['fill_count']} fills)" if rec.get("fill_count", 1) > 1 else ""
                 logger.info(
                     f"BYBIT SYNC: {rec['symbol']} {rec['side'].upper()} | "
-                    f"PnL: ${rec['closed_pnl']:+.2f} | "
-                    f"Entry: {rec['entry_price']} → Exit: {rec['exit_price']}"
+                    f"PnL: ${rec['closed_pnl']:+.4f} | Qty: {rec['qty']}{fill_info} | "
+                    f"Entry: {rec['entry_price']} → Exit: {rec['exit_price']:.4f}"
                 )
 
         except Exception as e:
