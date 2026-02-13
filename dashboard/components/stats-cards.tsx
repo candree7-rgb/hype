@@ -120,7 +120,7 @@ export default function StatsCards({ timeRange, customDateRange }: StatsCardsPro
       <StatCard
         label="Worst Trade"
         value={formatCurrency(stats.worst_trade)}
-        valueColor="text-danger"
+        valueColor={stats.worst_trade >= 0 ? 'text-success' : 'text-danger'}
       />
       <StatCard
         label="TP Hit Rate"

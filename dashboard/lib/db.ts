@@ -198,7 +198,7 @@ export async function getStats(
         AVG(max_dca_reached) as avg_dca_fills,
         AVG(duration_minutes) as avg_duration,
         SUM(CASE WHEN close_reason ILIKE '%trail%' THEN 1 ELSE 0 END) as trailing_exits,
-        SUM(CASE WHEN close_reason ILIKE '%sl%' OR close_reason ILIKE '%stop%' THEN 1 ELSE 0 END) as sl_exits,
+        SUM(CASE WHEN (close_reason ILIKE '%sl%' OR close_reason ILIKE '%stop%') AND realized_pnl < 0 AND tp_fills = 0 THEN 1 ELSE 0 END) as sl_exits,
         SUM(CASE WHEN close_reason ILIKE '%be%' THEN 1 ELSE 0 END) as be_exits,
         SUM(CASE WHEN tp_fills >= 1 THEN 1 ELSE 0 END) as tp_hits
       FROM enriched
