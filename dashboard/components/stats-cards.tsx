@@ -176,12 +176,6 @@ export default function StatsCards({ timeRange, customDateRange, simSettings }: 
         valueColor={worstTrade >= 0 ? 'text-success' : 'text-danger'}
       />
       <StatCard
-        label="TP Hit Rate"
-        value={`${(stats.tp_rate ?? 0).toFixed(1)}%`}
-        valueColor={stats.tp_rate > 50 ? 'text-success' : 'text-danger'}
-        subValue="Take Profit exits"
-      />
-      <StatCard
         label="Stop Loss Rate"
         value={`${(stats.sl_rate ?? 0).toFixed(1)}%`}
         valueColor={stats.sl_rate < 50 ? 'text-success' : 'text-danger'}

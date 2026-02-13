@@ -289,15 +289,15 @@ export async function getExitDistribution(
       WITH trade_data AS (
         SELECT
           CASE
-            WHEN close_reason ILIKE '%trailing%' THEN 4
-            WHEN close_reason ILIKE '%after TP4%' THEN 4
-            WHEN close_reason ILIKE '%after TP3%' THEN 3
-            WHEN close_reason ILIKE '%after TP2%' THEN 2
-            WHEN close_reason ILIKE '%after TP1%' OR tp1_hit THEN 1
+            WHEN close_reason ILIKE '%trail%' AND tp1_hit THEN 4
+            WHEN close_reason ILIKE '%tp4%' THEN 4
+            WHEN close_reason ILIKE '%tp3%' THEN 3
+            WHEN close_reason ILIKE '%tp2%' THEN 2
+            WHEN tp1_hit THEN 1
             ELSE 0
           END as max_tp_hit,
           CASE
-            WHEN close_reason ILIKE '%sl%' OR close_reason ILIKE '%stop%' THEN true
+            WHEN close_reason ILIKE '%sl%' OR (close_reason ILIKE '%stop%' AND close_reason NOT ILIKE '%trail%') THEN true
             ELSE false
           END as is_sl
         FROM trades
