@@ -12,9 +12,9 @@ Exit Logic (Strategy C Hybrid SL):
     → All exits are exchange-side (Bybit handles TP/SL/trailing)
 
   DCA1 fills (price dipped to -5% before TP1):
-    → Cancel unfilled TPs → Hard SL at avg-3% (tight)
-    → BE-Trail when price returns to avg (0.5% CB)
-    → Close 100% on trail callback
+    → Cancel signal TPs → New TPs from avg: TP1=+0.75% (50%), TP2=+1.5% (20%)
+    → Trail remaining 30% with 1% CB after all DCA TPs
+    → Hard SL at DCA-fill+3%, SL→BE(avg) after DCA TP1
 
   Neo Cloud trend switch → close all opposing positions
 """
@@ -467,6 +467,40 @@ class TradeManager:
         for pct in trade.tp_close_pcts:
             qty = trade.total_qty * pct / 100
             trade.tp_close_qtys.append(qty)
+
+    def setup_dca_tps(self, trade: Trade) -> None:
+        """Recalculate TP prices and quantities after DCA fill.
+
+        Replaces cancelled signal TPs with avg-based TPs for the full position.
+        DCA TPs: TP1=+0.75%, TP2=+1.5% from new avg, remaining trails.
+        """
+        # New TP prices based on new avg
+        trade.tp_prices = []
+        for pct in self.config.dca_tp_pcts:
+            if trade.side == "long":
+                tp = trade.avg_price * (1 + pct / 100)
+            else:
+                tp = trade.avg_price * (1 - pct / 100)
+            trade.tp_prices.append(tp)
+
+        trade.tp_filled = [False] * len(trade.tp_prices)
+        trade.tp_order_ids = [""] * len(trade.tp_prices)
+        trade.tp_close_pcts = list(self.config.dca_tp_close_pcts)
+        trade.tps_hit = 0
+        trade.total_tp_closed_qty = 0
+
+        # Recalculate close quantities from full position (E1 + DCA)
+        trade.tp_close_qtys = []
+        for pct in trade.tp_close_pcts:
+            qty = trade.total_qty * pct / 100
+            trade.tp_close_qtys.append(qty)
+
+        logger.info(
+            f"DCA TPs set: {trade.symbol_display} | Avg: {trade.avg_price:.4f} | "
+            f"TP1={trade.tp_prices[0]:.4f} ({self.config.dca_tp_pcts[0]}%), "
+            f"TP2={trade.tp_prices[1]:.4f} ({self.config.dca_tp_pcts[1]}%) | "
+            f"Qty: TP1={trade.tp_close_qtys[0]:.2f}, TP2={trade.tp_close_qtys[1]:.2f}"
+        )
 
     def record_tp_fill(self, trade: Trade, tp_idx: int,
                        closed_qty: float, fill_price: float) -> None:

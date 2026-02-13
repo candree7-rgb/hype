@@ -11,8 +11,8 @@ Strategy:
     TP2 → SL stays at BE (let runners breathe)
     TP3 → SL = TP1 price (lock profit)
     TP4 → Trail 1% CB with SL floor at TP1
-- Two-tier SL: Safety SL at entry-10% (pre-DCA), Hard SL at avg-3% (post-DCA)
-- DCA exit: BE-Trail from avg (0.5% CB)
+- Two-tier SL: Safety SL at entry-10% (pre-DCA), Hard SL at DCA-fill+3% (post-DCA)
+- DCA exit: New TPs from avg (TP1=0.75%, TP2=1.5%, trail 30% @1%CB)
 - Neo Cloud trend switch: close on clear reversal
 - Zone-snapping: S1/R1 dynamic zones from LuxAlgo/Bybit candles
 - Crash recovery: active trades persisted to PostgreSQL, full Bybit reconciliation on startup
@@ -67,8 +67,15 @@ class BotConfig:
     sl_to_be_after_tp1: bool = True     # Strategy C: TP1→BE, TP2→stay BE, TP3→SL@TP1, TP4→trail
     be_buffer_pct: float = 0.1          # 0.1% buffer above/below entry for BE stop (covers fees)
 
-    # ── DCA Exit (BE-Trail, activates from DCA1) ──
-    be_trail_callback_pct: float = 0.5  # Trail from avg with 0.5% CB
+    # ── DCA Exit TPs (replaces BE-trail after DCA fills) ──
+    # After DCA: place new TPs from avg, trail remaining after all DCA TPs
+    dca_tp_pcts: list[float] = field(
+        default_factory=lambda: [0.75, 1.5]  # TP1=+0.75%, TP2=+1.5% from avg
+    )
+    dca_tp_close_pcts: list[float] = field(
+        default_factory=lambda: [50, 20]  # TP1=50%, TP2=20%, remaining 30% trails
+    )
+    dca_trail_callback_pct: float = 1.0  # 1% CB trail for remaining 30% after DCA TPs
 
     # ── Stop Loss (two-tier) ──
     # Pre-DCA: safety SL at entry-10% (wide, gives DCA room to fill)
@@ -163,7 +170,9 @@ class BotConfig:
         print(f"║    SL Ladder (Strategy C):")
         print(f"║      TP1→BE+{self.be_buffer_pct}%, TP2→stay BE, TP3→SL@TP1, TP4→Trail {self.trailing_callback_pct}% CB")
         print(f"║")
-        print(f"║  DCA Exit:       BE-Trail ({self.be_trail_callback_pct}% CB from avg)")
+        dca_tp_str = ", ".join(f"TP{i+1}={p}%" for i, p in enumerate(self.dca_tp_pcts))
+        dca_trail_pct = 100 - sum(self.dca_tp_close_pcts)
+        print(f"║  DCA Exit:       {dca_tp_str} from avg, trail {dca_trail_pct}% @{self.dca_trail_callback_pct}%CB")
         print(f"║  Safety SL:      Entry - {self.safety_sl_pct}% (pre-DCA)")
         print(f"║  Hard SL:        Avg - {self.hard_sl_pct}% (post-DCA)")
         print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")

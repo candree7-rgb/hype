@@ -11,7 +11,9 @@ Architecture:
        → TP2 fills: SL stays at BE (room for runners)
        → TP3 fills: SL → TP1 price (lock profit)
        → TP4 fills: trailing 20% (1% CB) with SL floor at TP1
-     - DCA fills (before TP1): cancel TPs, hard SL at avg-3%, BE-trail
+     - DCA fills (before TP1): cancel signal TPs, place new TPs from avg
+       → DCA TP1=+0.75% (50%), TP2=+1.5% (20%), trail 30% @1%CB
+       → Hard SL at DCA-fill+3%, SL→BE after DCA TP1
      - Detect position close (SL/trailing triggered by Bybit)
   3. Zone Refresh every 15min: auto-calc swing H/L for active symbols
   4. Neo Cloud trend switch: close opposing positions on /signal/trend-switch
@@ -231,7 +233,7 @@ async def price_monitor():
     - After TP2: SL stays at BE (let runners breathe through pullbacks)
     - After TP3: SL → TP1 price (lock partial profit)
     - After TP4: trailing stop 1% CB on remaining 20%, SL floor at TP1
-    - DCA fills (before TP1): cancel TPs, hard SL at avg-3%, BE-trail from avg
+    - DCA fills (before TP1): cancel signal TPs, new TPs from avg, hard SL at DCA-fill+3%
     """
     logger.info("Price monitor started (Multi-TP)")
 
@@ -272,7 +274,8 @@ async def price_monitor():
                     continue
 
                 # ── 1. Check Multi-TP fills (exchange-side limit orders) ──
-                if trade.status == TradeStatus.OPEN and trade.current_dca == 0:
+                # Works for both E1 mode (signal TPs) and DCA mode (avg-based TPs)
+                if trade.status in (TradeStatus.OPEN, TradeStatus.DCA_ACTIVE):
                     for tp_idx in range(len(trade.tp_prices)):
                         if trade.tp_filled[tp_idx] or not trade.tp_order_ids[tp_idx]:
                             continue
@@ -283,93 +286,144 @@ async def price_monitor():
                             close_qty = trade.tp_close_qtys[tp_idx] if tp_idx < len(trade.tp_close_qtys) else 0
                             trade_mgr.record_tp_fill(trade, tp_idx, close_qty, tp_fill_price)
 
-                            # ── Strategy C: Hybrid SL Ladder ──
-                            # TP1 → SL to BE (entry), cancel DCAs
-                            # TP2 → SL stays at BE (let runners breathe)
-                            # TP3 → SL to TP1 (lock some profit)
-                            # TP4 → trailing on remaining 20%
+                            # ── SL Ladder: DCA mode (2 TPs + trail) ──
+                            if trade.current_dca > 0:
+                                if tp_idx == 0:
+                                    # DCA TP1 → SL to BE (avg + buffer)
+                                    buffer = config.be_buffer_pct / 100
+                                    if trade.side == "long":
+                                        be_price = trade.avg_price * (1 + buffer)
+                                    else:
+                                        be_price = trade.avg_price * (1 - buffer)
+                                    sl_ok = bybit.set_trading_stop(
+                                        trade.symbol, trade.side,
+                                        stop_loss=be_price,
+                                    )
+                                    trade.hard_sl_price = be_price
+                                    trade_mgr.persist_trade(trade)
+                                    if sl_ok:
+                                        logger.info(
+                                            f"DCA TP1 → SL=BE: {trade.symbol_display} | "
+                                            f"SL={be_price:.4f} (avg+{config.be_buffer_pct}% buffer)"
+                                        )
+                                    else:
+                                        logger.critical(
+                                            f"DCA TP1 → SL=BE FAILED: {trade.symbol_display} | "
+                                            f"SL={be_price:.4f} NOT VERIFIED!"
+                                        )
 
-                            if tp_idx == 0 and config.sl_to_be_after_tp1:
-                                # TP1: SL → breakeven + 0.1% buffer + cancel DCAs
-                                buffer = config.be_buffer_pct / 100
-                                if trade.side == "long":
-                                    be_price = trade.signal_entry * (1 + buffer)
-                                else:
-                                    be_price = trade.signal_entry * (1 - buffer)
-                                sl_ok = bybit.set_trading_stop(
-                                    trade.symbol, trade.side,
-                                    stop_loss=be_price,
-                                )
-                                trade.hard_sl_price = be_price
-                                for dca in trade.dca_levels[1:]:
-                                    if dca.order_id and not dca.filled:
-                                        bybit.cancel_order(trade.symbol, dca.order_id)
-                                        dca.order_id = ""
-                                trade_mgr.persist_trade(trade)
-                                if sl_ok:
+                                # After all DCA TPs: trail remaining with SL floor at TP1
+                                if all(trade.tp_filled):
+                                    trail_dist = tp_fill_price * config.dca_trail_callback_pct / 100
+                                    tp1_price = trade.tp_prices[0]
+                                    sl_ok = bybit.set_trading_stop(
+                                        trade.symbol, trade.side,
+                                        stop_loss=tp1_price,
+                                        trailing_stop=trail_dist,
+                                    )
+                                    trade.status = TradeStatus.TRAILING
+                                    trade.hard_sl_price = tp1_price
+                                    trade_mgr.persist_trade(trade)
+                                    if sl_ok:
+                                        logger.info(
+                                            f"All DCA TPs → trailing: {trade.symbol_display} | "
+                                            f"SL={tp1_price:.4f} + Trail={config.dca_trail_callback_pct}%CB on "
+                                            f"{trade.remaining_qty:.6f} remaining"
+                                        )
+                                    else:
+                                        logger.critical(
+                                            f"DCA trailing FAILED: {trade.symbol_display} | "
+                                            f"SL={tp1_price:.4f} NOT VERIFIED!"
+                                        )
+
+                            # ── SL Ladder: E1 mode (Strategy C: 4 TPs + trail) ──
+                            else:
+                                # TP1 → SL to BE (entry), cancel DCAs
+                                # TP2 → SL stays at BE (let runners breathe)
+                                # TP3 → SL to TP1 (lock some profit)
+                                # TP4 → trailing on remaining 20%
+
+                                if tp_idx == 0 and config.sl_to_be_after_tp1:
+                                    # TP1: SL → breakeven + 0.1% buffer + cancel DCAs
+                                    buffer = config.be_buffer_pct / 100
+                                    if trade.side == "long":
+                                        be_price = trade.signal_entry * (1 + buffer)
+                                    else:
+                                        be_price = trade.signal_entry * (1 - buffer)
+                                    sl_ok = bybit.set_trading_stop(
+                                        trade.symbol, trade.side,
+                                        stop_loss=be_price,
+                                    )
+                                    trade.hard_sl_price = be_price
+                                    for dca in trade.dca_levels[1:]:
+                                        if dca.order_id and not dca.filled:
+                                            bybit.cancel_order(trade.symbol, dca.order_id)
+                                            dca.order_id = ""
+                                    trade_mgr.persist_trade(trade)
+                                    if sl_ok:
+                                        logger.info(
+                                            f"TP1 → SL=BE: {trade.symbol_display} | "
+                                            f"SL={be_price:.4f} (entry+{config.be_buffer_pct}% buffer) | DCAs cancelled"
+                                        )
+                                    else:
+                                        logger.critical(
+                                            f"TP1 → SL=BE FAILED: {trade.symbol_display} | "
+                                            f"SL={be_price:.4f} NOT VERIFIED on exchange! "
+                                            f"Safety monitor will retry in 30s"
+                                        )
+
+                                elif tp_idx == 1:
+                                    # TP2: SL stays at BE → let runners breathe
+                                    trade_mgr.persist_trade(trade)
                                     logger.info(
-                                        f"TP1 → SL=BE: {trade.symbol_display} | "
-                                        f"SL={be_price:.4f} (entry+{config.be_buffer_pct}% buffer) | DCAs cancelled"
-                                    )
-                                else:
-                                    logger.critical(
-                                        f"TP1 → SL=BE FAILED: {trade.symbol_display} | "
-                                        f"SL={be_price:.4f} NOT VERIFIED on exchange! "
-                                        f"Safety monitor will retry in 30s"
+                                        f"TP2 filled: {trade.symbol_display} | "
+                                        f"SL stays at BE={trade.hard_sl_price:.4f} (room for runners)"
                                     )
 
-                            elif tp_idx == 1:
-                                # TP2: SL stays at BE → let runners breathe
-                                trade_mgr.persist_trade(trade)
-                                logger.info(
-                                    f"TP2 filled: {trade.symbol_display} | "
-                                    f"SL stays at BE={trade.hard_sl_price:.4f} (room for runners)"
-                                )
+                                elif tp_idx == 2:
+                                    # TP3: SL → TP1 price (lock profit, but not too tight)
+                                    tp1_price = trade.tp_prices[0]
+                                    sl_ok = bybit.set_trading_stop(
+                                        trade.symbol, trade.side,
+                                        stop_loss=tp1_price,
+                                    )
+                                    trade.hard_sl_price = tp1_price
+                                    trade_mgr.persist_trade(trade)
+                                    if sl_ok:
+                                        logger.info(
+                                            f"TP3 → SL=TP1: {trade.symbol_display} | "
+                                            f"SL={tp1_price:.4f} (profit locked)"
+                                        )
+                                    else:
+                                        logger.critical(
+                                            f"TP3 → SL=TP1 FAILED: {trade.symbol_display} | "
+                                            f"SL={tp1_price:.4f} NOT VERIFIED! "
+                                            f"Safety monitor will retry in 30s"
+                                        )
 
-                            elif tp_idx == 2:
-                                # TP3: SL → TP1 price (lock profit, but not too tight)
-                                tp1_price = trade.tp_prices[0]
-                                sl_ok = bybit.set_trading_stop(
-                                    trade.symbol, trade.side,
-                                    stop_loss=tp1_price,
-                                )
-                                trade.hard_sl_price = tp1_price
-                                trade_mgr.persist_trade(trade)
-                                if sl_ok:
-                                    logger.info(
-                                        f"TP3 → SL=TP1: {trade.symbol_display} | "
-                                        f"SL={tp1_price:.4f} (profit locked)"
+                                # After last E1 TP (TP4): activate trailing on remaining
+                                if all(trade.tp_filled):
+                                    trail_dist = tp_fill_price * config.trailing_callback_pct / 100
+                                    # Keep SL at TP1 as floor + add trailing
+                                    sl_ok = bybit.set_trading_stop(
+                                        trade.symbol, trade.side,
+                                        stop_loss=trade.hard_sl_price,
+                                        trailing_stop=trail_dist,
                                     )
-                                else:
-                                    logger.critical(
-                                        f"TP3 → SL=TP1 FAILED: {trade.symbol_display} | "
-                                        f"SL={tp1_price:.4f} NOT VERIFIED! "
-                                        f"Safety monitor will retry in 30s"
-                                    )
-
-                            # After last TP (TP4): activate trailing on remaining
-                            if all(trade.tp_filled):
-                                trail_dist = tp_fill_price * config.trailing_callback_pct / 100
-                                # Keep SL at TP1 as floor + add trailing
-                                sl_ok = bybit.set_trading_stop(
-                                    trade.symbol, trade.side,
-                                    stop_loss=trade.hard_sl_price,
-                                    trailing_stop=trail_dist,
-                                )
-                                trade.status = TradeStatus.TRAILING
-                                trade_mgr.persist_trade(trade)
-                                if sl_ok:
-                                    logger.info(
-                                        f"All TPs filled → trailing: {trade.symbol_display} | "
-                                        f"SL={trade.hard_sl_price:.4f} + Trail={config.trailing_callback_pct}% CB on "
-                                        f"{trade.remaining_qty:.6f} remaining"
-                                    )
-                                else:
-                                    logger.critical(
-                                        f"Trailing SL FAILED: {trade.symbol_display} | "
-                                        f"SL={trade.hard_sl_price:.4f} NOT VERIFIED! "
-                                        f"Safety monitor will retry in 30s"
-                                    )
+                                    trade.status = TradeStatus.TRAILING
+                                    trade_mgr.persist_trade(trade)
+                                    if sl_ok:
+                                        logger.info(
+                                            f"All TPs filled → trailing: {trade.symbol_display} | "
+                                            f"SL={trade.hard_sl_price:.4f} + Trail={config.trailing_callback_pct}% CB on "
+                                            f"{trade.remaining_qty:.6f} remaining"
+                                        )
+                                    else:
+                                        logger.critical(
+                                            f"Trailing SL FAILED: {trade.symbol_display} | "
+                                            f"SL={trade.hard_sl_price:.4f} NOT VERIFIED! "
+                                            f"Safety monitor will retry in 30s"
+                                        )
 
                             break  # One TP per cycle
 
@@ -386,10 +440,14 @@ async def price_monitor():
                     if dca_filled:
                         trade_mgr.fill_dca(trade, i, dca_fill_price)
 
-                        # Cancel all unfilled TP orders (DCA mode = different exit)
+                        # Cancel all unfilled TP orders (DCA mode = new TPs from avg)
                         _cancel_unfilled_tps(trade)
 
-                        # Set exchange-side stops for DCA mode
+                        # Setup new TPs from new average + place on exchange
+                        trade_mgr.setup_dca_tps(trade)
+                        _place_dca_tps(trade)
+
+                        # Set hard SL only (TPs handle profit taking)
                         _set_exchange_stops_after_dca(trade)
 
                         trade_mgr.persist_trade(trade)
@@ -420,14 +478,31 @@ async def price_monitor():
                             )
                             bybit.close_full(trade, "Residual after exchange stop")
 
+                        # Get actual PnL from Bybit (includes fees + exact fill prices)
+                        await asyncio.sleep(1)  # Wait for Bybit to settle closed PnL records
+                        bybit_pnl = _get_bybit_realized_pnl(trade)
                         price = bybit.get_ticker_price(trade.symbol) or trade.avg_price
-                        remaining = trade.remaining_qty
-                        if remaining > 0:
-                            if trade.side == "long":
-                                pnl = (price - trade.avg_price) * remaining
-                            else:
-                                pnl = (trade.avg_price - price) * remaining
-                            trade.realized_pnl += pnl
+
+                        if bybit_pnl is not None:
+                            # Use Bybit's actual total PnL (replaces all manual calcs)
+                            trade.realized_pnl = bybit_pnl
+                            logger.info(
+                                f"PnL from Bybit: {trade.symbol_display} | ${bybit_pnl:+.4f}"
+                            )
+                        else:
+                            # Fallback: estimate from mark price (less accurate)
+                            remaining = trade.remaining_qty
+                            if remaining > 0:
+                                if trade.side == "long":
+                                    pnl = (price - trade.avg_price) * remaining
+                                else:
+                                    pnl = (trade.avg_price - price) * remaining
+                                trade.realized_pnl += pnl
+                            logger.warning(
+                                f"PnL fallback (mark price): {trade.symbol_display} | "
+                                f"${trade.realized_pnl:+.4f} (Bybit closed_pnl unavailable)"
+                            )
+
                         # Build specific close reason
                         if trade.status == TradeStatus.TRAILING:
                             reason = "Trailing stop"
@@ -451,6 +526,37 @@ async def price_monitor():
         except Exception as e:
             logger.error(f"Price monitor error: {e}", exc_info=True)
             await asyncio.sleep(5)
+
+
+def _get_bybit_realized_pnl(trade: Trade) -> float | None:
+    """Get total realized PnL from Bybit for a trade.
+
+    Queries get_closed_pnl for all closing events since trade opened.
+    Includes fees, exact fill prices, and all partial closes (TPs + SL).
+    Returns total PnL or None if records not available yet.
+    """
+    start_ms = int(trade.opened_at * 1000)
+    records = bybit.get_closed_pnl(limit=50, start_time_ms=start_ms)
+    if not records:
+        return None
+
+    # Filter for this symbol and side
+    matching = [
+        r for r in records
+        if r["symbol"] == trade.symbol and r["side"] == trade.side
+    ]
+
+    if not matching:
+        return None
+
+    total_pnl = sum(r["closed_pnl"] for r in matching)
+    total_qty = sum(r["qty"] for r in matching)
+    logger.info(
+        f"Bybit closed PnL: {trade.symbol_display} | "
+        f"{len(matching)} records | Total qty: {total_qty:.4f} | "
+        f"PnL: ${total_pnl:+.4f}"
+    )
+    return total_pnl
 
 
 def _place_exchange_tps(trade: Trade) -> None:
@@ -516,26 +622,49 @@ def _cancel_unfilled_tps(trade: Trade) -> None:
     logger.info(f"Unfilled TPs cancelled: {trade.symbol_display} (DCA mode)")
 
 
-def _set_exchange_stops_after_dca(trade: Trade) -> None:
-    """Set exchange-side SL/trailing after a DCA fills.
+def _place_dca_tps(trade: Trade) -> None:
+    """Place new TP limit orders after DCA fill.
 
-    All DCAs filled (max_dca=1): hard SL at avg-3% + BE trailing from avg
+    Uses avg-based TP prices set by trade_mgr.setup_dca_tps().
+    TP1=50% at avg+0.75%, TP2=20% at avg+1.5%, remaining 30% trails.
     """
-    trail_dist = trade.avg_price * config.be_trail_callback_pct / 100
+    for i, tp_price in enumerate(trade.tp_prices):
+        if i >= len(trade.tp_close_qtys):
+            break
+        qty = trade.tp_close_qtys[i]
+        order_id = bybit.place_tp_order(trade, tp_price, qty, tp_num=i + 1)
+        if order_id:
+            trade.tp_order_ids[i] = order_id
+        else:
+            logger.warning(
+                f"DCA TP{i + 1} placement failed: {trade.symbol_display} @ {tp_price}"
+            )
 
+    placed = sum(1 for oid in trade.tp_order_ids if oid)
+    logger.info(
+        f"DCA TPs placed: {trade.symbol_display} | "
+        f"{placed}/{len(trade.tp_prices)} TPs | "
+        f"Prices: {[f'{p:.4f}' for p in trade.tp_prices]}"
+    )
+
+
+def _set_exchange_stops_after_dca(trade: Trade) -> None:
+    """Set exchange-side hard SL after a DCA fills.
+
+    All DCAs filled (max_dca=1): hard SL at DCA-fill+3% only.
+    TPs handle profit taking (no more BE-trail).
+    """
     if trade.current_dca >= trade.max_dca:
-        # ALL DCAs filled → hard SL at avg-3% + BE trailing
+        # ALL DCAs filled → hard SL only (TPs handle profit)
         sl_ok = bybit.set_trading_stop(
             trade.symbol, trade.side,
             stop_loss=trade.hard_sl_price,
-            trailing_stop=trail_dist,
-            active_price=trade.avg_price,
         )
         if sl_ok:
             logger.info(
                 f"All DCAs filled: {trade.symbol_display} | "
-                f"SL={trade.hard_sl_price:.4f} | Trail={config.be_trail_callback_pct}% "
-                f"(activates at avg={trade.avg_price:.4f})"
+                f"SL={trade.hard_sl_price:.4f} (DCA-fill+{config.hard_sl_pct}%) | "
+                f"TPs handle exit"
             )
         else:
             logger.critical(
@@ -544,21 +673,19 @@ def _set_exchange_stops_after_dca(trade: Trade) -> None:
                 f"Safety monitor will retry in 30s"
             )
     else:
-        # More DCAs pending → trailing only (no hard SL, DCAs are safety net)
+        # More DCAs pending → hard SL only, wait for remaining DCAs
         sl_ok = bybit.set_trading_stop(
             trade.symbol, trade.side,
-            trailing_stop=trail_dist,
-            active_price=trade.avg_price,
+            stop_loss=trade.hard_sl_price,
         )
         if sl_ok:
             logger.info(
-                f"DCA{trade.current_dca} stops: {trade.symbol_display} | "
-                f"Trail={config.be_trail_callback_pct}% "
-                f"(activates at avg={trade.avg_price:.4f})"
+                f"DCA{trade.current_dca} SL set: {trade.symbol_display} | "
+                f"SL={trade.hard_sl_price:.4f} | More DCAs pending"
             )
         else:
             logger.warning(
-                f"DCA{trade.current_dca} trailing stop failed: {trade.symbol_display} | "
+                f"DCA{trade.current_dca} SL failed: {trade.symbol_display} | "
                 f"Safety monitor will retry"
             )
 
@@ -932,6 +1059,8 @@ async def _recover_and_check_positions():
                 if dca_filled:
                     trade_mgr.fill_dca(trade, i, dca_fill_price)
                     _cancel_unfilled_tps(trade)
+                    trade_mgr.setup_dca_tps(trade)
+                    _place_dca_tps(trade)
                     _set_exchange_stops_after_dca(trade)
                     logger.info(
                         f"RECOVERY: DCA{i} was filled during downtime | "
@@ -1760,6 +1889,8 @@ async def status():
         "trail_cb": config.trailing_callback_pct,
         "safety_sl_pct": config.safety_sl_pct,
         "hard_sl_pct": config.hard_sl_pct,
+        "dca_tp_pcts": config.dca_tp_pcts,
+        "dca_trail_cb": config.dca_trail_callback_pct,
         "zones": config.zone_snap_enabled,
         "neo_cloud": config.neo_cloud_filter,
         "testnet": config.bybit_testnet,
@@ -1816,7 +1947,8 @@ async function update() {
     html += '<div class="card">';
     html += `<b class="blue">Config:</b> ${d.config.leverage}x | ${d.config.equity_pct}% eq/trade | `;
     html += `Max ${d.config.max_trades} trades | ${d.config.dca_levels} DCA ${JSON.stringify(d.config.dca_mults)} | `;
-    html += `TP: ${d.config.tp_pcts.map((p,i) => 'TP'+(i+1)+'='+p+'%').join(', ')} + Trail ${d.config.trail_pct}% (${d.config.trail_cb}% CB) | Safety SL entry-${d.config.safety_sl_pct}% → DCA SL avg-${d.config.hard_sl_pct}% | `;
+    html += `TP: ${d.config.tp_pcts.map((p,i) => 'TP'+(i+1)+'='+p+'%').join(', ')} + Trail ${d.config.trail_pct}% (${d.config.trail_cb}% CB) | Safety SL entry-${d.config.safety_sl_pct}% → DCA SL fill+${d.config.hard_sl_pct}% | `;
+    html += `DCA Exit: ${d.config.dca_tp_pcts ? d.config.dca_tp_pcts.map((p,i) => 'TP'+(i+1)+'='+p+'%').join(', ') : 'N/A'} from avg, trail @${d.config.dca_trail_cb || 1}%CB | `;
     html += `Neo Cloud: ${d.config.neo_cloud ? 'ON' : 'OFF'} | `;
     html += `Zones: ${d.config.zones ? 'ON' : 'OFF'} | `;
     html += d.config.testnet ? '<span class="yellow">TESTNET</span>' : '<span class="red">LIVE</span>';
