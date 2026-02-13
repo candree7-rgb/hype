@@ -1,0 +1,190 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+//@version=6
+indicator("Zone Pusher v1 [Signal DCA Bot]", overlay=true, max_labels_count=20)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ ZONE PUSHER v1
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Reads LuxAlgo Reversal Zones and pushes them via webhook to the Signal DCA
+// Bot. Works with TradingView Watchlist Alerts (1 alert for all coins).
+//
+// Setup:
+//   1. Add this indicator to chart
+//   2. Map S1/S3/R1/R3 to LuxAlgo Reversal Zone plots
+//   3. Create Watchlist Alert → select this indicator → set webhook URL
+//   4. Webhook URL: https://your-server.railway.app/zones/push
+//   5. Alert message: leave as default (auto-generated JSON)
+//
+// How it works:
+//   - On every confirmed bar, sends JSON with zone levels
+//   - S2/R2 auto-calculated as midpoint if not mapped
+//   - Bot receives via /zones/push and updates Supabase cache
+//   - Only sends when zones actually change (saves webhook quota)
+//
+// ══════════════════════════════════════════════════════════════════════════════
+
+
+// ── INPUTS ──────────────────────────────────────────────────────────────────
+
+string grp_zones = "═══ LuxAlgo Zone Mapping ═══"
+float ext_s1 = input.source(low,  "S1 (Inner Support - nearest to price)", group=grp_zones, tooltip="Map to LuxAlgo Reversal Zone: Top of green band")
+float ext_s3 = input.source(low,  "S3 (Outer Support - deepest)", group=grp_zones, tooltip="Map to LuxAlgo Reversal Zone: Bottom of green band")
+float ext_r1 = input.source(high, "R1 (Inner Resistance - nearest to price)", group=grp_zones, tooltip="Map to LuxAlgo Reversal Zone: Bottom of red band")
+float ext_r3 = input.source(high, "R3 (Outer Resistance - highest)", group=grp_zones, tooltip="Map to LuxAlgo Reversal Zone: Top of red band")
+
+// Optional: map S2/R2 directly (otherwise auto-calculated as midpoint)
+string grp_mid = "═══ Middle Zones (Optional) ═══"
+bool use_custom_s2 = input.bool(false, "Custom S2 mapping", group=grp_mid, tooltip="OFF = auto midpoint between S1 and S3")
+float ext_s2 = input.source(low, "S2 (Middle Support)", group=grp_mid)
+bool use_custom_r2 = input.bool(false, "Custom R2 mapping", group=grp_mid, tooltip="OFF = auto midpoint between R1 and R3")
+float ext_r2 = input.source(high, "R2 (Middle Resistance)", group=grp_mid)
+
+string grp_settings = "═══ Settings ═══"
+bool send_every_bar = input.bool(false, "Send every bar (ignore change detection)", group=grp_settings, tooltip="ON = send webhook every bar close\nOFF = only when zones change (saves quota)")
+float change_threshold = input.float(0.1, "Change threshold %", minval=0.01, maxval=1.0, step=0.05, group=grp_settings, tooltip="Minimum % change in any zone to trigger send")
+bool show_zones_on_chart = input.bool(true, "Show zone levels on chart", group=grp_settings)
+
+
+// ── CALCULATE ZONES ─────────────────────────────────────────────────────────
+
+// S2/R2: use custom mapping or auto-calculate midpoint
+float s1 = ext_s1
+float s3 = ext_s3
+float s2 = use_custom_s2 ? ext_s2 : math.avg(s1, s3)
+float r1 = ext_r1
+float r3 = ext_r3
+float r2 = use_custom_r2 ? ext_r2 : math.avg(r1, r3)
+
+// Validate: S zones should be below price, R zones above
+// (We still send them even if "wrong" - the bot filters)
+bool s_valid = s1 > 0 and s3 > 0
+bool r_valid = r1 > 0 and r3 > 0
+
+
+// ── CHANGE DETECTION ────────────────────────────────────────────────────────
+
+// Track previous values to detect changes
+var float prev_s1 = 0.0
+var float prev_s2 = 0.0
+var float prev_s3 = 0.0
+var float prev_r1 = 0.0
+var float prev_r2 = 0.0
+var float prev_r3 = 0.0
+
+// Calculate % change for each zone
+f_pct_change(float current, float previous) =>
+    previous == 0 ? 100.0 : math.abs(current - previous) / previous * 100
+
+float chg_s1 = f_pct_change(s1, prev_s1)
+float chg_s2 = f_pct_change(s2, prev_s2)
+float chg_s3 = f_pct_change(s3, prev_s3)
+float chg_r1 = f_pct_change(r1, prev_r1)
+float chg_r2 = f_pct_change(r2, prev_r2)
+float chg_r3 = f_pct_change(r3, prev_r3)
+
+float max_change = math.max(chg_s1, chg_s2, chg_s3, chg_r1, chg_r2, chg_r3)
+bool zones_changed = max_change >= change_threshold
+
+// Should we send?
+bool should_send = barstate.isconfirmed and (send_every_bar or zones_changed)
+
+
+// ── BUILD JSON ALERT ────────────────────────────────────────────────────────
+
+// TradingView {{ticker}} gives clean symbol like "HYPEUSDT"
+// We use syminfo.ticker which gives the exchange-specific ticker
+// For Bybit: "HYPEUSDT.P" → we clean it in the bot
+string sym = syminfo.ticker
+
+// Build JSON payload for /zones/push endpoint
+string json_msg = '{"symbol":"' + sym + '",' +
+     '"s1":' + str.tostring(s1, "#.####") + ',' +
+     '"s2":' + str.tostring(s2, "#.####") + ',' +
+     '"s3":' + str.tostring(s3, "#.####") + ',' +
+     '"r1":' + str.tostring(r1, "#.####") + ',' +
+     '"r2":' + str.tostring(r2, "#.####") + ',' +
+     '"r3":' + str.tostring(r3, "#.####") + ',' +
+     '"source":"luxalgo"}'
+
+
+// ── SEND ALERT ──────────────────────────────────────────────────────────────
+
+if should_send
+    alert(json_msg, alert.freq_once_per_bar)
+
+    // Update previous values
+    prev_s1 := s1
+    prev_s2 := s2
+    prev_s3 := s3
+    prev_r1 := r1
+    prev_r2 := r2
+    prev_r3 := r3
+
+
+// ── VISUAL: Zone bands on chart ─────────────────────────────────────────────
+
+color clr_support    = color.new(#00C853, 80)  // Green, semi-transparent
+color clr_resistance = color.new(#FF1744, 80)  // Red, semi-transparent
+color clr_mid        = color.new(#FFD600, 70)  // Yellow for midpoints
+
+// Support zones
+p_s1 = plot(show_zones_on_chart and s_valid ? s1 : na, "S1", color=clr_support, linewidth=2)
+p_s2 = plot(show_zones_on_chart and s_valid ? s2 : na, "S2", color=clr_mid, linewidth=1, style=plot.style_cross)
+p_s3 = plot(show_zones_on_chart and s_valid ? s3 : na, "S3", color=clr_support, linewidth=2)
+fill(p_s1, p_s3, color=color.new(#00C853, 90), title="Support Zone")
+
+// Resistance zones
+p_r1 = plot(show_zones_on_chart and r_valid ? r1 : na, "R1", color=clr_resistance, linewidth=2)
+p_r2 = plot(show_zones_on_chart and r_valid ? r2 : na, "R2", color=clr_mid, linewidth=1, style=plot.style_cross)
+p_r3 = plot(show_zones_on_chart and r_valid ? r3 : na, "R3", color=clr_resistance, linewidth=2)
+fill(p_r1, p_r3, color=color.new(#FF1744, 90), title="Resistance Zone")
+
+
+// ── VISUAL: Last sent label ─────────────────────────────────────────────────
+
+var label last_send_label = na
+
+if should_send and barstate.islast
+    if not na(last_send_label)
+        label.delete(last_send_label)
+
+    string lbl_text = "ZONES PUSHED\n" +
+         "S: " + str.tostring(s1, "#.##") + " / " + str.tostring(s2, "#.##") + " / " + str.tostring(s3, "#.##") + "\n" +
+         "R: " + str.tostring(r1, "#.##") + " / " + str.tostring(r2, "#.##") + " / " + str.tostring(r3, "#.##")
+
+    last_send_label := label.new(
+         bar_index, high,
+         lbl_text,
+         color=color.new(#1E88E5, 20),
+         textcolor=color.white,
+         style=label.style_label_down,
+         size=size.small
+     )
+
+
+// ── TABLE: Zone status ──────────────────────────────────────────────────────
+
+if barstate.islast and show_zones_on_chart
+    var table zone_tbl = table.new(position.top_right, 3, 5, bgcolor=color.new(#161b22, 10), border_width=1, border_color=color.new(#30363d, 50))
+
+    table.cell(zone_tbl, 0, 0, "Zone Pusher", text_color=color.new(#58a6ff, 0), text_size=size.small)
+    table.cell(zone_tbl, 1, 0, syminfo.ticker, text_color=color.white, text_size=size.small)
+    table.cell(zone_tbl, 2, 0, zones_changed ? "CHANGED" : "stable", text_color=zones_changed ? color.new(#FFD600, 0) : color.new(#8b949e, 0), text_size=size.small)
+
+    table.cell(zone_tbl, 0, 1, "S1", text_color=color.new(#00C853, 0), text_size=size.small)
+    table.cell(zone_tbl, 1, 1, str.tostring(s1, "#.####"), text_color=color.white, text_size=size.small)
+    table.cell(zone_tbl, 2, 1, "R1", text_color=color.new(#FF1744, 0), text_size=size.small)
+
+    table.cell(zone_tbl, 0, 2, str.tostring(r1, "#.####"), text_color=color.white, text_size=size.small)
+    table.cell(zone_tbl, 1, 2, "S2", text_color=color.new(#FFD600, 0), text_size=size.small)
+    table.cell(zone_tbl, 2, 2, str.tostring(s2, "#.####"), text_color=color.white, text_size=size.small)
+
+    table.cell(zone_tbl, 0, 3, "R2", text_color=color.new(#FFD600, 0), text_size=size.small)
+    table.cell(zone_tbl, 1, 3, str.tostring(r2, "#.####"), text_color=color.white, text_size=size.small)
+    table.cell(zone_tbl, 2, 3, "S3 / R3", text_color=color.new(#8b949e, 0), text_size=size.small)
+
+    table.cell(zone_tbl, 0, 4, str.tostring(s3, "#.####"), text_color=color.new(#00C853, 0), text_size=size.small)
+    table.cell(zone_tbl, 1, 4, "/", text_color=color.new(#8b949e, 0), text_size=size.small)
+    table.cell(zone_tbl, 2, 4, str.tostring(r3, "#.####"), text_color=color.new(#FF1744, 0), text_size=size.small)

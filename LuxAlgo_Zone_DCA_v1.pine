@@ -1,0 +1,697 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+//@version=6
+strategy("LuxAlgo Zone DCA v1 [HYPE]", overlay=true, pyramiding=100, default_qty_type=strategy.cash, default_qty_value=0, initial_capital=2400, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.035, slippage=0, process_orders_on_close=true, calc_on_every_tick=true, margin_long=5, margin_short=5, max_bars_back=5000)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ LUXALGO ZONE DCA v1 - HYBRID
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Kombination aus:
+//   - LuxAlgo Reversal Zones als Entry (bewährte S/R Levels)
+//   - Cornix DCA Mechanik (exponentiell, rettet Verlierer)
+//   - Smart Trail als Exit (bewährt aus v6)
+//   - Neo Cloud / Trend Tracer als Trend Filter
+//
+// Vorteile gegenüber reinem Cornix:
+//   - Bessere Entries (Zone statt random) → weniger DCA nötig
+//   - Trend Filter → keine Longs im Crash, keine Shorts im Pump
+//
+// Vorteile gegenüber reinem LuxAlgo v6:
+//   - DCA rettet Verlierer statt fixer Stop Loss
+//   - Exponentielles Sizing zieht Avg schnell runter → Bounce = Profit
+//
+// ARCHITEKTUR:
+//   Entry: Reversal Zone Touch (S1 für Long, R1 für Short)
+//   DCA: Bis 6 Stufen, exponentiell (1x,2x,4x,8x,16x,32x)
+//   Exit: TP (Avg+X%) ODER Smart Trail Cross
+//   Stop: Avg - X% Sicherheitsnetz (nach DCA-Check)
+//   Trend: Neo Cloud / EMA / aus (wählbar)
+// ══════════════════════════════════════════════════════════════════════════════
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Modus ---
+string grp_mode = "═══ Modus ═══"
+string source_mode = input.string("LuxAlgo External", "Quelle", options=["Built-in", "LuxAlgo External"], group=grp_mode)
+
+// --- Direction ---
+string grp_dir = "═══ Richtung ═══"
+bool allow_long  = input.bool(true, "Allow Long", group=grp_dir)
+bool allow_short = input.bool(true, "Allow Short", group=grp_dir)
+
+// --- Reversal Zones ---
+string grp_zones = "═══ Reversal Zones ═══"
+float ext_r1 = input.source(high, "R1 (Inner Rot - Short Entry)", group=grp_zones, tooltip="LuxAlgo Reversal Zone: Innerstes rotes Band")
+float ext_r3 = input.source(high, "R3 (Outer Rot - Short DCA deep)", group=grp_zones, tooltip="LuxAlgo Reversal Zone: Aeusserstes rotes Band")
+float ext_s1 = input.source(low, "S1 (Inner Gruen - Long Entry)", group=grp_zones, tooltip="LuxAlgo Reversal Zone: Innerstes gruenes Band")
+float ext_s3 = input.source(low, "S3 (Outer Gruen - Long DCA deep)", group=grp_zones, tooltip="LuxAlgo Reversal Zone: Aeusserstes gruenes Band")
+
+// --- Smart Trail ---
+string grp_trail = "═══ Smart Trail ═══"
+float ext_smart_trail = input.source(close, "Smart Trail Linie", group=grp_trail, tooltip="LuxAlgo Smart Trail Plot")
+bool use_trail_exit = input.bool(true, "Smart Trail als Profit-Exit", group=grp_trail, tooltip="Trail Cross schliesst NUR wenn im Profit!\nIm Minus → hält Position, wartet auf DCA-Recovery")
+
+// --- Trend Filter ---
+string grp_trend = "═══ Trend Filter ═══"
+string trend_mode = input.string("Aus", "Trend Filter Modus", options=["Aus", "EMA", "Neo Cloud External"], group=grp_trend, tooltip="Aus = immer traden\nEMA = EMA 50/200 Crossover\nNeo Cloud = LuxAlgo Neo Cloud Richtung")
+int ema_fast_len = input.int(50, "EMA Fast", minval=10, maxval=200, step=10, group=grp_trend)
+int ema_slow_len = input.int(200, "EMA Slow", minval=50, maxval=500, step=10, group=grp_trend)
+float ext_neo_lag = input.source(close, "Neo Cloud Lag", group=grp_trend, tooltip="Neo Cloud: Lagging Line Plot")
+float ext_neo_lead = input.source(close, "Neo Cloud Lead", group=grp_trend, tooltip="Neo Cloud: Leading Line Plot")
+bool trend_blocks_entry_only = input.bool(true, "Trend blockt nur neue Entries (nicht DCA)", group=grp_trend, tooltip="AN: DCA füllt immer (schützt bestehende Pos.)\nAUS: DCA auch von Trend geblockt")
+
+// --- Take Profit ---
+string grp_tp = "═══ Take Profit ═══"
+float tp_pct = input.float(2.0, "TP % vom Avg", minval=0.1, maxval=5.0, step=0.1, group=grp_tp, tooltip="Zone-Entry = am Support → grösserer Move möglich.\n2% × 20x = 40% Gewinn pro Trade.\nKleiner = mehr Trades, grösser = mehr pro Trade")
+bool use_opposite_zone_exit = input.bool(true, "Gegenseite Zone = Full Exit", group=grp_tp, tooltip="Long schliesst bei R1 Touch\nShort schliesst bei S1 Touch\n+ Optional Flip")
+bool use_hedge_flip = input.bool(false, "Flip bei Gegenseite", group=grp_tp, tooltip="Nach Full Exit auf Gegenseite: sofort neuen Trade öffnen")
+
+// --- Stop Loss ---
+string grp_sl = "═══ Stop Loss ═══"
+float sl_pct = input.float(5.0, "SL % unter/über Avg", minval=0.5, maxval=15.0, step=0.5, group=grp_sl, tooltip="Sicherheitsnetz NACH letztem DCA.\n5% vom Avg bei 20x = 100% Verlust auf Position.\nAber nach DCA liegt Stop oft über Avg → Profit!")
+bool use_dynamic_sl = input.bool(false, "Dynamic SL (ATR)", group=grp_sl, tooltip="SL = X × ATR statt fixer %")
+float dynamic_sl_mult = input.float(2.0, "ATR Multiplikator", minval=0.5, maxval=5.0, step=0.25, group=grp_sl)
+string sl_activation = input.string("Nach letztem DCA", "SL Aktivierung", options=["Immer", "Nach letztem DCA", "Nur im Profit"], group=grp_sl, tooltip="Immer: SL sofort aktiv (gefährlich, kann vor DCA triggern)\nNach letztem DCA: SL erst wenn alle DCAs aufgebraucht\nNur im Profit: SL nur als Profit-Schutz (wie Cornix)")
+
+// --- DCA Spacing ---
+string grp_dca = "═══ DCA Spacing ═══"
+string dca_mode = input.string("Fixed %", "DCA Modus", options=["Fixed %", "Zone + Spread"], group=grp_dca, tooltip="Fixed %: Feste Abstände vom Entry (wie Cornix)\nZone + Spread: E2 bei S3, E3-E6 gestaffelt unter S3")
+float dca_1 = input.float(3.0, "E2 Abstand % (Fixed)", group=grp_dca, tooltip="Nur Fixed-Modus: E2 bei Entry - 3%")
+float dca_2 = input.float(6.0, "E3 Abstand % (Fixed)", group=grp_dca)
+float dca_3 = input.float(10.0, "E4 Abstand % (Fixed)", group=grp_dca)
+float dca_4 = input.float(15.0, "E5 Abstand % (Fixed)", group=grp_dca)
+float dca_5 = input.float(21.0, "E6 Abstand % (Fixed)", group=grp_dca)
+float zone_spread = input.float(3.0, "Zone-Spread % (zwischen DCAs)", minval=1.0, maxval=10.0, step=0.5, group=grp_dca, tooltip="Nur Zone+Spread: Abstand zwischen DCAs unter S3.\nE2=S3, E3=S3-3%, E4=S3-6%, E5=S3-9%, E6=S3-12%")
+int max_dca = input.int(5, "Max DCA Stufen", minval=0, maxval=5, group=grp_dca, tooltip="5 = volle 6 Entries wie Cornix (empfohlen)\nAlle 6 = quasi nie, aber Versicherung\n0 = kein DCA (nur E1, gefährlich)")
+
+// --- DCA Sizing ---
+string grp_sz = "═══ DCA Sizing (Exponentiell) ═══"
+float sz_1 = input.float(1.0, "E1 Size", group=grp_sz)
+float sz_2 = input.float(2.0, "E2 Mult", group=grp_sz, tooltip="2x E1")
+float sz_3 = input.float(4.0, "E3 Mult", group=grp_sz, tooltip="4x E1")
+float sz_4 = input.float(8.0, "E4 Mult", group=grp_sz, tooltip="8x E1")
+float sz_5 = input.float(16.0, "E5 Mult", group=grp_sz, tooltip="16x E1")
+float sz_6 = input.float(32.0, "E6 Mult", group=grp_sz, tooltip="32x E1")
+
+// --- Account ---
+string grp_acc = "═══ Account ═══"
+float equity_pct = input.float(30.0, "Equity % TOTAL pro Trade", minval=1.0, maxval=80.0, step=1.0, group=grp_acc, tooltip="Gesamt-Budget für alle Entries (Margin).\nWird automatisch gesplittet nach DCA-Stufen.\n30% bei 5 DCA (63x): E1=$228 Notional\n50% bei 5 DCA (63x): E1=$380 Notional\nHöher = mehr Profit pro Trade, mehr Risiko")
+int cooldown = input.int(2, "Cooldown Bars", minval=0, maxval=20, group=grp_acc)
+int max_slots = input.int(2, "Max gleichzeitige Trades", minval=1, maxval=4, group=grp_acc, tooltip="1 = nur Long ODER Short\n2 = Long + Short gleichzeitig")
+
+// --- Built-in Fallback ---
+string grp_bi = "═══ Built-in Fallback ═══"
+int bi_rev_len = input.int(20, "Zone Lookback", minval=5, maxval=100, group=grp_bi)
+float bi_rev_mult = input.float(2.0, "Zone ATR Mult", minval=0.5, maxval=5.0, step=0.1, group=grp_bi)
+int bi_trail_len = input.int(14, "Trail Länge", minval=5, maxval=50, group=grp_bi)
+float bi_trail_mult = input.float(1.5, "Trail ATR Mult", minval=0.5, maxval=4.0, step=0.1, group=grp_bi)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ BERECHNUNGEN
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ATR
+float atr_val = ta.atr(14)
+
+// Built-in Zones (Fallback wenn kein LuxAlgo)
+float bi_highest = ta.highest(high, bi_rev_len)
+float bi_lowest = ta.lowest(low, bi_rev_len)
+float bi_atr = ta.atr(bi_rev_len)
+float bi_upper_inner = bi_highest
+float bi_upper_outer = bi_highest + bi_atr * bi_rev_mult * 0.5
+float bi_lower_inner = bi_lowest
+float bi_lower_outer = bi_lowest - bi_atr * bi_rev_mult * 0.5
+
+// Built-in Trail
+float bi_trail_atr = ta.atr(bi_trail_len)
+var float bi_trail = na
+var int bi_trail_dir = 0
+if bar_index == 0
+    bi_trail := close
+    bi_trail_dir := 0
+else
+    if close > nz(bi_trail[1])
+        bi_trail := math.max(nz(bi_trail[1]), low - bi_trail_atr * bi_trail_mult)
+        bi_trail_dir := 1
+    else
+        bi_trail := math.min(nz(bi_trail[1]), high + bi_trail_atr * bi_trail_mult)
+        bi_trail_dir := -1
+
+// Source Selection
+float zone_long_entry = source_mode == "Built-in" ? bi_lower_inner : ext_s1
+float zone_long_dca = source_mode == "Built-in" ? bi_lower_outer : ext_s3
+float zone_short_entry = source_mode == "Built-in" ? bi_upper_inner : ext_r1
+float zone_short_dca = source_mode == "Built-in" ? bi_upper_outer : ext_r3
+
+float smart_trail = source_mode == "Built-in" ? bi_trail : ext_smart_trail
+int trail_dir = source_mode == "Built-in" ? bi_trail_dir : (close > ext_smart_trail ? 1 : -1)
+bool trail_bull_cross = trail_dir == 1 and trail_dir[1] == -1
+bool trail_bear_cross = trail_dir == -1 and trail_dir[1] == 1
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ TREND FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+float ema_fast = ta.ema(close, ema_fast_len)
+float ema_slow = ta.ema(close, ema_slow_len)
+
+bool trend_bull = false
+bool trend_bear = false
+
+if trend_mode == "EMA"
+    trend_bull := ema_fast > ema_slow
+    trend_bear := ema_fast < ema_slow
+else if trend_mode == "Neo Cloud External"
+    trend_bull := ext_neo_lag > ext_neo_lead  // Lag > Lead = Bullish → allow Long
+    trend_bear := ext_neo_lag < ext_neo_lead  // Lag < Lead = Bearish → allow Short
+
+bool trend_allow_long = trend_mode == "Aus" or trend_bull
+bool trend_allow_short = trend_mode == "Aus" or trend_bear
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ ZONE DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+var bool was_in_lower = false
+var bool was_in_upper = false
+bool in_lower_zone = low <= zone_long_entry
+bool in_upper_zone = high >= zone_short_entry
+bool lower_zone_touch = in_lower_zone and not was_in_lower
+bool upper_zone_touch = in_upper_zone and not was_in_upper
+was_in_lower := in_lower_zone
+was_in_upper := in_upper_zone
+
+bool beyond_lower = low < zone_long_dca
+bool beyond_upper = high > zone_short_dca
+
+// DCA Zone Touch Detection (nur erster Kontakt mit S3/R3)
+var bool was_beyond_lower = false
+var bool was_beyond_upper = false
+bool beyond_lower_touch = beyond_lower and not was_beyond_lower
+bool beyond_upper_touch = beyond_upper and not was_beyond_upper
+was_beyond_lower := beyond_lower
+was_beyond_upper := beyond_upper
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ POSITION TRACKING
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float long_qty = 0.0
+var float long_avg = 0.0
+var float long_entry_price = 0.0
+var int long_dca = 0
+var int long_bar = 0
+var int long_last_dca_bar = 0
+var float long_sl = 0.0
+var bool long_trail_exited = false
+
+var float short_qty = 0.0
+var float short_avg = 0.0
+var float short_entry_price = 0.0
+var int short_dca = 0
+var int short_last_dca_bar = 0
+var int short_bar = 0
+var float short_sl = 0.0
+var bool short_trail_exited = false
+
+var int last_close_bar = -9999
+var int wins = 0
+var int losses = 0
+var bool dca_this_bar = false
+
+bool l_active = long_qty > 0
+bool s_active = short_qty > 0
+int active_count = (l_active ? 1 : 0) + (s_active ? 1 : 0)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
+
+get_dca_pct(int lvl) =>
+    switch lvl
+        1 => dca_1
+        2 => dca_2
+        3 => dca_3
+        4 => dca_4
+        5 => dca_5
+        => 999.0
+
+get_dca_sz(int lvl) =>
+    switch lvl
+        0 => sz_1
+        1 => sz_2
+        2 => sz_3
+        3 => sz_4
+        4 => sz_5
+        5 => sz_6
+        => 1.0
+
+// Total Budget Split - DYNAMISCH basierend auf max_dca
+float sum_mult = sz_1 + (max_dca >= 1 ? sz_2 : 0) + (max_dca >= 2 ? sz_3 : 0) + (max_dca >= 3 ? sz_4 : 0) + (max_dca >= 4 ? sz_5 : 0) + (max_dca >= 5 ? sz_6 : 0)
+float total_usd = strategy.equity * equity_pct / 100
+float base_usd = total_usd / sum_mult
+
+calc_qty(float usd) => usd * 20 / close
+
+calc_sl_long(float avg) =>
+    if use_dynamic_sl
+        avg - atr_val * dynamic_sl_mult
+    else if dca_mode == "Zone + Spread" and long_dca < max_dca
+        // Bei Zone-DCA: SL unter S3 setzen, damit DCA füllen kann
+        float zone_sl = zone_long_dca * (1 - sl_pct / 100)
+        math.min(zone_sl, avg * (1 - sl_pct / 100))
+    else
+        avg * (1 - sl_pct / 100)
+
+calc_sl_short(float avg) =>
+    if use_dynamic_sl
+        avg + atr_val * dynamic_sl_mult
+    else if dca_mode == "Zone + Spread" and short_dca < max_dca
+        float zone_sl = zone_short_dca * (1 + sl_pct / 100)
+        math.max(zone_sl, avg * (1 + sl_pct / 100))
+    else
+        avg * (1 + sl_pct / 100)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SCHRITT 1: TAKE PROFIT
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Long TP ---
+if l_active
+    float tp = long_avg * (1 + tp_pct / 100)
+    if high >= tp
+        if long_qty > 0
+            strategy.order("L_TP", strategy.short, qty=long_qty, comment="L TP")
+        wins += 1
+        long_qty := 0.0
+        long_avg := 0.0
+        long_entry_price := 0.0
+        long_dca := 0
+        long_sl := 0.0
+        long_trail_exited := false
+        last_close_bar := bar_index
+
+// --- Short TP ---
+if s_active
+    float tp = short_avg * (1 - tp_pct / 100)
+    if low <= tp
+        if short_qty > 0
+            strategy.order("S_TP", strategy.long, qty=short_qty, comment="S TP")
+        wins += 1
+        short_qty := 0.0
+        short_avg := 0.0
+        short_entry_price := 0.0
+        short_dca := 0
+        short_sl := 0.0
+        short_trail_exited := false
+        last_close_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SCHRITT 2: SMART TRAIL EXIT (NUR IM PROFIT!)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Trail schliesst NUR wenn Position im Profit ist!
+// Im Minus → WARTEN auf DCA-Recovery statt Trail-Exit
+if use_trail_exit and l_active and trail_bear_cross and close > long_avg
+    if long_qty > 0
+        strategy.order("L_TR", strategy.short, qty=long_qty, comment="L Trail+")
+    wins += 1
+    long_qty := 0.0
+    long_avg := 0.0
+    long_entry_price := 0.0
+    long_dca := 0
+    long_sl := 0.0
+    long_trail_exited := false
+    last_close_bar := bar_index
+
+if use_trail_exit and s_active and trail_bull_cross and close < short_avg
+    if short_qty > 0
+        strategy.order("S_TR", strategy.long, qty=short_qty, comment="S Trail+")
+    wins += 1
+    short_qty := 0.0
+    short_avg := 0.0
+    short_entry_price := 0.0
+    short_dca := 0
+    short_sl := 0.0
+    short_trail_exited := false
+    last_close_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SCHRITT 3: GEGENSEITE ZONE EXIT (NUR IM PROFIT!)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Gegenseite schliesst NUR wenn Position im Profit!
+// Im Minus → HALTEN und DCA weiter kaufen lassen
+if use_opposite_zone_exit and l_active and upper_zone_touch and close > long_avg
+    if long_qty > 0
+        strategy.order("L_OZ", strategy.short, qty=long_qty, comment="L OppZone+")
+    wins += 1
+    long_qty := 0.0
+    long_avg := 0.0
+    long_entry_price := 0.0
+    long_dca := 0
+    long_sl := 0.0
+    long_trail_exited := false
+    last_close_bar := bar_index
+    // Flip zu Short?
+    if use_hedge_flip and allow_short and trend_allow_short and active_count < max_slots
+        float qty = calc_qty(base_usd * sz_1)
+        if qty > 0
+            strategy.order("S_FL", strategy.short, qty=qty, comment="S Flip")
+            short_qty := qty
+            short_avg := close
+            short_entry_price := close
+            short_dca := 0
+            short_sl := calc_sl_short(close)
+            short_trail_exited := false
+            short_bar := bar_index
+
+if use_opposite_zone_exit and s_active and lower_zone_touch and close < short_avg
+    if short_qty > 0
+        strategy.order("S_OZ", strategy.long, qty=short_qty, comment="S OppZone+")
+    wins += 1
+    short_qty := 0.0
+    short_avg := 0.0
+    short_entry_price := 0.0
+    short_dca := 0
+    short_sl := 0.0
+    short_trail_exited := false
+    last_close_bar := bar_index
+    // Flip zu Long?
+    if use_hedge_flip and allow_long and trend_allow_long and active_count < max_slots
+        float qty = calc_qty(base_usd * sz_1)
+        if qty > 0
+            strategy.order("L_FL", strategy.long, qty=qty, comment="L Flip")
+            long_qty := qty
+            long_avg := close
+            long_entry_price := close
+            long_dca := 0
+            long_sl := calc_sl_long(close)
+            long_trail_exited := false
+            long_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SCHRITT 4: DCA (VOR Stop-Check!)
+// ══════════════════════════════════════════════════════════════════════════════
+
+dca_this_bar := false
+
+bool dca_trend_ok_long = trend_blocks_entry_only or trend_allow_long
+bool dca_trend_ok_short = trend_blocks_entry_only or trend_allow_short
+
+// --- Long DCA ---
+if l_active and long_dca < max_dca and dca_trend_ok_long
+    if dca_mode == "Fixed %"
+        float pct = get_dca_pct(long_dca + 1)
+        float lvl = long_entry_price * (1 - pct / 100)
+        if low <= lvl
+            float usd = base_usd * get_dca_sz(long_dca + 1)
+            float qty = calc_qty(usd)
+            if qty > 0
+                string c = "L E" + str.tostring(long_dca + 2)
+                strategy.order("L_D" + str.tostring(long_dca + 1), strategy.long, qty=qty, comment=c)
+                float cost = long_avg * long_qty + close * qty
+                long_qty := long_qty + qty
+                long_avg := cost / long_qty
+                long_dca += 1
+                long_sl := calc_sl_long(long_avg)
+                long_last_dca_bar := bar_index
+                dca_this_bar := true
+    else
+        // Zone + Spread: E2 bei S3, E3 bei S3-3%, E4 bei S3-6%, etc.
+        float zone_dca_lvl = zone_long_dca * (1 - (long_dca) * zone_spread / 100)
+        if low <= zone_dca_lvl
+            float usd = base_usd * get_dca_sz(long_dca + 1)
+            float qty = calc_qty(usd)
+            if qty > 0
+                string c = "L E" + str.tostring(long_dca + 2) + " Z"
+                strategy.order("L_DZ" + str.tostring(long_dca + 1), strategy.long, qty=qty, comment=c)
+                float cost = long_avg * long_qty + close * qty
+                long_qty := long_qty + qty
+                long_avg := cost / long_qty
+                long_dca += 1
+                long_sl := calc_sl_long(long_avg)
+                long_last_dca_bar := bar_index
+                dca_this_bar := true
+
+// --- Short DCA ---
+if s_active and short_dca < max_dca and dca_trend_ok_short
+    if dca_mode == "Fixed %"
+        float pct = get_dca_pct(short_dca + 1)
+        float lvl = short_entry_price * (1 + pct / 100)
+        if high >= lvl
+            float usd = base_usd * get_dca_sz(short_dca + 1)
+            float qty = calc_qty(usd)
+            if qty > 0
+                string c = "S E" + str.tostring(short_dca + 2)
+                strategy.order("S_D" + str.tostring(short_dca + 1), strategy.short, qty=qty, comment=c)
+                float cost = short_avg * short_qty + close * qty
+                short_qty := short_qty + qty
+                short_avg := cost / short_qty
+                short_dca += 1
+                short_sl := calc_sl_short(short_avg)
+                short_last_dca_bar := bar_index
+                dca_this_bar := true
+    else
+        // Zone + Spread: E2 bei R3, E3 bei R3+3%, E4 bei R3+6%, etc.
+        float zone_dca_lvl = zone_short_dca * (1 + (short_dca) * zone_spread / 100)
+        if high >= zone_dca_lvl
+            float usd = base_usd * get_dca_sz(short_dca + 1)
+            float qty = calc_qty(usd)
+            if qty > 0
+                string c = "S E" + str.tostring(short_dca + 2) + " Z"
+                strategy.order("S_DZ" + str.tostring(short_dca + 1), strategy.short, qty=qty, comment=c)
+                float cost = short_avg * short_qty + close * qty
+                short_qty := short_qty + qty
+                short_avg := cost / short_qty
+                short_dca += 1
+                short_sl := calc_sl_short(short_avg)
+                short_last_dca_bar := bar_index
+                dca_this_bar := true
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SCHRITT 5: STOP LOSS (NACH DCA!)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// SL Aktivierung prüfen
+bool long_sl_active = false
+if sl_activation == "Immer"
+    long_sl_active := true
+else if sl_activation == "Nach letztem DCA"
+    long_sl_active := long_dca >= max_dca  // Alle DCAs aufgebraucht
+else if sl_activation == "Nur im Profit"
+    long_sl_active := close > long_avg  // Nur wenn Position im Profit
+
+bool short_sl_active = false
+if sl_activation == "Immer"
+    short_sl_active := true
+else if sl_activation == "Nach letztem DCA"
+    short_sl_active := short_dca >= max_dca
+else if sl_activation == "Nur im Profit"
+    short_sl_active := close < short_avg
+
+// --- Long SL ---
+if l_active and not dca_this_bar and bar_index > long_bar and long_sl > 0 and long_sl_active
+    if low <= long_sl
+        if long_qty > 0
+            strategy.order("L_SL", strategy.short, qty=long_qty, comment="L SL")
+        // SL nach vollem DCA: Stop liegt oft über Avg → Win/BE
+        if long_sl >= long_avg
+            wins += 1  // Stop über Avg = Profit (Cornix-Mechanik)
+        else
+            losses += 1  // Echter Loss (selten)
+        long_qty := 0.0
+        long_avg := 0.0
+        long_entry_price := 0.0
+        long_dca := 0
+        long_sl := 0.0
+        long_trail_exited := false
+        last_close_bar := bar_index
+
+// --- Short SL ---
+if s_active and not dca_this_bar and bar_index > short_bar and short_sl > 0 and short_sl_active
+    if high >= short_sl
+        if short_qty > 0
+            strategy.order("S_SL", strategy.long, qty=short_qty, comment="S SL")
+        if short_sl <= short_avg
+            wins += 1  // Stop unter Avg = Profit (Cornix-Mechanik)
+        else
+            losses += 1
+        short_qty := 0.0
+        short_avg := 0.0
+        short_entry_price := 0.0
+        short_dca := 0
+        short_sl := 0.0
+        short_trail_exited := false
+        last_close_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ SCHRITT 6: ENTRIES
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool past_cooldown = (bar_index - last_close_bar) >= cooldown
+
+// --- Long Entry ---
+if lower_zone_touch and allow_long and trend_allow_long and not l_active and active_count < max_slots and past_cooldown
+    float qty = calc_qty(base_usd * sz_1)
+    if qty > 0
+        strategy.order("L_E1", strategy.long, qty=qty, comment="L E1")
+        long_qty := qty
+        long_avg := close
+        long_entry_price := close
+        long_dca := 0
+        long_bar := bar_index
+        long_sl := calc_sl_long(close)
+        long_trail_exited := false
+
+// --- Short Entry ---
+if upper_zone_touch and allow_short and trend_allow_short and not s_active and active_count < max_slots and past_cooldown
+    float qty = calc_qty(base_usd * sz_1)
+    if qty > 0
+        strategy.order("S_E1", strategy.short, qty=qty, comment="S E1")
+        short_qty := qty
+        short_avg := close
+        short_entry_price := close
+        short_dca := 0
+        short_bar := bar_index
+        short_sl := calc_sl_short(close)
+        short_trail_exited := false
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ VISUALISIERUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Zones
+p1 = plot(zone_short_dca, "R3", color=color.new(color.red, 70))
+p2 = plot(zone_short_entry, "R1", color=color.new(color.red, 45))
+p3 = plot(zone_long_entry, "S1", color=color.new(color.green, 45))
+p4 = plot(zone_long_dca, "S3", color=color.new(color.green, 70))
+fill(p1, p2, color=color.new(color.red, 90))
+fill(p3, p4, color=color.new(color.green, 90))
+
+// Smart Trail
+color trail_col = trail_dir == 1 ? color.new(#2196F3, 0) : color.new(#F44336, 0)
+plot(smart_trail, "Trail", color=trail_col, linewidth=2)
+
+// Trend EMAs
+plot(trend_mode == "EMA" ? ema_fast : na, "EMA Fast", color=color.new(#2196F3, 40), linewidth=1)
+plot(trend_mode == "EMA" ? ema_slow : na, "EMA Slow", color=color.new(#FF9800, 40), linewidth=1)
+
+// Position Levels
+plot(l_active ? long_avg : na, "L Avg", color=color.new(#4CAF50, 20), style=plot.style_linebr, linewidth=2)
+plot(l_active ? long_avg * (1 + tp_pct / 100) : na, "L TP", color=color.new(#00E676, 40), style=plot.style_linebr, linewidth=1)
+plot(l_active and long_sl > 0 ? long_sl : na, "L SL", color=color.new(#FF5252, 40), style=plot.style_linebr, linewidth=1)
+
+plot(s_active ? short_avg : na, "S Avg", color=color.new(#F44336, 20), style=plot.style_linebr, linewidth=2)
+plot(s_active ? short_avg * (1 - tp_pct / 100) : na, "S TP", color=color.new(#00E676, 40), style=plot.style_linebr, linewidth=1)
+plot(s_active and short_sl > 0 ? short_sl : na, "S SL", color=color.new(#FF5252, 40), style=plot.style_linebr, linewidth=1)
+
+// DCA Levels (Long) - Fixed % ODER Zone+Spread
+float l_dca2 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_1/100) : zone_long_dca
+float l_dca3 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_2/100) : zone_long_dca * (1 - zone_spread/100)
+float l_dca4 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_3/100) : zone_long_dca * (1 - 2*zone_spread/100)
+float l_dca5 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_4/100) : zone_long_dca * (1 - 3*zone_spread/100)
+float l_dca6 = dca_mode == "Fixed %" ? long_entry_price * (1 - dca_5/100) : zone_long_dca * (1 - 4*zone_spread/100)
+plot(l_active and long_dca < 1 ? l_dca2 : na, "L E2", color=color.new(#4CAF50, 75), style=plot.style_linebr)
+plot(l_active and long_dca < 2 ? l_dca3 : na, "L E3", color=color.new(#4CAF50, 80), style=plot.style_linebr)
+plot(l_active and long_dca < 3 ? l_dca4 : na, "L E4", color=color.new(#4CAF50, 85), style=plot.style_linebr)
+plot(l_active and long_dca < 4 ? l_dca5 : na, "L E5", color=color.new(#FF9800, 80), style=plot.style_linebr)
+plot(l_active and long_dca < 5 ? l_dca6 : na, "L E6", color=color.new(#F44336, 80), style=plot.style_linebr)
+
+// Trend-Block Hintergrund
+bgcolor(trend_mode != "Aus" and not trend_allow_long and not trend_allow_short ? color.new(#F44336, 95) : na)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ INFO TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 4, 10, bgcolor=color.new(#0d1117, 5), border_color=color.new(#30305a, 0), border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(t, 0, 0, "ZONE", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(t, 1, 0, "DCA", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    table.cell(t, 2, 0, "v1", text_color=#00d4ff, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+    string dir_txt = allow_long and allow_short ? "L+S" : allow_long ? "L" : allow_short ? "S" : "---"
+    table.cell(t, 3, 0, dir_txt, text_color=#FF9800, text_size=size.tiny, bgcolor=color.new(#0d1117, 0))
+
+    // Long Status
+    string l_txt = l_active ? "E" + str.tostring(long_dca + 1) + (long_trail_exited ? " T" : "") : "---"
+    table.cell(t, 0, 1, "LONG", text_color=#4CAF50, text_size=size.tiny)
+    table.cell(t, 1, 1, l_txt, text_color=l_active ? #4CAF50 : #555555, text_size=size.tiny)
+    table.cell(t, 2, 1, l_active ? str.tostring(long_avg, "#.##") : "---", text_color=#4CAF50, text_size=size.tiny)
+    table.cell(t, 3, 1, l_active ? "D:" + str.tostring(long_dca) + "/" + str.tostring(max_dca) : "---", text_color=#4CAF50, text_size=size.tiny)
+
+    // Short Status
+    string s_txt = s_active ? "E" + str.tostring(short_dca + 1) + (short_trail_exited ? " T" : "") : "---"
+    table.cell(t, 0, 2, "SHORT", text_color=#F44336, text_size=size.tiny)
+    table.cell(t, 1, 2, s_txt, text_color=s_active ? #F44336 : #555555, text_size=size.tiny)
+    table.cell(t, 2, 2, s_active ? str.tostring(short_avg, "#.##") : "---", text_color=#F44336, text_size=size.tiny)
+    table.cell(t, 3, 2, s_active ? "D:" + str.tostring(short_dca) + "/" + str.tostring(max_dca) : "---", text_color=#F44336, text_size=size.tiny)
+
+    // TP / SL
+    table.cell(t, 0, 3, "L TP", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 1, 3, l_active ? str.tostring(long_avg * (1 + tp_pct/100), "#.##") : "---", text_color=#00E676, text_size=size.tiny)
+    table.cell(t, 2, 3, "L SL", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 3, 3, l_active ? str.tostring(long_sl, "#.##") : "---", text_color=#FF5252, text_size=size.tiny)
+
+    table.cell(t, 0, 4, "S TP", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 1, 4, s_active ? str.tostring(short_avg * (1 - tp_pct/100), "#.##") : "---", text_color=#00E676, text_size=size.tiny)
+    table.cell(t, 2, 4, "S SL", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 3, 4, s_active ? str.tostring(short_sl, "#.##") : "---", text_color=#FF5252, text_size=size.tiny)
+
+    // Trend
+    string tf_txt = trend_mode == "Aus" ? "OFF" : trend_bull ? "BULL" : trend_bear ? "BEAR" : "FLAT"
+    color tf_col = trend_mode == "Aus" ? #555555 : trend_bull ? #4CAF50 : trend_bear ? #F44336 : #FF9800
+    table.cell(t, 0, 5, "Trend", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 1, 5, tf_txt, text_color=tf_col, text_size=size.tiny)
+    table.cell(t, 2, 5, "Mode", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 3, 5, trend_mode == "Aus" ? "---" : trend_mode == "EMA" ? "EMA" : "NEO", text_color=#00d4ff, text_size=size.tiny)
+
+    // WR - ECHTE Zahlen von TradingView Strategy Engine
+    int tv_wins = strategy.wintrades
+    int tv_losses = strategy.losstrades
+    int tv_total = strategy.closedtrades
+    float tv_wr = tv_total > 0 ? tv_wins * 100.0 / tv_total : 0.0
+    table.cell(t, 0, 6, "WR", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(tv_wr, "#.#") + "%", text_color=tv_wr > 90 ? #4CAF50 : tv_wr > 70 ? #FF9800 : #F44336, text_size=size.tiny)
+    table.cell(t, 2, 6, "W/L", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 3, 6, str.tostring(tv_wins) + "/" + str.tostring(tv_losses), text_color=#aaaaaa, text_size=size.tiny)
+
+    // Trades + Exposure
+    table.cell(t, 0, 7, "Trades", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(tv_total), text_color=#aaaaaa, text_size=size.tiny)
+    float l_exp = l_active ? long_qty * close / strategy.equity * 100 : 0.0
+    float s_exp = s_active ? short_qty * close / strategy.equity * 100 : 0.0
+    table.cell(t, 2, 7, "Exp", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 3, 7, str.tostring(l_exp + s_exp, "#.#") + "%", text_color=(l_exp + s_exp) > 200 ? #F44336 : #aaaaaa, text_size=size.tiny)
+
+    // DCA Mode + E1 Size
+    float e1_notional = base_usd * sz_1 * 20
+    table.cell(t, 0, 8, "DCA", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 1, 8, dca_mode == "Fixed %" ? "FIX" : "ZONE", text_color=#00d4ff, text_size=size.tiny)
+    table.cell(t, 2, 8, "E1$", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 3, 8, str.tostring(e1_notional, "#") + " (" + str.tostring(sum_mult, "#") + "x)", text_color=#aaaaaa, text_size=size.tiny)
+
+    // Trail
+    table.cell(t, 0, 9, "Trail", text_color=#aaaaaa, text_size=size.tiny)
+    table.cell(t, 1, 9, use_trail_exit ? (trail_dir == 1 ? "BULL" : "BEAR") : "OFF", text_color=use_trail_exit ? (trail_dir == 1 ? #4CAF50 : #F44336) : #555555, text_size=size.tiny)
+    table.cell(t, 2, 9, "20x", text_color=#FF9800, text_size=size.tiny)
+    table.cell(t, 3, 9, "HYPE", text_color=#FF9800, text_size=size.tiny)

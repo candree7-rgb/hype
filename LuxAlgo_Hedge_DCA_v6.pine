@@ -152,6 +152,15 @@ bool use_max_bars        = input.bool(false, "Max Bars in Trade", group=grp_imp,
 int max_trade_bars       = input.int(500, "Max Bars bis Auto-Close", minval=50, maxval=2000, step=50, group=grp_imp)
 bool use_loss_scaling    = input.bool(false, "Loss Streak Size Reduction", group=grp_imp, tooltip="Nach Verlusten wird Size reduziert.\n3 Verluste = 75%, 5+ = 50%")
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ WEBHOOK ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+string grp_wh = "═══ Webhook ═══"
+bool enable_alerts   = input.bool(false, "Webhook Alerts aktivieren", group=grp_wh, tooltip="Aktiviert JSON Alerts fuer den Webhook Server.\nIn TradingView Alert erstellen mit 'Any alert() function call'.")
+string wh_secret     = input.string("", "Webhook Secret", group=grp_wh, tooltip="Secret Token zur Authentifizierung")
+string wh_ticker     = input.string("HYPEUSDT", "Ticker", group=grp_wh)
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ▌ BERECHNUNGEN
@@ -523,6 +532,14 @@ calc_sl_short(float avg_price) =>
     else
         avg_price * (1 + max_loss_pct / 100)
 
+// ── Webhook Alert Builder ──
+build_alert(string act, float qty, float price, float sl, string cmt) =>
+    '{"s":"' + wh_secret + '","t":"' + wh_ticker + '","a":"' + act + '",' +
+     '"q":' + str.tostring(qty, "#.####") + ',' +
+     '"p":' + str.tostring(price, "#.####") + ',' +
+     '"sl":' + str.tostring(nz(sl, 0), "#.####") + ',' +
+     '"c":"' + cmt + '"}'
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ▌ MAX BARS AUTO-CLOSE
@@ -531,6 +548,8 @@ calc_sl_short(float avg_price) =>
 if use_max_bars and long_active and (bar_index - long_entry_bar) >= max_trade_bars
     if long_qty > 0
         strategy.order("L_MB", strategy.short, qty=long_qty, comment="L MaxBar")
+        if enable_alerts
+            alert(build_alert("close_long", long_qty, close, 0, "L MaxBar"), alert.freq_once_per_bar_close)
     float pnl = long_qty * (close - long_avg_price)
     if pnl < 0
         long_consec_losses += 1
@@ -546,6 +565,8 @@ if use_max_bars and long_active and (bar_index - long_entry_bar) >= max_trade_ba
 if use_max_bars and short_active and (bar_index - short_entry_bar) >= max_trade_bars
     if short_qty > 0
         strategy.order("S_MB", strategy.long, qty=short_qty, comment="S MaxBar")
+        if enable_alerts
+            alert(build_alert("close_short", short_qty, close, 0, "S MaxBar"), alert.freq_once_per_bar_close)
     float pnl = short_qty * (short_avg_price - close)
     if pnl < 0
         short_consec_losses += 1
@@ -579,6 +600,8 @@ if long_entry_filtered and can_open_long and not long_active
         long_exit_stage := 0
         long_sl_price   := calc_sl_long(long_avg_price)
         long_entry_bar  := bar_index
+        if enable_alerts
+            alert(build_alert("open_long", qty, long_avg_price, long_sl_price, cmt), alert.freq_once_per_bar_close)
 
 if short_entry_filtered and can_open_short and not short_active
     float size_usd = base_size_usd * short_final_mult
@@ -596,6 +619,8 @@ if short_entry_filtered and can_open_short and not short_active
         short_exit_stage := 0
         short_sl_price   := calc_sl_short(short_avg_price)
         short_entry_bar  := bar_index
+        if enable_alerts
+            alert(build_alert("open_short", qty, short_avg_price, short_sl_price, cmt), alert.freq_once_per_bar_close)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -620,6 +645,8 @@ if beyond_lower and long_active and long_dca_count < max_dca_steps and bull_dca_
         long_avg_price := cost / long_qty
         long_dca_count += 1
         long_sl_price  := calc_sl_long(long_avg_price)
+        if enable_alerts
+            alert(build_alert("dca_long", dca_qty, long_avg_price, long_sl_price, cmt), alert.freq_once_per_bar_close)
 
 if beyond_upper and short_active and short_dca_count < max_dca_steps and bear_dca_ok and not any_emergency and dca_trend_ok_short
     float dca_usd = base_size_usd * math.pow(dca_size_decay, short_dca_count + 1)
@@ -636,6 +663,8 @@ if beyond_upper and short_active and short_dca_count < max_dca_steps and bear_dc
         short_avg_price := cost / short_qty
         short_dca_count += 1
         short_sl_price  := calc_sl_short(short_avg_price)
+        if enable_alerts
+            alert(build_alert("dca_short", dca_qty, short_avg_price, short_sl_price, cmt), alert.freq_once_per_bar_close)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -654,6 +683,8 @@ if long_active and use_exit_signals and fresh_exit and long_exit_stage == 0
         long_exit_stage := 1
         if exit_x_moves_sl
             long_sl_price := long_avg_price
+        if enable_alerts
+            alert(build_alert("exit_x_long", close_qty, close, long_sl_price, cmt), alert.freq_once_per_bar_close)
 
 if short_active and use_exit_signals and fresh_exit and short_exit_stage == 0
     float close_qty = short_qty * exit_partial_pct / 100
@@ -667,6 +698,8 @@ if short_active and use_exit_signals and fresh_exit and short_exit_stage == 0
         short_exit_stage := 1
         if exit_x_moves_sl
             short_sl_price := short_avg_price
+        if enable_alerts
+            alert(build_alert("exit_x_short", close_qty, close, short_sl_price, cmt), alert.freq_once_per_bar_close)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -685,6 +718,8 @@ if long_active and trail_bear_cross and long_exit_stage <= 1
         long_qty        := long_qty - close_qty
         long_exit_stage := 2
         long_sl_price   := trail_tightens_sl ? math.max(long_avg_price, smart_trail) : long_avg_price
+        if enable_alerts
+            alert(build_alert("trail_long", close_qty, close, long_sl_price, cmt), alert.freq_once_per_bar_close)
 
 if short_active and trail_bull_cross and short_exit_stage <= 1
     float pct = short_exit_stage == 0 ? (exit_partial_pct + trail_partial_pct) : trail_partial_pct
@@ -698,6 +733,8 @@ if short_active and trail_bull_cross and short_exit_stage <= 1
         short_qty        := short_qty - close_qty
         short_exit_stage := 2
         short_sl_price   := trail_tightens_sl ? math.min(short_avg_price, smart_trail) : short_avg_price
+        if enable_alerts
+            alert(build_alert("trail_short", close_qty, close, short_sl_price, cmt), alert.freq_once_per_bar_close)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -719,6 +756,8 @@ if long_active and upper_zone_touch
 
     if long_qty > 0
         strategy.order("L_F", strategy.short, qty=long_qty, comment="L Full")
+        if enable_alerts
+            alert(build_alert("close_long", long_qty, close, 0, "L Full"), alert.freq_once_per_bar_close)
     long_qty := 0.0
     long_avg_price := 0.0
     long_dca_count := 0
@@ -739,6 +778,8 @@ if long_active and upper_zone_touch
             short_exit_stage := 0
             short_sl_price := calc_sl_short(short_avg_price)
             short_entry_bar := bar_index
+            if enable_alerts
+                alert(build_alert("flip_short", flip_qty, short_avg_price, short_sl_price, "S Flip"), alert.freq_once_per_bar_close)
 
 if short_active and lower_zone_touch
     float short_close_pnl = short_qty * (short_avg_price - close)
@@ -751,6 +792,8 @@ if short_active and lower_zone_touch
 
     if short_qty > 0
         strategy.order("S_F", strategy.long, qty=short_qty, comment="S Full")
+        if enable_alerts
+            alert(build_alert("close_short", short_qty, close, 0, "S Full"), alert.freq_once_per_bar_close)
     short_qty := 0.0
     short_avg_price := 0.0
     short_dca_count := 0
@@ -771,6 +814,8 @@ if short_active and lower_zone_touch
             long_exit_stage := 0
             long_sl_price := calc_sl_long(long_avg_price)
             long_entry_bar := bar_index
+            if enable_alerts
+                alert(build_alert("flip_long", flip_qty, long_avg_price, long_sl_price, "L Flip"), alert.freq_once_per_bar_close)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -784,6 +829,8 @@ if long_active and long_sl_price > 0 and low <= long_sl_price
 
     if long_qty > 0
         strategy.order("L_SL", strategy.short, qty=long_qty, stop=long_sl_price, comment="L SL")
+        if enable_alerts
+            alert(build_alert("sl_long", long_qty, long_sl_price, 0, "L SL"), alert.freq_once_per_bar_close)
     long_qty := 0.0
     long_avg_price := 0.0
     long_dca_count := 0
@@ -798,6 +845,8 @@ if short_active and short_sl_price > 0 and high >= short_sl_price
 
     if short_qty > 0
         strategy.order("S_SL", strategy.long, qty=short_qty, stop=short_sl_price, comment="S SL")
+        if enable_alerts
+            alert(build_alert("sl_short", short_qty, short_sl_price, 0, "S SL"), alert.freq_once_per_bar_close)
     short_qty := 0.0
     short_avg_price := 0.0
     short_dca_count := 0
@@ -813,6 +862,8 @@ if short_active and short_sl_price > 0 and high >= short_sl_price
 if any_emergency and (long_active or short_active)
     if long_qty > 0
         strategy.order("L_EM", strategy.short, qty=long_qty, comment="EM L")
+        if enable_alerts
+            alert(build_alert("emerg_long", long_qty, close, 0, "EM L"), alert.freq_once_per_bar_close)
         long_qty := 0.0
         long_avg_price := 0.0
         long_dca_count := 0
@@ -820,12 +871,40 @@ if any_emergency and (long_active or short_active)
         long_sl_price := 0.0
     if short_qty > 0
         strategy.order("S_EM", strategy.long, qty=short_qty, comment="EM S")
+        if enable_alerts
+            alert(build_alert("emerg_short", short_qty, close, 0, "EM S"), alert.freq_once_per_bar_close)
         short_qty := 0.0
         short_avg_price := 0.0
         short_dca_count := 0
         short_exit_stage := 0
         short_sl_price := 0.0
     last_exit_bar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▌ HEARTBEAT ALERT (jede Bar - Zone Updates + State Sync)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if enable_alerts and barstate.isconfirmed
+    string hb = '{"s":"' + wh_secret + '","a":"hb",' +
+     '"cp":' + str.tostring(close, "#.####") + ',' +
+     '"s1":' + str.tostring(zone_long_entry, "#.####") + ',' +
+     '"s3":' + str.tostring(zone_long_dca, "#.####") + ',' +
+     '"r1":' + str.tostring(zone_short_entry, "#.####") + ',' +
+     '"r3":' + str.tostring(zone_short_dca, "#.####") + ',' +
+     '"tr":' + str.tostring(smart_trail, "#.####") + ',' +
+     '"td":' + str.tostring(trail_dir) + ',' +
+     '"lq":' + str.tostring(long_qty, "#.####") + ',' +
+     '"la":' + str.tostring(long_avg_price, "#.####") + ',' +
+     '"ls":' + str.tostring(nz(long_sl_price, 0), "#.####") + ',' +
+     '"ld":' + str.tostring(long_dca_count) + ',' +
+     '"le":' + str.tostring(long_exit_stage) + ',' +
+     '"sq":' + str.tostring(short_qty, "#.####") + ',' +
+     '"sa":' + str.tostring(short_avg_price, "#.####") + ',' +
+     '"ss":' + str.tostring(nz(short_sl_price, 0), "#.####") + ',' +
+     '"sd":' + str.tostring(short_dca_count) + ',' +
+     '"se":' + str.tostring(short_exit_stage) + '}'
+    alert(hb, alert.freq_once_per_bar_close)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
