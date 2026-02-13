@@ -1,21 +1,24 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { Stats } from '@/lib/db'
+import { useEffect, useState, useMemo } from 'react'
+import { Stats, Trade } from '@/lib/db'
 import { formatCurrency } from '@/lib/utils'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
+import { SimSettings, runSimulation } from '@/lib/simulation'
 
 interface StatsCardsProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
+  simSettings: SimSettings
 }
 
-export default function StatsCards({ timeRange, customDateRange }: StatsCardsProps) {
+export default function StatsCards({ timeRange, customDateRange, simSettings }: StatsCardsProps) {
   const [stats, setStats] = useState<Stats | null>(null)
+  const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    async function fetchStats() {
+    async function fetchData() {
       try {
         const params = new URLSearchParams()
 
@@ -27,26 +30,58 @@ export default function StatsCards({ timeRange, customDateRange }: StatsCardsPro
           if (range?.days) params.append('days', range.days.toString())
         }
 
-        const res = await fetch(`/api/stats?${params.toString()}`)
-        if (!res.ok) {
-          console.error('Stats API returned', res.status)
-          setStats(null)
-          return
+        const tradeParams = new URLSearchParams(params)
+        tradeParams.set('limit', '500')
+
+        const [statsRes, tradesRes] = await Promise.all([
+          fetch(`/api/stats?${params.toString()}`),
+          fetch(`/api/trades?${tradeParams.toString()}`),
+        ])
+
+        if (statsRes.ok) setStats(await statsRes.json())
+        else setStats(null)
+
+        if (tradesRes.ok) {
+          const data = await tradesRes.json()
+          setTrades(Array.isArray(data) ? data : [])
         }
-        const data = await res.json()
-        setStats(data)
       } catch (error) {
-        console.error('Failed to fetch stats:', error)
+        console.error('Failed to fetch data:', error)
       } finally {
         setLoading(false)
       }
     }
 
     setLoading(true)
-    fetchStats()
-    const interval = setInterval(fetchStats, 30000)
+    fetchData()
+    const interval = setInterval(fetchData, 30000)
     return () => clearInterval(interval)
   }, [timeRange, customDateRange])
+
+  // Run simulation and compute sim stats
+  const simStats = useMemo(() => {
+    if (trades.length === 0) return null
+    const sim = runSimulation(trades, simSettings)
+    const perTrade = Array.from(sim.per_trade.values())
+    const wins = perTrade.filter(t => t.sim_pnl > 0)
+    const losses = perTrade.filter(t => t.sim_pnl < 0)
+    const grossProfit = wins.reduce((s, t) => s + t.sim_pnl, 0)
+    const grossLoss = Math.abs(losses.reduce((s, t) => s + t.sim_pnl, 0))
+
+    return {
+      total_pnl: sim.total_sim_pnl,
+      total_pnl_pct: sim.total_return_pct,
+      avg_pnl: sim.total_sim_pnl / perTrade.length,
+      avg_pnl_pct: (sim.total_sim_pnl / perTrade.length) / simSettings.equity * 100,
+      avg_win: wins.length > 0 ? grossProfit / wins.length : 0,
+      avg_win_pct: wins.length > 0 ? (grossProfit / wins.length) / simSettings.equity * 100 : 0,
+      avg_loss: losses.length > 0 ? -(grossLoss / losses.length) : 0,
+      avg_loss_pct: losses.length > 0 ? -(grossLoss / losses.length) / simSettings.equity * 100 : 0,
+      best_trade: perTrade.length > 0 ? Math.max(...perTrade.map(t => t.sim_pnl)) : 0,
+      worst_trade: perTrade.length > 0 ? Math.min(...perTrade.map(t => t.sim_pnl)) : 0,
+      profit_factor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0,
+    }
+  }, [trades, simSettings])
 
   if (loading) {
     return (
@@ -69,6 +104,20 @@ export default function StatsCards({ timeRange, customDateRange }: StatsCardsPro
     )
   }
 
+  // Use sim values for monetary stats, keep DB values for counts/rates
+  const s = simStats
+  const totalPnl = s ? s.total_pnl : stats.total_pnl
+  const totalPnlPct = s ? s.total_pnl_pct : stats.total_pnl_pct
+  const avgPnl = s ? s.avg_pnl : stats.avg_pnl
+  const avgPnlPct = s ? s.avg_pnl_pct : stats.avg_pnl_pct
+  const avgWin = s ? s.avg_win : stats.avg_win
+  const avgWinPct = s ? s.avg_win_pct : stats.avg_win_pct
+  const avgLoss = s ? s.avg_loss : stats.avg_loss
+  const avgLossPct = s ? s.avg_loss_pct : stats.avg_loss_pct
+  const bestTrade = s ? s.best_trade : stats.best_trade
+  const worstTrade = s ? s.worst_trade : stats.worst_trade
+  const profitFactor = s ? s.profit_factor : stats.profit_factor
+
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
       <StatCard
@@ -84,43 +133,43 @@ export default function StatsCards({ timeRange, customDateRange }: StatsCardsPro
       />
       <StatCard
         label="Total PnL"
-        value={formatCurrency(stats.total_pnl)}
-        variant={stats.total_pnl >= 0 ? 'success' : 'danger'}
-        subValue={`${(stats.total_pnl_pct ?? 0) >= 0 ? '+' : ''}${(stats.total_pnl_pct ?? 0).toFixed(2)}% Equity`}
+        value={formatCurrency(totalPnl)}
+        variant={totalPnl >= 0 ? 'success' : 'danger'}
+        subValue={`${totalPnlPct >= 0 ? '+' : ''}${totalPnlPct.toFixed(2)}% Equity`}
       />
       <StatCard
         label="Profit Factor"
-        value={stats.profit_factor === Infinity ? '∞' : (stats.profit_factor ?? 0).toFixed(2)}
-        variant={stats.profit_factor >= 1.5 ? 'success' : stats.profit_factor >= 1 ? 'default' : 'danger'}
+        value={profitFactor === Infinity ? '∞' : profitFactor.toFixed(2)}
+        variant={profitFactor >= 1.5 ? 'success' : profitFactor >= 1 ? 'default' : 'danger'}
         subValue="Gross Win / Loss"
       />
       <StatCard
         label="Avg PnL"
-        value={`${(stats.avg_pnl_pct ?? 0) >= 0 ? '+' : ''}${(stats.avg_pnl_pct ?? 0).toFixed(2)}%`}
-        variant={stats.avg_pnl >= 0 ? 'success' : 'danger'}
-        subValue={formatCurrency(stats.avg_pnl)}
+        value={`${avgPnlPct >= 0 ? '+' : ''}${avgPnlPct.toFixed(2)}%`}
+        variant={avgPnl >= 0 ? 'success' : 'danger'}
+        subValue={formatCurrency(avgPnl)}
       />
       <StatCard
         label="Avg Win"
-        value={`+${(stats.avg_win_pct ?? 0).toFixed(2)}%`}
+        value={`+${avgWinPct.toFixed(2)}%`}
         valueColor="text-success"
-        subValue={formatCurrency(stats.avg_win)}
+        subValue={formatCurrency(avgWin)}
       />
       <StatCard
         label="Avg Loss"
-        value={`${(stats.avg_loss_pct ?? 0).toFixed(2)}%`}
+        value={`${avgLossPct.toFixed(2)}%`}
         valueColor="text-danger"
-        subValue={formatCurrency(stats.avg_loss)}
+        subValue={formatCurrency(avgLoss)}
       />
       <StatCard
         label="Best Trade"
-        value={formatCurrency(stats.best_trade)}
+        value={formatCurrency(bestTrade)}
         valueColor="text-success"
       />
       <StatCard
         label="Worst Trade"
-        value={formatCurrency(stats.worst_trade)}
-        valueColor={stats.worst_trade >= 0 ? 'text-success' : 'text-danger'}
+        value={formatCurrency(worstTrade)}
+        valueColor={worstTrade >= 0 ? 'text-success' : 'text-danger'}
       />
       <StatCard
         label="TP Hit Rate"

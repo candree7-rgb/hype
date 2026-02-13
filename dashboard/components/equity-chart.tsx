@@ -1,26 +1,27 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-import { DailyEquity } from '@/lib/db'
+import { Trade } from '@/lib/db'
 import { formatCurrency } from '@/lib/utils'
 import { format } from 'date-fns'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
+import { SimSettings, runSimulation } from '@/lib/simulation'
 
 interface EquityChartProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
+  simSettings: SimSettings
 }
 
-export default function EquityChart({ timeRange, customDateRange }: EquityChartProps) {
-  const [data, setData] = useState<DailyEquity[]>([])
+export default function EquityChart({ timeRange, customDateRange, simSettings }: EquityChartProps) {
+  const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
-  const [liveEquity, setLiveEquity] = useState<number | null>(null)
 
   useEffect(() => {
-    async function fetchEquity() {
+    async function fetchTrades() {
       try {
-        const params = new URLSearchParams()
+        const params = new URLSearchParams({ limit: '500' })
 
         if (timeRange === 'CUSTOM' && customDateRange) {
           params.append('from', customDateRange.from)
@@ -30,35 +31,59 @@ export default function EquityChart({ timeRange, customDateRange }: EquityChartP
           if (range?.days) params.append('days', range.days.toString())
         }
 
-        const res = await fetch(`/api/equity?${params.toString()}`)
+        const res = await fetch(`/api/trades?${params.toString()}`)
         if (!res.ok) {
-          console.error('Equity API returned', res.status)
-          setData([])
+          setTrades([])
           return
         }
-        const equity = await res.json()
-        setData(Array.isArray(equity) ? equity : [])
-
-        // Fetch live equity from Bybit
-        try {
-          const liveRes = await fetch('/api/live-equity')
-          const liveData = await liveRes.json()
-          if (liveData.equity) setLiveEquity(liveData.equity)
-        } catch (err) {
-          // Live equity is optional
-        }
+        const data = await res.json()
+        setTrades(Array.isArray(data) ? data : [])
       } catch (error) {
-        console.error('Failed to fetch equity:', error)
+        console.error('Failed to fetch trades:', error)
       } finally {
         setLoading(false)
       }
     }
 
     setLoading(true)
-    fetchEquity()
-    const interval = setInterval(fetchEquity, 60000)
+    fetchTrades()
+    const interval = setInterval(fetchTrades, 60000)
     return () => clearInterval(interval)
   }, [timeRange, customDateRange])
+
+  // Build equity curve from simulation
+  const chartData = useMemo(() => {
+    if (trades.length === 0) return []
+
+    const sim = runSimulation(trades, simSettings)
+
+    // Sort trades chronologically
+    const sorted = [...trades].sort((a, b) =>
+      new Date(a.closed_at).getTime() - new Date(b.closed_at).getTime()
+    )
+
+    // Start point
+    const points = [{
+      date: 'Start',
+      fullDate: 'Starting Equity',
+      equity: simSettings.equity,
+      pnl: 0,
+    }]
+
+    // One point per trade
+    for (const trade of sorted) {
+      const result = sim.per_trade.get(trade.trade_id)
+      if (!result) continue
+      points.push({
+        date: format(new Date(trade.closed_at), 'MMM dd HH:mm'),
+        fullDate: format(new Date(trade.closed_at), 'MMM dd, yyyy HH:mm'),
+        equity: result.sim_equity_after,
+        pnl: result.sim_pnl,
+      })
+    }
+
+    return points
+  }, [trades, simSettings])
 
   if (loading) {
     return (
@@ -69,29 +94,20 @@ export default function EquityChart({ timeRange, customDateRange }: EquityChartP
     )
   }
 
-  if (data.length === 0) {
+  if (chartData.length <= 1) {
     return (
       <div className="bg-card border border-border rounded-lg p-6">
         <h2 className="text-xl font-bold mb-4">Equity Curve</h2>
         <div className="h-64 flex items-center justify-center text-muted-foreground">
-          No equity data available
+          No trade data available
         </div>
       </div>
     )
   }
 
-  const chartData = data.map(d => ({
-    date: format(new Date(d.date), 'MMM dd'),
-    fullDate: format(new Date(d.date), 'MMM dd, yyyy'),
-    equity: parseFloat((d.equity || 0).toString()),
-    pnl: parseFloat((d.daily_pnl || 0).toString()),
-  }))
-
-  const currentEquity = parseFloat((data[data.length - 1]?.equity || 0).toString())
-  const startEquity = parseFloat((data[0]?.equity || 0).toString())
-  const totalPnL = currentEquity - startEquity
-  const totalPnLPct = startEquity > 0 ? ((totalPnL / startEquity) * 100) : 0
-  const displayEquity = liveEquity !== null ? liveEquity : currentEquity
+  const currentEquity = chartData[chartData.length - 1].equity
+  const totalPnL = currentEquity - simSettings.equity
+  const totalPnLPct = (totalPnL / simSettings.equity) * 100
 
   return (
     <div className="bg-card border border-border rounded-lg p-6">
@@ -102,11 +118,8 @@ export default function EquityChart({ timeRange, customDateRange }: EquityChartP
           <div>
             <div className="text-sm text-muted-foreground mb-1">Current Equity</div>
             <div className="text-3xl font-bold text-foreground">
-              {formatCurrency(displayEquity)}
+              {formatCurrency(currentEquity)}
             </div>
-            {liveEquity !== null && (
-              <div className="text-xs text-muted-foreground mt-1">Live from Bybit</div>
-            )}
           </div>
           <div className="text-right">
             <div className="text-sm text-muted-foreground mb-1">
@@ -164,9 +177,11 @@ function CustomTooltip({ active, payload }: any) {
       <p className="text-sm text-foreground">
         Equity: <span className="font-bold">{formatCurrency(data.equity)}</span>
       </p>
-      <p className={`text-sm ${data.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
-        Daily P&L: <span className="font-bold">{data.pnl >= 0 ? '+' : ''}{formatCurrency(data.pnl)}</span>
-      </p>
+      {data.pnl !== 0 && (
+        <p className={`text-sm ${data.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+          Trade P&L: <span className="font-bold">{data.pnl >= 0 ? '+' : ''}{formatCurrency(data.pnl)}</span>
+        </p>
+      )}
     </div>
   )
 }

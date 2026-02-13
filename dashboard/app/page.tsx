@@ -16,9 +16,9 @@ export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1M')
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customDateRange, setCustomDateRange] = useState<{ from: string; to: string } | null>(null)
-  const [simSettings, setSimSettings] = useState<SimSettings | null>(null)
+  const [simSettings, setSimSettings] = useState<SimSettings>({ equity: 10000, tradePct: 5, compounding: true })
 
-  const handleSimChange = useCallback((settings: SimSettings | null) => {
+  const handleSimChange = useCallback((settings: SimSettings) => {
     setSimSettings(settings)
   }, [])
 
@@ -62,26 +62,28 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {/* Simulator Controls */}
+      <div className="border-b border-border bg-card/30">
+        <div className="container mx-auto px-4 py-3">
+          <EquitySimulator onChange={handleSimChange} />
+        </div>
+      </div>
+
       {/* Content */}
       <div className="container mx-auto px-4 py-6 space-y-6">
         {/* Stats Cards */}
         <section>
-          <StatsCards timeRange={timeRange} customDateRange={customDateRange} />
+          <StatsCards timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
         </section>
 
         {/* Charts Row */}
         <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <EquityChart timeRange={timeRange} customDateRange={customDateRange} />
+            <EquityChart timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
           </div>
           <div>
             <TPDistributionChart timeRange={timeRange} customDateRange={customDateRange} />
           </div>
-        </section>
-
-        {/* Equity Simulator */}
-        <section>
-          <EquitySimulator timeRange={timeRange} customDateRange={customDateRange} onChange={handleSimChange} />
         </section>
 
         {/* DCA Distribution */}

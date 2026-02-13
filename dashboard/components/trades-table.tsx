@@ -4,12 +4,12 @@ import { useEffect, useState, useMemo } from 'react'
 import { Trade } from '@/lib/db'
 import { formatCurrency, formatDate, formatDuration, cn } from '@/lib/utils'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
-import { SimSettings, SimTradeResult, runSimulation } from '@/lib/simulation'
+import { SimSettings, runSimulation } from '@/lib/simulation'
 
 interface TradesTableProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
-  simSettings?: SimSettings | null
+  simSettings: SimSettings
 }
 
 type BadgeVariant = 'tp' | 'trail' | 'be' | 'sl' | 'neutral'
