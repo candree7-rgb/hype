@@ -9,6 +9,7 @@ import TPDistributionChart from '@/components/tp-distribution'
 import DCADistributionChart from '@/components/dca-distribution'
 import TimeRangeSelector, { TimeRange } from '@/components/time-range-selector'
 import DateRangePicker from '@/components/date-range-picker'
+import EquitySimulator from '@/components/equity-simulator'
 
 export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1M')
@@ -70,6 +71,11 @@ export default function Dashboard() {
           <div>
             <TPDistributionChart timeRange={timeRange} customDateRange={customDateRange} />
           </div>
+        </section>
+
+        {/* Equity Simulator */}
+        <section>
+          <EquitySimulator timeRange={timeRange} customDateRange={customDateRange} onChange={() => {}} />
         </section>
 
         {/* DCA Distribution */}
