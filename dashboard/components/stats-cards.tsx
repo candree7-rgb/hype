@@ -80,6 +80,8 @@ export default function StatsCards({ timeRange, customDateRange, simSettings }: 
       best_trade: perTrade.length > 0 ? Math.max(...perTrade.map(t => t.sim_pnl)) : 0,
       worst_trade: perTrade.length > 0 ? Math.min(...perTrade.map(t => t.sim_pnl)) : 0,
       profit_factor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0,
+      max_drawdown: sim.max_drawdown,
+      max_drawdown_pct: sim.max_drawdown_pct,
     }
   }, [trades, simSettings])
 
@@ -117,6 +119,8 @@ export default function StatsCards({ timeRange, customDateRange, simSettings }: 
   const bestTrade = s ? s.best_trade : stats.best_trade
   const worstTrade = s ? s.worst_trade : stats.worst_trade
   const profitFactor = s ? s.profit_factor : stats.profit_factor
+  const maxDrawdown = s?.max_drawdown ?? 0
+  const maxDrawdownPct = s?.max_drawdown_pct ?? 0
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
@@ -182,6 +186,13 @@ export default function StatsCards({ timeRange, customDateRange, simSettings }: 
         value={`${(stats.sl_rate ?? 0).toFixed(1)}%`}
         valueColor={stats.sl_rate < 50 ? 'text-success' : 'text-danger'}
         subValue="Stop Loss exits"
+      />
+      <StatCard
+        label="Max Drawdown"
+        value={`-${maxDrawdownPct.toFixed(2)}%`}
+        variant={maxDrawdownPct > 10 ? 'danger' : 'default'}
+        valueColor="text-danger"
+        subValue={`${formatCurrency(-maxDrawdown)} from peak`}
       />
       <StatCard
         label="Avg Duration"
