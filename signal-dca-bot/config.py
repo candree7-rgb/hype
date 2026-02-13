@@ -65,6 +65,7 @@ class BotConfig:
     )
     trailing_callback_pct: float = 1.0  # 1% CB for trail after all TPs (room for runners)
     sl_to_be_after_tp1: bool = True     # Strategy C: TP1→BE, TP2→stay BE, TP3→SL@TP1, TP4→trail
+    be_buffer_pct: float = 0.1          # 0.1% buffer above/below entry for BE stop (covers fees)
 
     # ── DCA Exit (BE-Trail, activates from DCA1) ──
     be_trail_callback_pct: float = 0.5  # Trail from avg with 0.5% CB
@@ -160,7 +161,7 @@ class BotConfig:
         trail_pct = 100 - sum(self.tp_close_pcts)
         print(f"║    {', '.join(tp_labels)}, Trail={trail_pct}%")
         print(f"║    SL Ladder (Strategy C):")
-        print(f"║      TP1→BE, TP2→stay BE, TP3→SL@TP1, TP4→Trail {self.trailing_callback_pct}% CB")
+        print(f"║      TP1→BE+{self.be_buffer_pct}%, TP2→stay BE, TP3→SL@TP1, TP4→Trail {self.trailing_callback_pct}% CB")
         print(f"║")
         print(f"║  DCA Exit:       BE-Trail ({self.be_trail_callback_pct}% CB from avg)")
         print(f"║  Safety SL:      Entry - {self.safety_sl_pct}% (pre-DCA)")

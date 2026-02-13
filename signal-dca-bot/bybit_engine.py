@@ -820,6 +820,9 @@ class BybitEngine:
                          active_price: float = 0) -> bool:
         """Set exchange-side SL and/or trailing stop via Bybit API.
 
+        Includes retry (3 attempts) and post-set verification to ensure
+        the SL is actually active on the exchange.
+
         Args:
             symbol: Trading pair
             trade_side: "long" or "short"
@@ -827,6 +830,9 @@ class BybitEngine:
             trailing_stop: Trailing distance in price units (0 = don't change)
             active_price: Price at which trailing activates (0 = immediate)
         """
+        MAX_RETRIES = 3
+        VERIFY_DELAY = 2  # seconds
+
         pos_idx = self._position_idx(trade_side)
 
         body = {
@@ -840,30 +846,123 @@ class BybitEngine:
         if not info:
             return False
 
+        sl_rounded = 0.0
         if stop_loss > 0:
-            body["stopLoss"] = str(self.round_price(stop_loss, info["tick_size"]))
+            sl_rounded = self.round_price(stop_loss, info["tick_size"])
+            body["stopLoss"] = str(sl_rounded)
         if trailing_stop > 0:
             body["trailingStop"] = str(self.round_price(trailing_stop, info["tick_size"]))
         if active_price > 0:
             body["activePrice"] = str(self.round_price(active_price, info["tick_size"]))
 
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                self.session.set_trading_stop(**body)
+                parts = []
+                if stop_loss > 0:
+                    parts.append(f"SL={sl_rounded:.4f}")
+                if trailing_stop > 0:
+                    parts.append(f"Trail={trailing_stop:.4f}")
+                if active_price > 0:
+                    parts.append(f"ActiveAt={active_price:.4f}")
+                logger.info(f"Trading stop set: {symbol} | {' | '.join(parts)}")
+
+                # Verify SL is actually on the exchange
+                if sl_rounded > 0:
+                    time.sleep(VERIFY_DELAY)
+                    if self._verify_stop_loss(symbol, trade_side, sl_rounded):
+                        logger.info(f"SL VERIFIED on exchange: {symbol} | SL={sl_rounded:.4f}")
+                        return True
+                    else:
+                        logger.warning(
+                            f"SL verification FAILED (attempt {attempt}/{MAX_RETRIES}): "
+                            f"{symbol} | expected SL={sl_rounded:.4f}"
+                        )
+                        if attempt < MAX_RETRIES:
+                            time.sleep(1)
+                            continue
+                        logger.critical(
+                            f"SL SET FAILED after {MAX_RETRIES} verified attempts: "
+                            f"{symbol} | SL={sl_rounded:.4f} - POSITION MAY BE UNPROTECTED"
+                        )
+                        return False
+
+                return True  # No SL to verify (trailing-only)
+
+            except Exception as e:
+                err_str = str(e)
+                if "34040" in err_str:
+                    logger.warning(
+                        f"Trading stop unchanged for {symbol} (error 34040, attempt {attempt})"
+                    )
+                    # 34040 = "unchanged" - verify the existing SL matches what we want
+                    if sl_rounded > 0:
+                        time.sleep(1)
+                        if self._verify_stop_loss(symbol, trade_side, sl_rounded):
+                            logger.info(
+                                f"SL VERIFIED (34040 = already correct): "
+                                f"{symbol} | SL={sl_rounded:.4f}"
+                            )
+                            return True
+                        logger.warning(
+                            f"34040 but SL mismatch on exchange! "
+                            f"{symbol} | expected={sl_rounded:.4f}"
+                        )
+                        if attempt < MAX_RETRIES:
+                            continue
+                        return False
+                    return True  # No SL to verify
+
+                logger.error(
+                    f"Set trading stop failed (attempt {attempt}/{MAX_RETRIES}) "
+                    f"for {symbol}: {e}"
+                )
+                if attempt < MAX_RETRIES:
+                    time.sleep(1)
+
+        logger.critical(
+            f"SL SET FAILED after {MAX_RETRIES} attempts: "
+            f"{symbol} | POSITION MAY BE UNPROTECTED"
+        )
+        return False
+
+    def _verify_stop_loss(self, symbol: str, trade_side: str,
+                          expected_sl: float, tolerance_pct: float = 0.05) -> bool:
+        """Verify SL is set on exchange by querying the position.
+
+        Returns True if position has SL within tolerance of expected value.
+        Uses direct API call to check the correct side in hedge mode.
+        """
         try:
-            self.session.set_trading_stop(**body)
-            parts = []
-            if stop_loss > 0:
-                parts.append(f"SL={stop_loss:.4f}")
-            if trailing_stop > 0:
-                parts.append(f"Trail={trailing_stop:.4f}")
-            if active_price > 0:
-                parts.append(f"ActiveAt={active_price:.4f}")
-            logger.info(f"Trading stop set: {symbol} | {' | '.join(parts)}")
-            return True
+            result = self.session.get_positions(
+                category="linear",
+                symbol=symbol,
+            )
+            positions = result["result"]["list"]
+            expected_bybit_side = "Buy" if trade_side == "long" else "Sell"
+
+            for pos in positions:
+                if pos["side"] == expected_bybit_side and float(pos["size"]) > 0:
+                    actual_sl = float(pos.get("stopLoss", 0) or 0)
+                    if actual_sl == 0:
+                        logger.warning(
+                            f"SL verify: NO SL on exchange | {symbol} {trade_side}"
+                        )
+                        return False
+                    diff_pct = abs(actual_sl - expected_sl) / expected_sl * 100
+                    if diff_pct > tolerance_pct:
+                        logger.warning(
+                            f"SL verify: mismatch | {symbol} {trade_side} | "
+                            f"expected={expected_sl:.6f} actual={actual_sl:.6f} "
+                            f"diff={diff_pct:.3f}%"
+                        )
+                        return False
+                    return True
+
+            logger.warning(f"SL verify: position not found | {symbol} {trade_side}")
+            return False
         except Exception as e:
-            err_str = str(e)
-            if "34040" in err_str:
-                logger.debug(f"Trading stop unchanged for {symbol}")
-                return True
-            logger.error(f"Set trading stop failed for {symbol}: {e}")
+            logger.error(f"SL verify error for {symbol}: {e}")
             return False
 
     def check_order_filled(self, symbol: str, order_id: str) -> tuple[bool, float]:
