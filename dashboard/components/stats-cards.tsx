@@ -1,54 +1,71 @@
-'use client';
+'use client'
 
-import { useEffect, useState } from 'react';
-import { Stats } from '@/lib/db';
-import { formatCurrency } from '@/lib/utils';
+import { useEffect, useState } from 'react'
+import { Stats } from '@/lib/db'
+import { formatCurrency } from '@/lib/utils'
+import { TimeRange, TIME_RANGES } from './time-range-selector'
 
-export default function StatsCards() {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
+interface StatsCardsProps {
+  timeRange: TimeRange
+  customDateRange?: { from: string; to: string } | null
+}
+
+export default function StatsCards({ timeRange, customDateRange }: StatsCardsProps) {
+  const [stats, setStats] = useState<Stats | null>(null)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     async function fetchStats() {
       try {
-        const res = await fetch('/api/stats');
-        const data = await res.json();
-        setStats(data);
+        const params = new URLSearchParams()
+
+        if (timeRange === 'CUSTOM' && customDateRange) {
+          params.append('from', customDateRange.from)
+          params.append('to', customDateRange.to)
+        } else {
+          const range = TIME_RANGES.find(r => r.value === timeRange)
+          if (range?.days) params.append('days', range.days.toString())
+        }
+
+        const res = await fetch(`/api/stats?${params.toString()}`)
+        const data = await res.json()
+        setStats(data)
       } catch (error) {
-        console.error('Failed to fetch stats:', error);
+        console.error('Failed to fetch stats:', error)
       } finally {
-        setLoading(false);
+        setLoading(false)
       }
     }
 
-    fetchStats();
-    const interval = setInterval(fetchStats, 30000);
-    return () => clearInterval(interval);
-  }, []);
+    setLoading(true)
+    fetchStats()
+    const interval = setInterval(fetchStats, 30000)
+    return () => clearInterval(interval)
+  }, [timeRange, customDateRange])
 
   if (loading) {
     return (
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {[...Array(8)].map((_, i) => (
-          <div key={i} className="bg-card border border-border rounded-lg p-4 md:p-6 animate-pulse">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+        {[...Array(10)].map((_, i) => (
+          <div key={i} className="bg-card border border-border rounded-lg p-4 animate-pulse">
             <div className="h-4 bg-muted rounded w-1/2 mb-2"></div>
             <div className="h-8 bg-muted rounded w-3/4"></div>
           </div>
         ))}
       </div>
-    );
+    )
   }
 
   if (!stats || stats.total_trades === 0) {
     return (
       <div className="bg-card border border-border rounded-lg p-6 text-center">
-        <p className="text-muted-foreground">No trade data available</p>
+        <p className="text-muted-foreground">No trade data available for this period</p>
       </div>
-    );
+    )
   }
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
       <StatCard
         label="Total Trades"
         value={stats.total_trades.toString()}
@@ -61,44 +78,34 @@ export default function StatsCards() {
         subValue="Wins + Breakeven"
       />
       <StatCard
-        label="Total Wins"
-        value={stats.wins.toString()}
-        valueColor="text-success"
-      />
-      <StatCard
-        label="Total Losses"
-        value={stats.losses.toString()}
-        valueColor="text-danger"
-        subValue="Pure SL, no TP"
-      />
-      <StatCard
         label="Total PnL"
         value={formatCurrency(stats.total_pnl)}
         variant={stats.total_pnl >= 0 ? 'success' : 'danger'}
         subValue={`${stats.total_pnl_pct >= 0 ? '+' : ''}${stats.total_pnl_pct.toFixed(2)}% Equity`}
       />
       <StatCard
+        label="Profit Factor"
+        value={stats.profit_factor === Infinity ? '∞' : stats.profit_factor.toFixed(2)}
+        variant={stats.profit_factor >= 1.5 ? 'success' : stats.profit_factor >= 1 ? 'default' : 'danger'}
+        subValue="Gross Win / Loss"
+      />
+      <StatCard
         label="Avg PnL"
         value={`${stats.avg_pnl_pct >= 0 ? '+' : ''}${stats.avg_pnl_pct.toFixed(2)}%`}
         variant={stats.avg_pnl >= 0 ? 'success' : 'danger'}
-        subValue={`${formatCurrency(stats.avg_pnl)} per trade`}
+        subValue={formatCurrency(stats.avg_pnl)}
       />
       <StatCard
         label="Avg Win"
-        value={`${stats.avg_win_pct >= 0 ? '+' : ''}${stats.avg_win_pct.toFixed(2)}%`}
+        value={`+${stats.avg_win_pct.toFixed(2)}%`}
         valueColor="text-success"
-        subValue={`${formatCurrency(stats.avg_win)}`}
+        subValue={formatCurrency(stats.avg_win)}
       />
       <StatCard
         label="Avg Loss"
         value={`${stats.avg_loss_pct.toFixed(2)}%`}
         valueColor="text-danger"
-        subValue={`${formatCurrency(stats.avg_loss)}`}
-      />
-      <StatCard
-        label="Win/Loss Ratio"
-        value={`${stats.win_loss_ratio.toFixed(2)}:1`}
-        variant={stats.win_loss_ratio >= 1 ? 'success' : 'danger'}
+        subValue={formatCurrency(stats.avg_loss)}
       />
       <StatCard
         label="Best Trade"
@@ -111,61 +118,51 @@ export default function StatsCards() {
         valueColor="text-danger"
       />
       <StatCard
-        label="Avg DCAs Filled"
-        value={stats.avg_dca_fills.toFixed(1)}
-        subValue="per trade"
+        label="TP Hit Rate"
+        value={`${stats.tp_rate.toFixed(1)}%`}
+        valueColor={stats.tp_rate > 50 ? 'text-success' : 'text-danger'}
+        subValue="Take Profit exits"
       />
       <StatCard
-        label="Trailing Exits"
-        value={stats.trailing_exits.toString()}
-        subValue={`${((stats.trailing_exits / stats.total_trades) * 100).toFixed(0)}% of trades`}
+        label="Stop Loss Rate"
+        value={`${stats.sl_rate.toFixed(1)}%`}
+        valueColor={stats.sl_rate < 50 ? 'text-success' : 'text-danger'}
+        subValue="Stop Loss exits"
       />
       <StatCard
-        label="Stop Loss Exits"
-        value={stats.sl_exits.toString()}
-        valueColor="text-danger"
-        subValue={`${((stats.sl_exits / stats.total_trades) * 100).toFixed(0)}% of trades`}
-      />
-      <StatCard
-        label="BE Exits"
-        value={stats.be_exits.toString()}
-        subValue={`${((stats.be_exits / stats.total_trades) * 100).toFixed(0)}% of trades`}
-      />
-      <StatCard
-        label="Breakeven"
-        value={stats.breakeven.toString()}
-        valueColor="text-muted-foreground"
-        subValue="TP1+ but PnL <= 0"
+        label="Avg Duration"
+        value={stats.avg_duration > 60 ? `${(stats.avg_duration / 60).toFixed(1)}h` : `${stats.avg_duration.toFixed(0)}m`}
+        subValue="Per trade"
       />
     </div>
-  );
+  )
 }
 
 interface StatCardProps {
-  label: string;
-  value: string;
-  subValue?: string;
-  variant?: 'default' | 'success' | 'danger';
-  valueColor?: string;
+  label: string
+  value: string
+  subValue?: string
+  variant?: 'default' | 'success' | 'danger'
+  valueColor?: string
 }
 
 function StatCard({ label, value, subValue, variant = 'default', valueColor }: StatCardProps) {
-  let borderClass = 'border-border';
-  let textClass = valueColor || 'text-foreground';
+  let borderClass = 'border-border'
+  let textClass = valueColor || 'text-foreground'
 
   if (variant === 'success') {
-    borderClass = 'border-success/20';
-    textClass = 'text-success';
+    borderClass = 'border-success/30'
+    textClass = valueColor || 'text-success'
   } else if (variant === 'danger') {
-    borderClass = 'border-danger/20';
-    textClass = 'text-danger';
+    borderClass = 'border-danger/30'
+    textClass = valueColor || 'text-danger'
   }
 
   return (
-    <div className={`bg-card border ${borderClass} rounded-lg p-4 md:p-6`}>
+    <div className={`bg-card border ${borderClass} rounded-lg p-4`}>
       <div className="text-sm text-muted-foreground mb-1">{label}</div>
       <div className={`text-2xl font-bold ${textClass}`}>{value}</div>
       {subValue && <div className="text-xs text-muted-foreground mt-1">{subValue}</div>}
     </div>
-  );
+  )
 }
