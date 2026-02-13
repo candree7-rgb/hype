@@ -1907,7 +1907,7 @@ async def trade_history():
     return JSONResponse({"stats": stats, "trades": trades})
 
 
-@app.post("/admin/fix-pnl")
+@app.get("/admin/fix-pnl")
 async def admin_fix_pnl():
     """Re-sync PnL for recent trades from Bybit closed_pnl.
 
