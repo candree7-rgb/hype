@@ -1907,6 +1907,66 @@ async def trade_history():
     return JSONResponse({"stats": stats, "trades": trades})
 
 
+@app.post("/admin/fix-pnl")
+async def admin_fix_pnl():
+    """Re-sync PnL for recent trades from Bybit closed_pnl.
+
+    Queries Bybit for actual realized PnL (includes fees) and updates DB.
+    """
+    recent = db.get_recent_trade_ids(days=7)
+    if not recent:
+        return JSONResponse({"status": "no trades to fix"})
+
+    results = []
+    for trade_rec in recent:
+        symbol = trade_rec["symbol"]
+        side = trade_rec["side"]
+        start_ms = int(trade_rec["opened_at"] * 1000) if trade_rec["opened_at"] else 0
+
+        if start_ms == 0:
+            continue
+
+        # Query Bybit for closed PnL records
+        records = bybit.get_closed_pnl(limit=50, start_time_ms=start_ms)
+        matching = [
+            r for r in records
+            if r["symbol"] == symbol and r["side"] == side
+        ]
+
+        if not matching:
+            continue
+
+        bybit_pnl = sum(r["closed_pnl"] for r in matching)
+        old_pnl = trade_rec["realized_pnl"]
+        diff = bybit_pnl - old_pnl
+
+        if abs(diff) < 0.001:
+            continue  # Already correct
+
+        # Update DB with Bybit PnL
+        updated = db.update_trade_pnl(
+            trade_id=trade_rec["trade_id"],
+            realized_pnl=bybit_pnl,
+            total_margin=trade_rec["total_margin"],
+            equity_at_entry=trade_rec["equity_at_entry"],
+        )
+
+        results.append({
+            "trade_id": trade_rec["trade_id"],
+            "symbol": symbol,
+            "old_pnl": round(old_pnl, 4),
+            "bybit_pnl": round(bybit_pnl, 4),
+            "diff": round(diff, 4),
+            "updated": updated,
+        })
+
+    return JSONResponse({
+        "status": "done",
+        "fixed": len(results),
+        "details": results,
+    })
+
+
 @app.get("/equity")
 async def equity_history():
     """Equity curve data for dashboard chart."""

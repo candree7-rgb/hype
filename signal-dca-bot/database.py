@@ -340,6 +340,68 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
         return False
 
 
+def update_trade_pnl(trade_id: str, realized_pnl: float, total_margin: float,
+                     equity_at_entry: float) -> bool:
+    """Update PnL for an existing trade (used by admin fix-pnl)."""
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        pnl_pct_margin = (realized_pnl / total_margin * 100) if total_margin > 0 else 0
+        pnl_pct_equity = (realized_pnl / equity_at_entry * 100) if equity_at_entry > 0 else 0
+        is_win = realized_pnl > 0.01
+        equity_at_close = equity_at_entry + realized_pnl
+
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE trades SET
+                realized_pnl = %s, pnl_pct_margin = %s, pnl_pct_equity = %s,
+                equity_at_close = %s, is_win = %s
+            WHERE trade_id = %s
+        """, (realized_pnl, pnl_pct_margin, pnl_pct_equity,
+              equity_at_close, is_win, trade_id))
+        updated = cur.rowcount > 0
+        cur.close()
+        return updated
+    except Exception as e:
+        logger.error(f"DB update_trade_pnl failed for {trade_id}: {e}")
+        return False
+
+
+def get_recent_trade_ids(days: int = 7) -> list[dict]:
+    """Get recent trade IDs with metadata for PnL fixing."""
+    conn = get_connection()
+    if not conn:
+        return []
+
+    try:
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT trade_id, symbol, side, total_margin, equity_at_entry,
+                   realized_pnl, opened_at
+            FROM trades
+            WHERE opened_at >= %s
+            ORDER BY opened_at DESC
+        """, (cutoff,))
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            {
+                "trade_id": r[0], "symbol": r[1], "side": r[2],
+                "total_margin": float(r[3] or 0), "equity_at_entry": float(r[4] or 0),
+                "realized_pnl": float(r[5] or 0),
+                "opened_at": r[6].timestamp() if r[6] else 0,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error(f"DB get_recent_trade_ids failed: {e}")
+        return []
+
+
 def get_trade_by_symbol_time(symbol: str, created_time: float) -> bool:
     """Check if a trade exists in DB for a symbol near a given time.
 
