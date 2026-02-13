@@ -763,7 +763,7 @@ class BybitEngine:
     # ══════════════════════════════════════════════════════════════════════
 
     def place_tp_order(self, trade: Trade, tp_price: float, qty: float,
-                       tp_num: int = 1) -> str | None:
+                       tp_num: int = 1, tag: str = "TP") -> str | None:
         """Place TP as reduceOnly limit order on Bybit.
 
         Args:
@@ -771,6 +771,7 @@ class BybitEngine:
             tp_price: TP target price
             qty: Quantity to close
             tp_num: TP number (1-4) for orderLinkId
+            tag: OrderLinkId tag ("TP" for E1, "DTP" for DCA) to avoid duplicates
 
         Returns order_id if successful, None otherwise.
         """
@@ -802,7 +803,7 @@ class BybitEngine:
                 price=str(tp_price),
                 timeInForce="GTC",
                 reduceOnly=True,
-                orderLinkId=f"{trade.trade_id}_TP{tp_num}",
+                orderLinkId=f"{trade.trade_id}_{tag}{tp_num}",
                 **pos_idx,
             )
             order_id = result["result"]["orderId"]

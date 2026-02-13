@@ -632,7 +632,7 @@ def _place_dca_tps(trade: Trade) -> None:
         if i >= len(trade.tp_close_qtys):
             break
         qty = trade.tp_close_qtys[i]
-        order_id = bybit.place_tp_order(trade, tp_price, qty, tp_num=i + 1)
+        order_id = bybit.place_tp_order(trade, tp_price, qty, tp_num=i + 1, tag="DTP")
         if order_id:
             trade.tp_order_ids[i] = order_id
         else:
