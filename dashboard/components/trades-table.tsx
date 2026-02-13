@@ -1,13 +1,15 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { Trade } from '@/lib/db'
 import { formatCurrency, formatDate, formatDuration, cn } from '@/lib/utils'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
+import { SimSettings, SimTradeResult, runSimulation } from '@/lib/simulation'
 
 interface TradesTableProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
+  simSettings?: SimSettings | null
 }
 
 type BadgeVariant = 'tp' | 'trail' | 'be' | 'sl' | 'neutral'
@@ -74,9 +76,15 @@ const badgeColors: Record<BadgeVariant, string> = {
   neutral: 'bg-muted text-muted-foreground',
 }
 
-export default function TradesTable({ timeRange, customDateRange }: TradesTableProps) {
+export default function TradesTable({ timeRange, customDateRange, simSettings }: TradesTableProps) {
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
+
+  // Run simulation on current trades when simSettings are active
+  const simResults = useMemo(() => {
+    if (!simSettings || trades.length === 0) return null
+    return runSimulation(trades, simSettings)
+  }, [trades, simSettings])
 
   useEffect(() => {
     async function fetchTrades() {
@@ -154,6 +162,9 @@ export default function TradesTable({ timeRange, customDateRange }: TradesTableP
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Duration</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L %</th>
+              {simResults && (
+                <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Sim P&L</th>
+              )}
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Exit</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">DCA</th>
             </tr>
@@ -221,6 +232,25 @@ export default function TradesTable({ timeRange, customDateRange }: TradesTableP
                     {parseFloat(trade.pnl_pct_equity?.toString() || '0').toFixed(2)}%
                   </span>
                 </td>
+
+                {/* Sim P&L */}
+                {simResults && (() => {
+                  const sim = simResults.per_trade.get(trade.trade_id)
+                  return (
+                    <td className="px-4 py-4">
+                      {sim ? (
+                        <span className={cn(
+                          'font-semibold',
+                          sim.sim_pnl >= 0 ? 'text-success' : 'text-danger'
+                        )}>
+                          {sim.sim_pnl >= 0 ? '+' : ''}{formatCurrency(sim.sim_pnl)}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">-</span>
+                      )}
+                    </td>
+                  )
+                })()}
 
                 {/* Exit badges */}
                 <td className="px-4 py-4">

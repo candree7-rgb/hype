@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { format } from 'date-fns'
 import StatsCards from '@/components/stats-cards'
 import EquityChart from '@/components/equity-chart'
@@ -10,11 +10,17 @@ import DCADistributionChart from '@/components/dca-distribution'
 import TimeRangeSelector, { TimeRange } from '@/components/time-range-selector'
 import DateRangePicker from '@/components/date-range-picker'
 import EquitySimulator from '@/components/equity-simulator'
+import { SimSettings } from '@/lib/simulation'
 
 export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1M')
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customDateRange, setCustomDateRange] = useState<{ from: string; to: string } | null>(null)
+  const [simSettings, setSimSettings] = useState<SimSettings | null>(null)
+
+  const handleSimChange = useCallback((settings: SimSettings | null) => {
+    setSimSettings(settings)
+  }, [])
 
   const handleCustomDateApply = (from: string, to: string) => {
     setCustomDateRange({ from, to })
@@ -75,7 +81,7 @@ export default function Dashboard() {
 
         {/* Equity Simulator */}
         <section>
-          <EquitySimulator timeRange={timeRange} customDateRange={customDateRange} onChange={() => {}} />
+          <EquitySimulator timeRange={timeRange} customDateRange={customDateRange} onChange={handleSimChange} />
         </section>
 
         {/* DCA Distribution */}
@@ -85,7 +91,7 @@ export default function Dashboard() {
 
         {/* Trades Table */}
         <section>
-          <TradesTable timeRange={timeRange} customDateRange={customDateRange} />
+          <TradesTable timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
         </section>
       </div>
 
