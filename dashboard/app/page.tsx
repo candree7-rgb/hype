@@ -39,10 +39,10 @@ export default function Dashboard() {
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <h1 className="text-2xl font-bold text-foreground">
-                Signal DCA Bot v2
+                *Systemic
               </h1>
               <p className="text-sm text-muted-foreground">
-                Telegram VIP Signals &bull; Bybit Perpetual &bull; 20x Leverage
+                Bybit Perpetual &bull; 20x Leverage &bull; Neo Cloud filter &bull; RZ DCA
               </p>
             </div>
             <TimeRangeSelector
@@ -86,7 +86,7 @@ export default function Dashboard() {
       {/* Footer */}
       <footer className="border-t border-border py-4 mt-8">
         <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          Signal DCA Bot v2 &bull; Auto-refreshes every 30s
+          *Systemic &bull; Auto-refreshes every 30s
         </div>
       </footer>
     </main>

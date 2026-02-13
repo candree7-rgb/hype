@@ -287,7 +287,10 @@ export async function getExitDistribution(
       WITH categorized AS (
         SELECT
           CASE
-            WHEN tp1_hit AND (close_reason ILIKE '%trail%' OR close_reason ILIKE '%tp%') THEN 'Take Profit'
+            WHEN close_reason ILIKE '%tp4%' THEN 'TP4'
+            WHEN close_reason ILIKE '%tp3%' THEN 'TP3'
+            WHEN close_reason ILIKE '%tp2%' THEN 'TP2'
+            WHEN tp1_hit OR close_reason ILIKE '%tp1%' THEN 'TP1'
             WHEN close_reason ILIKE '%sl%' OR close_reason ILIKE '%stop%' THEN 'Stop Loss'
             ELSE 'Other'
           END as category
@@ -297,7 +300,15 @@ export async function getExitDistribution(
       SELECT category as level, COUNT(*) as count
       FROM categorized
       GROUP BY category
-      ORDER BY count DESC
+      ORDER BY
+        CASE category
+          WHEN 'TP4' THEN 1
+          WHEN 'TP3' THEN 2
+          WHEN 'TP2' THEN 3
+          WHEN 'TP1' THEN 4
+          WHEN 'Stop Loss' THEN 5
+          ELSE 6
+        END
     `)
 
     const total = result.rows.reduce((sum: number, r: any) => sum + parseInt(r.count), 0)

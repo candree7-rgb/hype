@@ -28,8 +28,11 @@ function getExitBadges(trade: Trade): { label: string; variant: BadgeVariant }[]
     badges.push({ label: 'TRAIL', variant: 'trail' })
   } else if (reason.includes('sl') || reason.includes('stop')) {
     // Stop loss exit
-    if (trade.tp1_hit) {
-      // TP1 was hit but SL triggered later = breakeven area
+    if (tpLevel >= 1) {
+      // TP was hit but SL triggered later = breakeven area
+      badges.push({ label: `TP${tpLevel}`, variant: 'tp' })
+      badges.push({ label: 'BE', variant: 'be' })
+    } else if (trade.tp1_hit) {
       badges.push({ label: 'TP1', variant: 'tp' })
       badges.push({ label: 'BE', variant: 'be' })
     } else {

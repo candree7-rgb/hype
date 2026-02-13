@@ -74,7 +74,10 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
   }
 
   const colors: Record<string, string> = {
-    'Take Profit': '#22c55e',
+    'TP4': '#15803d',  // dark green - best exits
+    'TP3': '#16a34a',  // green
+    'TP2': '#22c55e',  // light green
+    'TP1': '#4ade80',  // lightest green
     'Stop Loss': '#ef4444',
     'Other': '#f59e0b',
   }
