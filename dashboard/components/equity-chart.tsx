@@ -31,8 +31,13 @@ export default function EquityChart({ timeRange, customDateRange }: EquityChartP
         }
 
         const res = await fetch(`/api/equity?${params.toString()}`)
+        if (!res.ok) {
+          console.error('Equity API returned', res.status)
+          setData([])
+          return
+        }
         const equity = await res.json()
-        setData(equity)
+        setData(Array.isArray(equity) ? equity : [])
 
         // Fetch live equity from Bybit
         try {
@@ -132,7 +137,7 @@ export default function EquityChart({ timeRange, customDateRange }: EquityChartP
             fontSize={12}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(value) => `$${value.toFixed(0)}`}
+            tickFormatter={(value) => `$${(value ?? 0).toFixed(0)}`}
             domain={['dataMin - 100', 'dataMax + 100']}
           />
           <Tooltip content={<CustomTooltip />} />

@@ -33,8 +33,13 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
         }
 
         const res = await fetch(`/api/tp-distribution?${params.toString()}`)
+        if (!res.ok) {
+          console.error('TP distribution API returned', res.status)
+          setData([])
+          return
+        }
         const distribution = await res.json()
-        setData(distribution)
+        setData(Array.isArray(distribution) ? distribution : [])
       } catch (error) {
         console.error('Failed to fetch exit distribution:', error)
       } finally {

@@ -28,8 +28,13 @@ export default function DCADistributionChart({ timeRange, customDateRange }: DCA
         }
 
         const res = await fetch(`/api/dca-distribution?${params.toString()}`)
+        if (!res.ok) {
+          console.error('DCA distribution API returned', res.status)
+          setData([])
+          return
+        }
         const distribution = await res.json()
-        setData(distribution)
+        setData(Array.isArray(distribution) ? distribution : [])
       } catch (error) {
         console.error('Failed to fetch DCA distribution:', error)
       } finally {

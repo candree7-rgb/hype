@@ -28,6 +28,11 @@ export default function StatsCards({ timeRange, customDateRange }: StatsCardsPro
         }
 
         const res = await fetch(`/api/stats?${params.toString()}`)
+        if (!res.ok) {
+          console.error('Stats API returned', res.status)
+          setStats(null)
+          return
+        }
         const data = await res.json()
         setStats(data)
       } catch (error) {
@@ -73,7 +78,7 @@ export default function StatsCards({ timeRange, customDateRange }: StatsCardsPro
       />
       <StatCard
         label="Win Rate"
-        value={`${stats.win_rate.toFixed(1)}%`}
+        value={`${(stats.win_rate ?? 0).toFixed(1)}%`}
         variant={stats.win_rate >= 50 ? 'success' : 'danger'}
         subValue="Wins + Breakeven"
       />
@@ -81,29 +86,29 @@ export default function StatsCards({ timeRange, customDateRange }: StatsCardsPro
         label="Total PnL"
         value={formatCurrency(stats.total_pnl)}
         variant={stats.total_pnl >= 0 ? 'success' : 'danger'}
-        subValue={`${stats.total_pnl_pct >= 0 ? '+' : ''}${stats.total_pnl_pct.toFixed(2)}% Equity`}
+        subValue={`${(stats.total_pnl_pct ?? 0) >= 0 ? '+' : ''}${(stats.total_pnl_pct ?? 0).toFixed(2)}% Equity`}
       />
       <StatCard
         label="Profit Factor"
-        value={stats.profit_factor === Infinity ? '∞' : stats.profit_factor.toFixed(2)}
+        value={stats.profit_factor === Infinity ? '∞' : (stats.profit_factor ?? 0).toFixed(2)}
         variant={stats.profit_factor >= 1.5 ? 'success' : stats.profit_factor >= 1 ? 'default' : 'danger'}
         subValue="Gross Win / Loss"
       />
       <StatCard
         label="Avg PnL"
-        value={`${stats.avg_pnl_pct >= 0 ? '+' : ''}${stats.avg_pnl_pct.toFixed(2)}%`}
+        value={`${(stats.avg_pnl_pct ?? 0) >= 0 ? '+' : ''}${(stats.avg_pnl_pct ?? 0).toFixed(2)}%`}
         variant={stats.avg_pnl >= 0 ? 'success' : 'danger'}
         subValue={formatCurrency(stats.avg_pnl)}
       />
       <StatCard
         label="Avg Win"
-        value={`+${stats.avg_win_pct.toFixed(2)}%`}
+        value={`+${(stats.avg_win_pct ?? 0).toFixed(2)}%`}
         valueColor="text-success"
         subValue={formatCurrency(stats.avg_win)}
       />
       <StatCard
         label="Avg Loss"
-        value={`${stats.avg_loss_pct.toFixed(2)}%`}
+        value={`${(stats.avg_loss_pct ?? 0).toFixed(2)}%`}
         valueColor="text-danger"
         subValue={formatCurrency(stats.avg_loss)}
       />
@@ -119,19 +124,19 @@ export default function StatsCards({ timeRange, customDateRange }: StatsCardsPro
       />
       <StatCard
         label="TP Hit Rate"
-        value={`${stats.tp_rate.toFixed(1)}%`}
+        value={`${(stats.tp_rate ?? 0).toFixed(1)}%`}
         valueColor={stats.tp_rate > 50 ? 'text-success' : 'text-danger'}
         subValue="Take Profit exits"
       />
       <StatCard
         label="Stop Loss Rate"
-        value={`${stats.sl_rate.toFixed(1)}%`}
+        value={`${(stats.sl_rate ?? 0).toFixed(1)}%`}
         valueColor={stats.sl_rate < 50 ? 'text-success' : 'text-danger'}
         subValue="Stop Loss exits"
       />
       <StatCard
         label="Avg Duration"
-        value={stats.avg_duration > 60 ? `${(stats.avg_duration / 60).toFixed(1)}h` : `${stats.avg_duration.toFixed(0)}m`}
+        value={(stats.avg_duration ?? 0) > 60 ? `${((stats.avg_duration ?? 0) / 60).toFixed(1)}h` : `${(stats.avg_duration ?? 0).toFixed(0)}m`}
         subValue="Per trade"
       />
     </div>

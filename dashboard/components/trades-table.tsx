@@ -89,8 +89,13 @@ export default function TradesTable({ timeRange, customDateRange }: TradesTableP
         }
 
         const res = await fetch(`/api/trades?${params.toString()}`)
+        if (!res.ok) {
+          console.error('Trades API returned', res.status)
+          setTrades([])
+          return
+        }
         const data = await res.json()
-        setTrades(data)
+        setTrades(Array.isArray(data) ? data : [])
       } catch (error) {
         console.error('Failed to fetch trades:', error)
       } finally {
