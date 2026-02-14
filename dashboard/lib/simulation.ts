@@ -20,11 +20,20 @@ export interface SimSummary {
   per_trade: Map<string, SimTradeResult>
 }
 
+// Bot's configured equity allocation per trade slot (5% in config.py).
+// pnl_pct_equity from the DB already bakes in this 5% allocation.
+const ORIGINAL_TRADE_PCT = 5
+
 export function runSimulation(trades: Trade[], settings: SimSettings): SimSummary {
   // Sort chronologically (oldest first) for correct compounding order
   const sorted = [...trades].sort((a, b) =>
     new Date(a.closed_at).getTime() - new Date(b.closed_at).getTime()
   )
+
+  // Scale PnL proportionally when user simulates a different equity % per trade.
+  // pnl_pct_equity was recorded at ORIGINAL_TRADE_PCT (5%). If the user sets
+  // tradePct=10%, returns double; tradePct=2.5%, returns halve.
+  const scaleFactor = settings.tradePct / ORIGINAL_TRADE_PCT
 
   let runningEquity = settings.equity
   let totalSimPnl = 0
@@ -41,7 +50,7 @@ export function runSimulation(trades: Trade[], settings: SimSettings): SimSummar
     // the slot allocation when DCA doesn't fill (DCA weights [1,2], E1=1/3).
     // Using pnl_pct_equity correctly accounts for the actual margin deployed.
     const pnlPctEquity = parseFloat(trade.pnl_pct_equity?.toString() || '0')
-    const simPnl = baseEquity * (pnlPctEquity / 100)
+    const simPnl = baseEquity * (pnlPctEquity / 100) * scaleFactor
 
     runningEquity += simPnl
     totalSimPnl += simPnl
