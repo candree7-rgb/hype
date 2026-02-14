@@ -12,8 +12,8 @@ Architecture:
        → TP3 fills: SL → TP1 price (lock profit)
        → TP4 fills: trailing 20% (1% CB) with SL floor at TP1
      - DCA fills (before TP1): cancel signal TPs, place new TPs from avg
-       → DCA TP1=+0.75% (50%), TP2=+1.5% (20%), trail 30% @1%CB
-       → Hard SL at DCA-fill+3%, SL→BE after DCA TP1
+       → DCA TP1=+0.5% (50%), TP2=+1.25% (20%), trail 30% @1%CB
+       → Hard SL at DCA-fill+3%, SL→exakt avg (kein buffer) after DCA TP1
      - Detect position close (SL/trailing triggered by Bybit)
   3. Zone Refresh every 15min: auto-calc swing H/L for active symbols
   4. Neo Cloud trend switch: close opposing positions on /signal/trend-switch
@@ -233,7 +233,7 @@ async def price_monitor():
     - After TP2: SL stays at BE (let runners breathe through pullbacks)
     - After TP3: SL → TP1 price (lock partial profit)
     - After TP4: trailing stop 1% CB on remaining 20%, SL floor at TP1
-    - DCA fills (before TP1): cancel signal TPs, new TPs from avg, hard SL at DCA-fill+3%
+    - DCA fills (before TP1): cancel signal TPs, new TPs from avg (0.5%/1.25%), hard SL at DCA-fill+3%
     """
     logger.info("Price monitor started (Multi-TP)")
 
@@ -255,8 +255,9 @@ async def price_monitor():
                         trade.status = TradeStatus.OPEN
                         # Place DCA orders
                         bybit.place_dca_for_trade(trade)
-                        # Calculate TP qtys and place Multi-TP orders
+                        # Calculate TP qtys, consolidate small ones, place orders
                         trade_mgr.setup_tp_qtys(trade)
+                        _consolidate_tp_qtys(trade)
                         _place_exchange_tps(trade)
                         # Set initial SL at entry-3%
                         _set_initial_sl(trade)
@@ -289,8 +290,10 @@ async def price_monitor():
                             # ── SL Ladder: DCA mode (2 TPs + trail) ──
                             if trade.current_dca > 0:
                                 if tp_idx == 0:
-                                    # DCA TP1 → SL to BE (avg + buffer)
-                                    buffer = config.be_buffer_pct / 100
+                                    # DCA TP1 → SL to BE (exakt avg, kein buffer)
+                                    # Bei 0.5% TP1 ist der Abstand eh nur 0.5% —
+                                    # ein Buffer würde SL fast zum zweiten TP machen
+                                    buffer = config.dca_be_buffer_pct / 100
                                     if trade.side == "long":
                                         be_price = trade.avg_price * (1 + buffer)
                                     else:
@@ -302,9 +305,10 @@ async def price_monitor():
                                     trade.hard_sl_price = be_price
                                     trade_mgr.persist_trade(trade)
                                     if sl_ok:
+                                        buf_str = f"avg+{config.dca_be_buffer_pct}% buffer" if buffer > 0 else "exakt avg"
                                         logger.info(
                                             f"DCA TP1 → SL=BE: {trade.symbol_display} | "
-                                            f"SL={be_price:.4f} (avg+{config.be_buffer_pct}% buffer)"
+                                            f"SL={be_price:.4f} ({buf_str})"
                                         )
                                     else:
                                         logger.critical(
@@ -443,8 +447,9 @@ async def price_monitor():
                         # Cancel all unfilled TP orders (DCA mode = new TPs from avg)
                         _cancel_unfilled_tps(trade)
 
-                        # Setup new TPs from new average + place on exchange
+                        # Setup new TPs from new average, consolidate, place on exchange
                         trade_mgr.setup_dca_tps(trade)
+                        _consolidate_tp_qtys(trade)
                         _place_dca_tps(trade)
 
                         # Set hard SL only (TPs handle profit taking)
@@ -559,6 +564,65 @@ def _get_bybit_realized_pnl(trade: Trade) -> float | None:
     return total_pnl
 
 
+def _consolidate_tp_qtys(trade: Trade) -> None:
+    """Remove TPs whose qty rounds below exchange min_qty.
+
+    For small positions (e.g., XMR 0.09 coins), TP2/3/4 at 10% each = 0.009
+    which is below min_qty (0.01). These get dropped and their share becomes
+    part of the trailing portion instead.
+
+    Must be called AFTER setup_tp_qtys() or setup_dca_tps(), BEFORE placing orders.
+    """
+    info = bybit.get_instrument_info(trade.symbol)
+    if not info:
+        return
+
+    min_qty = info["min_qty"]
+    qty_step = info["qty_step"]
+
+    valid_indices = []
+    for i, qty in enumerate(trade.tp_close_qtys):
+        rounded = bybit.round_qty(qty, qty_step)
+        if rounded >= min_qty:
+            valid_indices.append(i)
+        else:
+            logger.info(
+                f"TP{i + 1} qty {rounded} < min_qty {min_qty} for {trade.symbol_display}, "
+                f"merging {trade.tp_close_pcts[i]}% into trail"
+            )
+
+    if len(valid_indices) == len(trade.tp_close_qtys):
+        return  # All TPs valid
+
+    if not valid_indices:
+        # ALL TPs too small → trail everything
+        logger.warning(
+            f"ALL TPs below min_qty for {trade.symbol_display}, "
+            f"trailing entire position"
+        )
+        trade.tp_prices = []
+        trade.tp_close_pcts = []
+        trade.tp_close_qtys = []
+        trade.tp_filled = []
+        trade.tp_order_ids = []
+        trade.status = TradeStatus.TRAILING
+        return
+
+    # Keep only valid TPs
+    trade.tp_prices = [trade.tp_prices[i] for i in valid_indices]
+    trade.tp_close_pcts = [trade.tp_close_pcts[i] for i in valid_indices]
+    trade.tp_close_qtys = [trade.tp_close_qtys[i] for i in valid_indices]
+    trade.tp_filled = [False] * len(valid_indices)
+    trade.tp_order_ids = [""] * len(valid_indices)
+
+    trail_pct = 100 - sum(trade.tp_close_pcts)
+    logger.info(
+        f"TPs consolidated: {trade.symbol_display} | "
+        f"{len(valid_indices)}/{len(valid_indices)} valid TPs | "
+        f"Trail: {trail_pct:.0f}%"
+    )
+
+
 def _place_exchange_tps(trade: Trade) -> None:
     """Place Multi-TP reduceOnly limit orders on Bybit after E1 fills.
 
@@ -626,7 +690,7 @@ def _place_dca_tps(trade: Trade) -> None:
     """Place new TP limit orders after DCA fill.
 
     Uses avg-based TP prices set by trade_mgr.setup_dca_tps().
-    TP1=50% at avg+0.75%, TP2=20% at avg+1.5%, remaining 30% trails.
+    TP1=50% at avg+0.5%, TP2=20% at avg+1.25%, remaining 30% trails.
     """
     for i, tp_price in enumerate(trade.tp_prices):
         if i >= len(trade.tp_close_qtys):
@@ -1060,6 +1124,7 @@ async def _recover_and_check_positions():
                     trade_mgr.fill_dca(trade, i, dca_fill_price)
                     _cancel_unfilled_tps(trade)
                     trade_mgr.setup_dca_tps(trade)
+                    _consolidate_tp_qtys(trade)
                     _place_dca_tps(trade)
                     _set_exchange_stops_after_dca(trade)
                     logger.info(

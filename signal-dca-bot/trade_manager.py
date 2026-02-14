@@ -12,9 +12,9 @@ Exit Logic (Strategy C Hybrid SL):
     → All exits are exchange-side (Bybit handles TP/SL/trailing)
 
   DCA1 fills (price dipped to -5% before TP1):
-    → Cancel signal TPs → New TPs from avg: TP1=+0.75% (50%), TP2=+1.5% (20%)
+    → Cancel signal TPs → New TPs from avg: TP1=+0.5% (50%), TP2=+1.25% (20%)
     → Trail remaining 30% with 1% CB after all DCA TPs
-    → Hard SL at DCA-fill+3%, SL→BE(avg) after DCA TP1
+    → Hard SL at DCA-fill+3%, SL→exakt avg (kein buffer) after DCA TP1
 
   Neo Cloud trend switch → close all opposing positions
 """
@@ -472,7 +472,8 @@ class TradeManager:
         """Recalculate TP prices and quantities after DCA fill.
 
         Replaces cancelled signal TPs with avg-based TPs for the full position.
-        DCA TPs: TP1=+0.75%, TP2=+1.5% from new avg, remaining trails.
+        DCA TPs: TP1=+0.5% (rescue), TP2=+1.25% from new avg, remaining trails.
+        SL after DCA TP1 = exakt avg (kein buffer, bei 0.5% TP1 unnötig).
         """
         # New TP prices based on new avg
         trade.tp_prices = []
