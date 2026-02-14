@@ -14,7 +14,8 @@ Exit Logic (Strategy C Hybrid SL):
   DCA1 fills (price dipped to -5% before TP1):
     → Cancel signal TPs → New TPs from avg: TP1=+0.5% (50%), TP2=+1.25% (20%)
     → Trail remaining 30% with 1% CB after all DCA TPs
-    → Hard SL at DCA-fill+3%, SL→exakt avg (kein buffer) after DCA TP1
+    → Hard SL at DCA-fill+3% → Quick-Trail to avg+0.5% once +0.5% reached
+    → DCA TP1 fills → SL to exakt avg
 
   Neo Cloud trend switch → close all opposing positions
 """
@@ -89,6 +90,9 @@ class Trade:
     be_trail_active: bool = False    # Activated when price returns to avg
     be_trail_peak: float = 0.0      # Peak since BE-trail activated
 
+    # DCA Quick-Trail: tighten SL once bounce confirms (+0.5%)
+    quick_trail_active: bool = False  # True = SL already tightened from -3% to avg+0.5%
+
     # Hard SL
     hard_sl_price: float = 0.0
 
@@ -162,6 +166,7 @@ def trade_to_dict(trade: Trade) -> dict:
         "total_tp_closed_qty": trade.total_tp_closed_qty,
         "be_trail_active": trade.be_trail_active,
         "be_trail_peak": trade.be_trail_peak,
+        "quick_trail_active": trade.quick_trail_active,
         "hard_sl_price": trade.hard_sl_price,
         "dca_order_ids": trade.dca_order_ids,
         "opened_at": trade.opened_at,
@@ -209,6 +214,7 @@ def trade_from_dict(data: dict) -> Trade:
         total_tp_closed_qty=data.get("total_tp_closed_qty", 0),
         be_trail_active=data.get("be_trail_active", False),
         be_trail_peak=data.get("be_trail_peak", 0),
+        quick_trail_active=data.get("quick_trail_active", False),
         hard_sl_price=data.get("hard_sl_price", 0),
         dca_order_ids=data.get("dca_order_ids", []),
         opened_at=data.get("opened_at", 0),

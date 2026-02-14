@@ -80,9 +80,17 @@ class BotConfig:
     dca_trail_callback_pct: float = 1.0  # 1% CB trail for remaining 30% after DCA TPs
     dca_be_buffer_pct: float = 0.0  # No buffer for DCA SL→BE (0.5% TP1 is tight enough)
 
+    # ── DCA Quick-Trail (tighten SL once bounce confirms) ──
+    # After DCA fills, SL starts at deepest_fill+3%. Once price moves 0.5%
+    # in our favor → SL tightens to avg+0.5% buffer. Reduces loss from ~4.7%
+    # equity to ~1.1% equity per stop-out, while keeping -3% as safety net.
+    dca_quick_trail_trigger_pct: float = 0.5  # Trail when price moves 0.5% in our favor
+    dca_quick_trail_buffer_pct: float = 0.5   # SL at avg + 0.5% (against us)
+
     # ── Stop Loss (two-tier) ──
     # Pre-DCA: safety SL at entry-10% (wide, gives DCA room to fill)
     # Post-DCA: hard SL at avg-3% (tight, protects averaged position)
+    # Post-DCA + quick trail: SL at avg+0.5% (once bounce confirms)
     safety_sl_pct: float = 10.0   # Initial SL before DCA fills (entry-10%)
     hard_sl_pct: float = 3.0      # SL after DCA fills (avg-3%)
 
@@ -180,6 +188,7 @@ class BotConfig:
         print(f"║  DCA Exit:       {dca_tp_str} from avg, trail {dca_trail_pct}% @{self.dca_trail_callback_pct}%CB")
         print(f"║  Safety SL:      Entry - {self.safety_sl_pct}% (pre-DCA)")
         print(f"║  Hard SL:        Avg - {self.hard_sl_pct}% (post-DCA)")
+        print(f"║  Quick Trail:    +{self.dca_quick_trail_trigger_pct}% → SL=avg+{self.dca_quick_trail_buffer_pct}%")
         print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")
         print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")

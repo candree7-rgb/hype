@@ -13,7 +13,9 @@ Architecture:
        → TP4 fills: trailing 20% (1% CB) with SL floor at TP1
      - DCA fills (before TP1): cancel signal TPs, place new TPs from avg
        → DCA TP1=+0.5% (50%), TP2=+1.25% (20%), trail 30% @1%CB
-       → Hard SL at DCA-fill+3%, SL→exakt avg (kein buffer) after DCA TP1
+       → Hard SL at DCA-fill+3% (safety net)
+       → Quick-Trail: +0.5% move → SL tightens to avg+0.5% (~1.1% eq risk)
+       → DCA TP1 fills → SL to exakt avg
      - Detect position close (SL/trailing triggered by Bybit)
   3. Zone Refresh every 15min: auto-calc swing H/L for active symbols
   4. Neo Cloud trend switch: close opposing positions on /signal/trend-switch
@@ -234,6 +236,7 @@ async def price_monitor():
     - After TP3: SL → TP1 price (lock partial profit)
     - After TP4: trailing stop 1% CB on remaining 20%, SL floor at TP1
     - DCA fills (before TP1): cancel signal TPs, new TPs from avg (0.5%/1.25%), hard SL at DCA-fill+3%
+    - DCA Quick-Trail: once price moves +0.5% from avg → SL tightens to avg+0.5% buffer
     """
     logger.info("Price monitor started (Multi-TP)")
 
@@ -461,6 +464,50 @@ async def price_monitor():
                             f"New avg: {trade.avg_price:.4f} | DCA {trade.current_dca}/{trade.max_dca}"
                         )
                         break  # One DCA per cycle
+
+                # ── 2b. DCA Quick-Trail: tighten SL once bounce confirms ──
+                # After DCA fills, SL is at deepest_fill+3% (~4.7% equity risk).
+                # Once price moves 0.5% in our favor → tighten SL to avg+0.5%
+                # (~1.1% equity risk). Keeps -3% as safety net until bounce confirms.
+                if (trade.status == TradeStatus.DCA_ACTIVE
+                        and trade.current_dca > 0
+                        and not trade.quick_trail_active
+                        and trade.tps_hit == 0):
+                    current_price = bybit.get_ticker_price(trade.symbol)
+                    if current_price:
+                        trigger_pct = config.dca_quick_trail_trigger_pct / 100
+                        if trade.side == "long":
+                            trigger_price = trade.avg_price * (1 + trigger_pct)
+                            price_in_favor = current_price >= trigger_price
+                        else:
+                            trigger_price = trade.avg_price * (1 - trigger_pct)
+                            price_in_favor = current_price <= trigger_price
+
+                        if price_in_favor:
+                            buffer_pct = config.dca_quick_trail_buffer_pct / 100
+                            if trade.side == "long":
+                                new_sl = trade.avg_price * (1 - buffer_pct)
+                            else:
+                                new_sl = trade.avg_price * (1 + buffer_pct)
+                            sl_ok = bybit.set_trading_stop(
+                                trade.symbol, trade.side,
+                                stop_loss=new_sl,
+                            )
+                            trade.hard_sl_price = new_sl
+                            trade.quick_trail_active = True
+                            trade_mgr.persist_trade(trade)
+                            if sl_ok:
+                                logger.info(
+                                    f"DCA Quick-Trail: {trade.symbol_display} | "
+                                    f"Price {current_price:.4f} moved +{config.dca_quick_trail_trigger_pct}% | "
+                                    f"SL tightened: {new_sl:.4f} (avg+{config.dca_quick_trail_buffer_pct}% buffer) | "
+                                    f"Risk reduced from ~{config.hard_sl_pct}% to ~{config.dca_quick_trail_buffer_pct}%"
+                                )
+                            else:
+                                logger.critical(
+                                    f"DCA Quick-Trail FAILED: {trade.symbol_display} | "
+                                    f"SL={new_sl:.4f} NOT VERIFIED! Safety monitor will retry"
+                                )
 
                 # ── 3. Detect position closed by exchange (SL/trailing triggered) ──
                 if trade.status in (TradeStatus.TRAILING, TradeStatus.BE_TRAILING,
