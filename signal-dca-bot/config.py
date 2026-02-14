@@ -56,6 +56,7 @@ class BotConfig:
         default_factory=lambda: [0, 5]
     )
     max_dca_levels: int = 1  # 1 DCA = total 2 entries (E1 + DCA1)
+    dca_limit_buffer_pct: float = 0.2  # 0.2% buffer on DCA limit (deeper into zone, 1-candle lag compensation)
 
     # ── Multi-TP (E1-only mode, uses signal targets) ──
     # Close portions at signal's TP1-TP4 price targets.
@@ -141,14 +142,20 @@ class BotConfig:
         return self.e1_margin(equity) * self.dca_multipliers[level]
 
     def dca_price(self, entry_price: float, level: int, side: str) -> float:
-        """Price at which a DCA level triggers."""
+        """Price at which a DCA level triggers.
+
+        Includes limit buffer (0.2%) to push limit deeper into zone,
+        compensating for 1-candle lag from NEOCloud zone data.
+        Long: 0.2% lower, Short: 0.2% higher.
+        """
         if level == 0:
             return entry_price
         pct = self.dca_spacing_pct[level] / 100
+        buf = self.dca_limit_buffer_pct / 100
         if side == "long":
-            return entry_price * (1 - pct)
+            return entry_price * (1 - pct) * (1 - buf)
         else:
-            return entry_price * (1 + pct)
+            return entry_price * (1 + pct) * (1 + buf)
 
     def print_summary(self, equity: float = 2400):
         """Print configuration summary with example equity."""
@@ -171,7 +178,7 @@ class BotConfig:
         print(f"║  Max Trades:     {self.max_simultaneous_trades}")
         print(f"║")
         print(f"║  DCA:            {self.max_dca_levels} DCA {self.dca_multipliers[:self.max_dca_levels+1]} (sum={sm})")
-        print(f"║  DCA Spacing:    {self.dca_spacing_pct[:self.max_dca_levels+1]}%")
+        print(f"║  DCA Spacing:    {self.dca_spacing_pct[:self.max_dca_levels+1]}% (+{self.dca_limit_buffer_pct}% limit buffer)")
         print(f"║  E1 Notional:    ${e1n:.0f}")
         print(f"║")
         print(f"║  Multi-TP (signal targets):")

@@ -185,6 +185,7 @@ async def execute_signal(signal: Signal) -> dict:
             smart_levels = calc_smart_dca_levels(
                 signal.entry_price, config.dca_spacing_pct, zones, signal.side,
                 snap_min_pct=config.zone_snap_min_pct,
+                limit_buffer_pct=config.dca_limit_buffer_pct,
             )
             for i, (price, source) in enumerate(smart_levels):
                 if i < len(trade.dca_levels) and source not in ("entry", "fixed", "filled"):
@@ -877,6 +878,7 @@ async def resnap_active_dcas(symbol: str):
             trade.signal_entry, config.dca_spacing_pct, zones, trade.side,
             snap_min_pct=config.zone_snap_min_pct,
             filled_levels=filled_mask,
+            limit_buffer_pct=config.dca_limit_buffer_pct,
         )
 
         for i, (new_price, source) in enumerate(smart_levels):
