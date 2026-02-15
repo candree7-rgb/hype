@@ -106,8 +106,9 @@ class Trade:
     # P&L
     realized_pnl: float = 0.0
 
-    # Trail analysis: price-% from avg to trail close (universal, ignores size/lev)
-    # Positive = trail captured profit, negative = trail hit SL below avg
+    # Trail analysis: trail contribution as % of margin (total_pnl - tp_pnl) / margin
+    # Positive = trail captured extra profit, negative = trail lost (SL hit)
+    # Universal: comparable across trades regardless of position size
     trail_pnl_pct: float = 0.0
 
     # Equity snapshot (for PnL % calculation)
@@ -568,15 +569,16 @@ class TradeManager:
 
         trade.status = TradeStatus.CLOSED
         trade.closed_at = time.time()
-        trade.realized_pnl = pnl
 
-        # Calculate trail_pnl_pct: price-% from avg to close (for remaining/trail qty)
-        # Universal metric: positive = trail captured profit, negative = SL below avg
-        if was_filled and trade.avg_price > 0:
-            if trade.side == "long":
-                trade.trail_pnl_pct = (close_price - trade.avg_price) / trade.avg_price * 100
-            else:
-                trade.trail_pnl_pct = (trade.avg_price - close_price) / trade.avg_price * 100
+        # Calculate trail_pnl_pct: trail contribution = total PnL minus TP PnL
+        # trade.realized_pnl has accumulated TP fills from record_tp_fill() before this call
+        # pnl = total trade PnL from Bybit (includes TPs + trail/SL close)
+        if was_filled and trade.total_margin > 0:
+            tp_pnl = trade.realized_pnl  # sum of TP fill PnLs (before overwrite)
+            trail_pnl = pnl - tp_pnl      # what the remaining trail portion added/lost
+            trade.trail_pnl_pct = trail_pnl / trade.total_margin * 100
+
+        trade.realized_pnl = pnl
 
         if was_filled:
             if pnl > 0.01:
