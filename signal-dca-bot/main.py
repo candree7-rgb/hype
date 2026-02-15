@@ -281,6 +281,18 @@ async def price_monitor():
                     await asyncio.sleep(0.2)
                     continue
 
+                # ── 0b. Check scale-in limit fill ──
+                if trade.scale_in_pending and trade.scale_in_order_id:
+                    si_filled, si_fill_price = bybit.check_order_filled(
+                        trade.symbol, trade.scale_in_order_id
+                    )
+                    if si_filled:
+                        trade.scale_in_price = si_fill_price
+                        _complete_scale_in(trade)
+                        logger.info(
+                            f"Scale-in filled: {trade.symbol_display} @ {si_fill_price:.4f}"
+                        )
+
                 # ── 1. Check Multi-TP fills (exchange-side limit orders) ──
                 # Works for both E1 mode (signal TPs) and DCA mode (avg-based TPs)
                 if trade.status in (TradeStatus.OPEN, TradeStatus.DCA_ACTIVE):
@@ -387,9 +399,10 @@ async def price_monitor():
                                     # TP2: Scale-in (if enabled + no DCA) or SL stays at BE
                                     if (config.scale_in_enabled
                                             and trade.current_dca == 0
-                                            and not trade.scale_in_filled):
-                                        # 2/3 Pyramiding: add another 1/3 position
-                                        await _execute_scale_in(trade, tp_fill_price)
+                                            and not trade.scale_in_filled
+                                            and not trade.scale_in_pending):
+                                        # 2/3 Pyramiding: place limit at TP2 price
+                                        _place_scale_in_limit(trade, tp_fill_price)
                                     else:
                                         # DCA already filled or scale-in disabled → SL stays
                                         trade_mgr.persist_trade(trade)
@@ -644,51 +657,81 @@ def _get_bybit_realized_pnl(trade: Trade) -> float | None:
     return total_pnl
 
 
-async def _execute_scale_in(trade: Trade, tp2_fill_price: float) -> None:
-    """Execute 2/3 pyramiding scale-in after TP2 fills.
+def _place_scale_in_limit(trade: Trade, tp2_fill_price: float) -> None:
+    """Place scale-in LIMIT order after TP2 fills.
 
-    1. Calculate scale-in qty (same as E1 margin * leverage / current price)
-    2. Place market order (same direction, adds to position)
-    3. Update avg_price, total_qty from Bybit position
-    4. Cancel unfilled TP3/TP4 → recalculate quantities → replace orders
-    5. Set SL to exact new avg (no buffer, zero risk)
+    Places limit at TP2 price. Fill is checked by price_monitor on next cycle.
+    If filled → _complete_scale_in() handles avg update, TP recalc, SL.
+    If not filled (price moved away) → trade continues with BE SL, no scale-in.
     """
-    # Calculate scale-in size: same margin as E1 (1x multiplier)
     e1 = trade.dca_levels[0]
     scale_in_margin = e1.margin  # Same 1/3 budget as E1
     scale_in_qty = scale_in_margin * trade.leverage / tp2_fill_price
 
     logger.info(
-        f"Scale-in starting: {trade.symbol_display} | "
-        f"Adding {scale_in_qty:.6f} coins (${scale_in_margin:.2f} margin) | "
+        f"Scale-in limit placing: {trade.symbol_display} | "
+        f"{scale_in_qty:.6f} coins @ {tp2_fill_price:.4f} "
+        f"(${scale_in_margin:.2f} margin) | "
         f"Current remaining: {trade.remaining_qty:.6f}"
     )
 
-    # Place market order
-    success, new_bybit_avg, new_bybit_size = bybit.place_scale_in_order(
-        trade, scale_in_qty
+    order_id, rounded_qty = bybit.place_scale_in_order(
+        trade, scale_in_qty, limit_price=tp2_fill_price
     )
 
-    if not success:
-        # Scale-in failed → fall back to original TP2 behavior (SL stays at BE)
+    if not order_id:
         logger.error(
-            f"Scale-in FAILED: {trade.symbol_display} | "
-            f"Falling back to SL stays at BE={trade.hard_sl_price:.4f}"
+            f"Scale-in limit FAILED: {trade.symbol_display} | "
+            f"SL stays at BE={trade.hard_sl_price:.4f}"
         )
         trade_mgr.persist_trade(trade)
         return
 
-    # Record scale-in fill (uses Bybit's avg as fill reference)
-    # actual_qty = new total size - our tracked total (accounts for TP closes)
-    actual_added = new_bybit_size - trade.remaining_qty if new_bybit_size > 0 else scale_in_qty
+    trade.scale_in_pending = True
+    trade.scale_in_order_id = order_id
+    trade.scale_in_margin = scale_in_margin
+    trade.scale_in_qty = rounded_qty  # Expected qty (updated on fill)
+    trade_mgr.persist_trade(trade)
+
+    logger.info(
+        f"TP2 → Scale-in limit placed: {trade.symbol_display} | "
+        f"Order: {order_id} | {rounded_qty} @ {tp2_fill_price:.4f} | "
+        f"SL stays at BE until fill"
+    )
+
+
+def _complete_scale_in(trade: Trade) -> None:
+    """Complete scale-in after limit order fills.
+
+    Called by price_monitor when scale_in_order_id is detected as filled.
+    1. Record fill → update avg, qty
+    2. Use Bybit position avg as source of truth
+    3. Cancel unfilled TP3/TP4 → recalculate quantities → replace
+    4. Set SL to exact new avg (no buffer, zero risk)
+    """
+    # Get actual position from Bybit (source of truth for avg + size)
+    pos = bybit.get_position(trade.symbol)
+    if not pos:
+        logger.error(f"Scale-in complete: position not found for {trade.symbol}")
+        return
+
+    new_bybit_avg = pos["avg_price"]
+    new_bybit_size = pos["size"]
+
+    # Calculate actual added qty
+    actual_added = new_bybit_size - trade.remaining_qty
     if actual_added <= 0:
-        actual_added = scale_in_qty  # Fallback
+        actual_added = trade.scale_in_qty  # Fallback to expected qty
 
-    trade_mgr.fill_scale_in(trade, tp2_fill_price, actual_added, scale_in_margin)
+    fill_price = trade.scale_in_price if trade.scale_in_price > 0 else new_bybit_avg
 
-    # Use Bybit's avg as source of truth (includes all fills)
+    trade_mgr.fill_scale_in(trade, fill_price, actual_added, trade.scale_in_margin)
+
+    # Use Bybit's avg as source of truth
     if new_bybit_avg > 0:
         trade.avg_price = new_bybit_avg
+
+    trade.scale_in_pending = False
 
     # Cancel unfilled TP3/TP4 orders
     for i in range(len(trade.tp_order_ids)):
@@ -719,7 +762,7 @@ async def _execute_scale_in(trade: Trade, tp2_fill_price: float) -> None:
     )
 
     # Set SL to exact new avg (no buffer, zero risk on scale-in)
-    sl_price = trade.avg_price  # Exakt avg, kein buffer
+    sl_price = trade.avg_price
     sl_ok = bybit.set_trading_stop(
         trade.symbol, trade.side,
         stop_loss=sl_price,
@@ -729,7 +772,7 @@ async def _execute_scale_in(trade: Trade, tp2_fill_price: float) -> None:
 
     if sl_ok:
         logger.info(
-            f"TP2 → Scale-in + SL=Avg: {trade.symbol_display} | "
+            f"Scale-in complete → SL=Avg: {trade.symbol_display} | "
             f"SL={sl_price:.4f} (exakt avg, zero risk) | "
             f"+{actual_added:.6f} coins | New avg: {trade.avg_price:.4f}"
         )

@@ -96,6 +96,8 @@ class Trade:
     quick_trail_active: bool = False  # True = SL already tightened from -3% to avg+0.5%
 
     # 2/3 Pyramiding (scale-in at TP2)
+    scale_in_pending: bool = False    # True = limit order placed, waiting for fill
+    scale_in_order_id: str = ""       # Bybit order ID for scale-in limit
     scale_in_filled: bool = False     # True = scale-in executed at TP2
     scale_in_qty: float = 0.0        # Qty added via scale-in (coin units)
     scale_in_price: float = 0.0      # Fill price of scale-in order
@@ -180,6 +182,8 @@ def trade_to_dict(trade: Trade) -> dict:
         "be_trail_active": trade.be_trail_active,
         "be_trail_peak": trade.be_trail_peak,
         "quick_trail_active": trade.quick_trail_active,
+        "scale_in_pending": trade.scale_in_pending,
+        "scale_in_order_id": trade.scale_in_order_id,
         "scale_in_filled": trade.scale_in_filled,
         "scale_in_qty": trade.scale_in_qty,
         "scale_in_price": trade.scale_in_price,
@@ -233,6 +237,8 @@ def trade_from_dict(data: dict) -> Trade:
         be_trail_active=data.get("be_trail_active", False),
         be_trail_peak=data.get("be_trail_peak", 0),
         quick_trail_active=data.get("quick_trail_active", False),
+        scale_in_pending=data.get("scale_in_pending", False),
+        scale_in_order_id=data.get("scale_in_order_id", ""),
         scale_in_filled=data.get("scale_in_filled", False),
         scale_in_qty=data.get("scale_in_qty", 0),
         scale_in_price=data.get("scale_in_price", 0),
