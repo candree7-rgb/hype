@@ -787,11 +787,8 @@ def _consolidate_tp_qtys(trade: Trade) -> None:
     """Remove TPs whose qty rounds below exchange min_qty.
 
     For small positions (e.g., XMR 0.09 coins), TP2/3/4 at 10% each = 0.009
-    which is below min_qty (0.01). These get dropped and their share is
-    redistributed to the last valid TP.
-
-    Safety: If only TP1 survives, it closes 100% of the position — no orphaned
-    qty left without exit orders that could give back TP1 profits.
+    which is below min_qty (0.01). These get dropped and their share becomes
+    part of the trailing portion instead.
 
     Must be called AFTER setup_tp_qtys() or setup_dca_tps(), BEFORE placing orders.
     """
@@ -803,18 +800,14 @@ def _consolidate_tp_qtys(trade: Trade) -> None:
     qty_step = info["qty_step"]
 
     valid_indices = []
-    removed_qty = 0.0
-    removed_pct = 0.0
     for i, qty in enumerate(trade.tp_close_qtys):
         rounded = bybit.round_qty(qty, qty_step)
         if rounded >= min_qty:
             valid_indices.append(i)
         else:
-            removed_qty += qty
-            removed_pct += trade.tp_close_pcts[i]
             logger.info(
                 f"TP{i + 1} qty {rounded} < min_qty {min_qty} for {trade.symbol_display}, "
-                f"removing ({trade.tp_close_pcts[i]}%)"
+                f"merging {trade.tp_close_pcts[i]}% into trail"
             )
 
     if len(valid_indices) == len(trade.tp_close_qtys):
@@ -841,25 +834,10 @@ def _consolidate_tp_qtys(trade: Trade) -> None:
     trade.tp_filled = [False] * len(valid_indices)
     trade.tp_order_ids = [""] * len(valid_indices)
 
-    # ── Safety: redistribute removed qty to last valid TP ──
-    # Instead of leaving orphaned qty for trailing (risky with small positions),
-    # add removed TPs' qty to the last valid TP. This ensures all position qty
-    # has actual limit orders covering it.
-    # e.g., if only TP1 survives → TP1 closes 100% instead of 50% + risky trail.
-    if removed_qty > 0:
-        last = len(trade.tp_close_qtys) - 1
-        trade.tp_close_qtys[last] += removed_qty
-        trade.tp_close_pcts[last] += removed_pct
-        logger.info(
-            f"Safety: {trade.symbol_display} | Redistributed {removed_pct:.0f}% "
-            f"({removed_qty:.6f} qty) to TP{valid_indices[last] + 1} → "
-            f"now {trade.tp_close_pcts[last]:.0f}%"
-        )
-
     trail_pct = 100 - sum(trade.tp_close_pcts)
     logger.info(
         f"TPs consolidated: {trade.symbol_display} | "
-        f"{len(valid_indices)} valid TPs | "
+        f"{len(valid_indices)}/{len(valid_indices)} valid TPs | "
         f"Trail: {trail_pct:.0f}%"
     )
 
