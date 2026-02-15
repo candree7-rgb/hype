@@ -1,5 +1,5 @@
 """
-Signal DCA Bot v2 - Multi-TP Strategy (Two-Tier SL)
+Signal DCA Bot v2 - Multi-TP Strategy with 2/3 Pyramiding
 
 Architecture:
   1. Signal in (webhook/telegram) → parse → batch buffer → execute
@@ -7,10 +7,11 @@ Architecture:
      - PENDING: check E1 fill, timeout
      - OPEN: Safety SL at entry-10% (gives DCA room)
        → check TP1-4 fills (reduceOnly limits on Bybit)
-       → TP1 fills: SL → breakeven, cancel DCA orders
-       → TP2 fills: SL stays at BE (room for runners)
-       → TP3 fills: SL → TP1 price (lock profit)
-       → TP4 fills: trailing 20% (1% CB) with SL floor at TP1
+       → TP1 fills: SL → BE + 0.1% buffer, cancel DCA orders
+       → TP2 fills: Scale-in 1/3 more (if no DCA) + SL = exakt new Avg
+         → Cancel TP3/TP4, recalculate quantities, replace orders
+       → TP3 fills: SL → TP2 price (profit lock)
+       → TP4 fills: trailing (1% CB)
      - DCA fills (before TP1): cancel signal TPs, place new TPs from avg
        → DCA TP1=+0.5% (50%), TP2=+1.25% (20%), trail 30% @1%CB
        → Hard SL at DCA-fill+3% (safety net)
@@ -229,13 +230,15 @@ async def execute_signal(signal: Signal) -> dict:
 async def price_monitor():
     """Background task: poll order fills and detect exchange-side closes.
 
-    Strategy C Hybrid SL (all exits exchange-side):
+    SL Ladder with 2/3 Pyramiding (all exits exchange-side):
     - Safety SL at entry-10% initially (gives DCA room to fill at -5%)
-    - TP1-4: reduceOnly limit orders at signal targets (50/10/10/10%)
-    - After TP1: SL → breakeven, cancel DCA orders
-    - After TP2: SL stays at BE (let runners breathe through pullbacks)
-    - After TP3: SL → TP1 price (lock partial profit)
-    - After TP4: trailing stop 1% CB on remaining 20%, SL floor at TP1
+    - TP1-4: reduceOnly limit orders at signal targets (50/10/20/10%)
+    - After TP1: SL → BE + 0.1% buffer, cancel DCA orders
+    - After TP2: Scale-in 1/3 more (if no DCA) → SL = exakt new Avg (zero risk)
+      → Cancel TP3/TP4, recalculate quantities for new position size
+    - After TP3: SL → TP2 price (profit lock)
+    - After TP4: trailing stop 1% CB on remaining
+    - If DCA already filled: no scale-in, SL stays at BE after TP2
     - DCA fills (before TP1): cancel signal TPs, new TPs from avg (0.5%/1.25%), hard SL at DCA-fill+3%
     - DCA Quick-Trail: once price moves +0.5% from avg → SL tightens to avg+0.5% buffer
     """
@@ -381,38 +384,67 @@ async def price_monitor():
                                         )
 
                                 elif tp_idx == 1:
-                                    # TP2: SL stays at BE → let runners breathe
-                                    trade_mgr.persist_trade(trade)
-                                    logger.info(
-                                        f"TP2 filled: {trade.symbol_display} | "
-                                        f"SL stays at BE={trade.hard_sl_price:.4f} (room for runners)"
-                                    )
+                                    # TP2: Scale-in (if enabled + no DCA) or SL stays at BE
+                                    if (config.scale_in_enabled
+                                            and trade.current_dca == 0
+                                            and not trade.scale_in_filled):
+                                        # 2/3 Pyramiding: add another 1/3 position
+                                        await _execute_scale_in(trade, tp_fill_price)
+                                    else:
+                                        # DCA already filled or scale-in disabled → SL stays
+                                        trade_mgr.persist_trade(trade)
+                                        logger.info(
+                                            f"TP2 filled: {trade.symbol_display} | "
+                                            f"SL stays at BE={trade.hard_sl_price:.4f} "
+                                            f"(DCA active or scale-in disabled)"
+                                        )
 
                                 elif tp_idx == 2:
-                                    # TP3: SL → TP1 price (lock profit, but not too tight)
-                                    tp1_price = trade.tp_prices[0]
-                                    sl_ok = bybit.set_trading_stop(
-                                        trade.symbol, trade.side,
-                                        stop_loss=tp1_price,
-                                    )
-                                    trade.hard_sl_price = tp1_price
-                                    trade_mgr.persist_trade(trade)
-                                    if sl_ok:
-                                        logger.info(
-                                            f"TP3 → SL=TP1: {trade.symbol_display} | "
-                                            f"SL={tp1_price:.4f} (profit locked)"
+                                    # TP3: SL → TP2 price (if scale-in) or TP1 (no scale-in)
+                                    if trade.scale_in_filled:
+                                        # Scale-in active: SL to TP2 price (profit lock)
+                                        tp2_price = trade.tp_prices[1]
+                                        sl_ok = bybit.set_trading_stop(
+                                            trade.symbol, trade.side,
+                                            stop_loss=tp2_price,
                                         )
+                                        trade.hard_sl_price = tp2_price
+                                        trade_mgr.persist_trade(trade)
+                                        if sl_ok:
+                                            logger.info(
+                                                f"TP3 → SL=TP2: {trade.symbol_display} | "
+                                                f"SL={tp2_price:.4f} (scale-in profit locked)"
+                                            )
+                                        else:
+                                            logger.critical(
+                                                f"TP3 → SL=TP2 FAILED: {trade.symbol_display} | "
+                                                f"SL={tp2_price:.4f} NOT VERIFIED! "
+                                                f"Safety monitor will retry in 30s"
+                                            )
                                     else:
-                                        logger.critical(
-                                            f"TP3 → SL=TP1 FAILED: {trade.symbol_display} | "
-                                            f"SL={tp1_price:.4f} NOT VERIFIED! "
-                                            f"Safety monitor will retry in 30s"
+                                        # No scale-in: SL to TP1 price (original behavior)
+                                        tp1_price = trade.tp_prices[0]
+                                        sl_ok = bybit.set_trading_stop(
+                                            trade.symbol, trade.side,
+                                            stop_loss=tp1_price,
                                         )
+                                        trade.hard_sl_price = tp1_price
+                                        trade_mgr.persist_trade(trade)
+                                        if sl_ok:
+                                            logger.info(
+                                                f"TP3 → SL=TP1: {trade.symbol_display} | "
+                                                f"SL={tp1_price:.4f} (profit locked, no scale-in)"
+                                            )
+                                        else:
+                                            logger.critical(
+                                                f"TP3 → SL=TP1 FAILED: {trade.symbol_display} | "
+                                                f"SL={tp1_price:.4f} NOT VERIFIED! "
+                                                f"Safety monitor will retry in 30s"
+                                            )
 
                                 # After last E1 TP (TP4): activate trailing on remaining
                                 if all(trade.tp_filled):
                                     trail_dist = tp_fill_price * config.trailing_callback_pct / 100
-                                    # Keep SL at TP1 as floor + add trailing
                                     sl_ok = bybit.set_trading_stop(
                                         trade.symbol, trade.side,
                                         stop_loss=trade.hard_sl_price,
@@ -610,6 +642,102 @@ def _get_bybit_realized_pnl(trade: Trade) -> float | None:
         f"PnL: ${total_pnl:+.4f}"
     )
     return total_pnl
+
+
+async def _execute_scale_in(trade: Trade, tp2_fill_price: float) -> None:
+    """Execute 2/3 pyramiding scale-in after TP2 fills.
+
+    1. Calculate scale-in qty (same as E1 margin * leverage / current price)
+    2. Place market order (same direction, adds to position)
+    3. Update avg_price, total_qty from Bybit position
+    4. Cancel unfilled TP3/TP4 → recalculate quantities → replace orders
+    5. Set SL to exact new avg (no buffer, zero risk)
+    """
+    # Calculate scale-in size: same margin as E1 (1x multiplier)
+    e1 = trade.dca_levels[0]
+    scale_in_margin = e1.margin  # Same 1/3 budget as E1
+    scale_in_qty = scale_in_margin * trade.leverage / tp2_fill_price
+
+    logger.info(
+        f"Scale-in starting: {trade.symbol_display} | "
+        f"Adding {scale_in_qty:.6f} coins (${scale_in_margin:.2f} margin) | "
+        f"Current remaining: {trade.remaining_qty:.6f}"
+    )
+
+    # Place market order
+    success, new_bybit_avg, new_bybit_size = bybit.place_scale_in_order(
+        trade, scale_in_qty
+    )
+
+    if not success:
+        # Scale-in failed → fall back to original TP2 behavior (SL stays at BE)
+        logger.error(
+            f"Scale-in FAILED: {trade.symbol_display} | "
+            f"Falling back to SL stays at BE={trade.hard_sl_price:.4f}"
+        )
+        trade_mgr.persist_trade(trade)
+        return
+
+    # Record scale-in fill (uses Bybit's avg as fill reference)
+    # actual_qty = new total size - our tracked total (accounts for TP closes)
+    actual_added = new_bybit_size - trade.remaining_qty if new_bybit_size > 0 else scale_in_qty
+    if actual_added <= 0:
+        actual_added = scale_in_qty  # Fallback
+
+    trade_mgr.fill_scale_in(trade, tp2_fill_price, actual_added, scale_in_margin)
+
+    # Use Bybit's avg as source of truth (includes all fills)
+    if new_bybit_avg > 0:
+        trade.avg_price = new_bybit_avg
+
+    # Cancel unfilled TP3/TP4 orders
+    for i in range(len(trade.tp_order_ids)):
+        if not trade.tp_filled[i] and trade.tp_order_ids[i]:
+            bybit.cancel_order(trade.symbol, trade.tp_order_ids[i])
+            trade.tp_order_ids[i] = ""
+    logger.info(f"Unfilled TPs cancelled for recalculation: {trade.symbol_display}")
+
+    # Recalculate TP quantities for new position size
+    trade_mgr.recalc_tps_after_scale_in(trade)
+
+    # Consolidate (drop TPs below min_qty) and place new orders
+    _consolidate_tp_qtys(trade)
+    for i in range(len(trade.tp_prices)):
+        if trade.tp_filled[i] or not trade.tp_close_qtys[i]:
+            continue
+        order_id = bybit.place_tp_order(
+            trade, trade.tp_prices[i], trade.tp_close_qtys[i],
+            tp_num=i + 1, tag="STP"  # STP = Scale-in TP
+        )
+        if order_id:
+            trade.tp_order_ids[i] = order_id
+
+    placed = sum(1 for i, oid in enumerate(trade.tp_order_ids) if oid and not trade.tp_filled[i])
+    logger.info(
+        f"Scale-in TPs placed: {trade.symbol_display} | "
+        f"{placed} new TPs | Remaining: {trade.remaining_qty:.6f}"
+    )
+
+    # Set SL to exact new avg (no buffer, zero risk on scale-in)
+    sl_price = trade.avg_price  # Exakt avg, kein buffer
+    sl_ok = bybit.set_trading_stop(
+        trade.symbol, trade.side,
+        stop_loss=sl_price,
+    )
+    trade.hard_sl_price = sl_price
+    trade_mgr.persist_trade(trade)
+
+    if sl_ok:
+        logger.info(
+            f"TP2 → Scale-in + SL=Avg: {trade.symbol_display} | "
+            f"SL={sl_price:.4f} (exakt avg, zero risk) | "
+            f"+{actual_added:.6f} coins | New avg: {trade.avg_price:.4f}"
+        )
+    else:
+        logger.critical(
+            f"Scale-in SL FAILED: {trade.symbol_display} | "
+            f"SL={sl_price:.4f} NOT VERIFIED! Safety monitor will retry"
+        )
 
 
 def _consolidate_tp_qtys(trade: Trade) -> None:
@@ -1110,30 +1238,41 @@ async def _recover_and_check_positions():
                                 f"SL={trade.hard_sl_price:.4f} NOT VERIFIED!"
                             )
                     elif highest_tp >= 2:
-                        # TP3+: SL → TP1 price (Strategy C)
-                        tp1_price = trade.tp_prices[0]
+                        # TP3+: SL → TP2 price (if scale-in) or TP1 price (no scale-in)
+                        if trade.scale_in_filled:
+                            sl_target = trade.tp_prices[1]  # TP2 price
+                            sl_label = "TP2 (scale-in)"
+                        else:
+                            sl_target = trade.tp_prices[0]  # TP1 price
+                            sl_label = "TP1"
                         sl_ok = bybit.set_trading_stop(
                             trade.symbol, trade.side,
-                            stop_loss=tp1_price,
+                            stop_loss=sl_target,
                         )
-                        trade.hard_sl_price = tp1_price
-                        # Cancel DCAs if not done yet
+                        trade.hard_sl_price = sl_target
                         for dca in trade.dca_levels[1:]:
                             if dca.order_id and not dca.filled:
                                 bybit.cancel_order(trade.symbol, dca.order_id)
                                 dca.order_id = ""
                         if sl_ok:
                             logger.info(
-                                f"RECOVERY: TP{highest_tp+1}→SL=TP1: {trade.symbol_display} | "
-                                f"SL={tp1_price:.4f}"
+                                f"RECOVERY: TP{highest_tp+1}→SL={sl_label}: {trade.symbol_display} | "
+                                f"SL={sl_target:.4f}"
                             )
                         else:
                             logger.critical(
-                                f"RECOVERY: TP{highest_tp+1}→SL=TP1 FAILED: "
-                                f"{trade.symbol_display} | SL={tp1_price:.4f} NOT VERIFIED!"
+                                f"RECOVERY: TP{highest_tp+1}→SL={sl_label} FAILED: "
+                                f"{trade.symbol_display} | SL={sl_target:.4f} NOT VERIFIED!"
                             )
                     elif highest_tp <= 1 and config.sl_to_be_after_tp1:
-                        # TP1 or TP2: SL stays at BE + 0.1% buffer (Strategy C)
+                        # TP1 or TP2: SL at BE + 0.1% buffer
+                        # Note: if TP2 filled during downtime, scale-in is SKIPPED
+                        # (too risky after downtime, market may have moved)
+                        if highest_tp == 1 and config.scale_in_enabled and trade.current_dca == 0:
+                            logger.warning(
+                                f"RECOVERY: TP2 filled during downtime, scale-in SKIPPED: "
+                                f"{trade.symbol_display} (market may have moved)"
+                            )
                         buffer = config.be_buffer_pct / 100
                         if trade.side == "long":
                             be_price = trade.signal_entry * (1 + buffer)

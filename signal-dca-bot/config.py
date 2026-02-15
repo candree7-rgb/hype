@@ -4,13 +4,14 @@ Telegram Signal → Bybit DCA Trading Bot
 
 Strategy:
 - 1 DCA [1, 2] at entry-5% (zone-snapped to S1/R1 with 3% min)
-- Multi-TP: TP1 50%, TP2 10%, TP3 10%, TP4 10% (signal targets)
-- Trail remaining 20% after TP4 (1% CB)
-- Strategy C Hybrid SL Ladder:
-    TP1 → SL = BE (entry)
-    TP2 → SL stays at BE (let runners breathe)
-    TP3 → SL = TP1 price (lock profit)
-    TP4 → Trail 1% CB with SL floor at TP1
+- Multi-TP: TP1 50%, TP2 10%, TP3 20%, TP4 10% (signal targets)
+- Trail remaining 10% after TP4 (1% CB)
+- 2/3 Pyramiding: TP2 → scale-in 1/3 more (if no DCA filled)
+- SL Ladder (with scale-in):
+    TP1 → SL = BE + 0.1% buffer
+    TP2 → Scale-in + SL = exakt new Avg (zero risk)
+    TP3 → SL = TP2 price (profit lock)
+    TP4 → Trail 1% CB
 - Two-tier SL: Safety SL at entry-10% (pre-DCA), Hard SL at DCA-fill+3% (post-DCA)
 - DCA exit: New TPs from avg (TP1=0.5%, TP2=1.25%, trail 30% @1%CB)
 - Neo Cloud trend switch: close on clear reversal
@@ -62,11 +63,18 @@ class BotConfig:
     # Close portions at signal's TP1-TP4 price targets.
     # Remaining position trails after last TP.
     tp_close_pcts: list[float] = field(
-        default_factory=lambda: [50, 10, 10, 10]  # TP1=50%, TP2=10%, TP3=10%, TP4=10%
+        default_factory=lambda: [50, 10, 20, 10]  # TP1=50%, TP2=10%, TP3=20%, TP4=10%
     )
     trailing_callback_pct: float = 1.0  # 1% CB for trail after all TPs (room for runners)
-    sl_to_be_after_tp1: bool = True     # Strategy C: TP1→BE, TP2→stay BE, TP3→SL@TP1, TP4→trail
+    sl_to_be_after_tp1: bool = True     # TP1→BE, TP2→scale-in+SL=avg, TP3→SL@TP2, TP4→trail
     be_buffer_pct: float = 0.1          # 0.1% buffer above/below entry for BE stop (covers fees)
+
+    # ── 2/3 Pyramiding (scale-in at TP2) ──
+    # When TP2 hits → add another 1/3 position (same as E1 size) → 2/3 in trade
+    # Only if DCA NOT already filled (DCA already uses the 2/3 budget)
+    # 8/10 trades that reach TP2 also reach TP3 → double exposure at low risk
+    scale_in_enabled: bool = True
+    scale_in_at_tp: int = 2  # 1-indexed: scale in when TP2 fills
 
     # ── DCA Exit TPs (replaces BE-trail after DCA fills) ──
     # After DCA: place new TPs from avg, trail remaining after all DCA TPs
@@ -185,8 +193,11 @@ class BotConfig:
         tp_labels = [f"TP{i+1}={p}%" for i, p in enumerate(self.tp_close_pcts)]
         trail_pct = 100 - sum(self.tp_close_pcts)
         print(f"║    {', '.join(tp_labels)}, Trail={trail_pct}%")
-        print(f"║    SL Ladder (Strategy C):")
-        print(f"║      TP1→BE+{self.be_buffer_pct}%, TP2→stay BE, TP3→SL@TP1, TP4→Trail {self.trailing_callback_pct}% CB")
+        print(f"║    SL Ladder (with scale-in):")
+        if self.scale_in_enabled:
+            print(f"║      TP1→BE+{self.be_buffer_pct}%, TP2→Scale-In+SL=Avg, TP3→SL@TP2, TP4→Trail {self.trailing_callback_pct}% CB")
+        else:
+            print(f"║      TP1→BE+{self.be_buffer_pct}%, TP2→stay BE, TP3→SL@TP1, TP4→Trail {self.trailing_callback_pct}% CB")
         print(f"║    DCA SL: TP1→BE+{self.dca_be_buffer_pct}% (exakt avg)")
         print(f"║    TP qty consolidation: TPs below min_qty auto-merge into trail")
         print(f"║")

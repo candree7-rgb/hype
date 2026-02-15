@@ -1,15 +1,17 @@
 """
-Trade Manager v2 - Multi-TP Strategy
+Trade Manager v2 - Multi-TP Strategy with 2/3 Pyramiding
 
-Exit Logic (Strategy C Hybrid SL):
+Exit Logic (with Scale-In at TP2):
   E1-only (Multi-TP from signal targets):
     → Safety SL at entry-10% (wide, gives DCA room to fill)
-    → Place TP1-TP4 as reduceOnly limits: 50%/10%/10%/10%
-    → After TP1 fills → SL moves to breakeven, DCA orders cancelled
-    → After TP2 fills → SL stays at BE (room for runners)
-    → After TP3 fills → SL moves to TP1 price (lock profit)
-    → After TP4 fills → remaining 20% trails (1% CB), SL floor at TP1
+    → Place TP1-TP4 as reduceOnly limits: 50%/10%/20%/10%
+    → After TP1 fills → SL moves to breakeven + 0.1% buffer, DCA orders cancelled
+    → After TP2 fills → Scale-in 1/3 more (if no DCA), SL = exakt new Avg
+      → Cancel TP3/TP4, recalculate quantities for new position size
+    → After TP3 fills → SL = TP2 price (profit lock)
+    → After TP4 fills → remaining trails (1% CB)
     → All exits are exchange-side (Bybit handles TP/SL/trailing)
+    → If DCA already filled: no scale-in, SL stays at BE after TP2
 
   DCA1 fills (price dipped to -5% before TP1):
     → Cancel signal TPs → New TPs from avg: TP1=+0.5% (50%), TP2=+1.25% (20%)
@@ -93,6 +95,12 @@ class Trade:
     # DCA Quick-Trail: tighten SL once bounce confirms (+0.5%)
     quick_trail_active: bool = False  # True = SL already tightened from -3% to avg+0.5%
 
+    # 2/3 Pyramiding (scale-in at TP2)
+    scale_in_filled: bool = False     # True = scale-in executed at TP2
+    scale_in_qty: float = 0.0        # Qty added via scale-in (coin units)
+    scale_in_price: float = 0.0      # Fill price of scale-in order
+    scale_in_margin: float = 0.0     # Margin used for scale-in (USD)
+
     # Hard SL
     hard_sl_price: float = 0.0
 
@@ -172,6 +180,10 @@ def trade_to_dict(trade: Trade) -> dict:
         "be_trail_active": trade.be_trail_active,
         "be_trail_peak": trade.be_trail_peak,
         "quick_trail_active": trade.quick_trail_active,
+        "scale_in_filled": trade.scale_in_filled,
+        "scale_in_qty": trade.scale_in_qty,
+        "scale_in_price": trade.scale_in_price,
+        "scale_in_margin": trade.scale_in_margin,
         "hard_sl_price": trade.hard_sl_price,
         "dca_order_ids": trade.dca_order_ids,
         "opened_at": trade.opened_at,
@@ -221,6 +233,10 @@ def trade_from_dict(data: dict) -> Trade:
         be_trail_active=data.get("be_trail_active", False),
         be_trail_peak=data.get("be_trail_peak", 0),
         quick_trail_active=data.get("quick_trail_active", False),
+        scale_in_filled=data.get("scale_in_filled", False),
+        scale_in_qty=data.get("scale_in_qty", 0),
+        scale_in_price=data.get("scale_in_price", 0),
+        scale_in_margin=data.get("scale_in_margin", 0),
         hard_sl_price=data.get("hard_sl_price", 0),
         dca_order_ids=data.get("dca_order_ids", []),
         opened_at=data.get("opened_at", 0),
@@ -468,6 +484,70 @@ class TradeManager:
                 trade.hard_sl_price = trade.avg_price * (1 + sl_pct)
 
     # ══════════════════════════════════════════════════════════════════════
+    # ▌ 2/3 PYRAMIDING: Scale-In at TP2
+    # ══════════════════════════════════════════════════════════════════════
+
+    def fill_scale_in(self, trade: Trade, fill_price: float,
+                      actual_qty: float, margin: float) -> None:
+        """Record scale-in as filled. Updates avg, qty, and marks scale_in_filled.
+
+        Called after TP2 fills and market order for scale-in is confirmed.
+        New avg is calculated from remaining position + scale-in qty.
+        """
+        remaining = trade.remaining_qty
+        old_cost = trade.avg_price * remaining
+        new_cost = fill_price * actual_qty
+        new_total_remaining = remaining + actual_qty
+
+        trade.avg_price = (old_cost + new_cost) / new_total_remaining
+        trade.total_qty += actual_qty
+        trade.total_margin += margin
+        trade.scale_in_filled = True
+        trade.scale_in_qty = actual_qty
+        trade.scale_in_price = fill_price
+        trade.scale_in_margin = margin
+
+        logger.info(
+            f"Scale-in filled: {trade.symbol_display} @ {fill_price:.4f} | "
+            f"+{actual_qty:.6f} coins (${margin:.2f} margin) | "
+            f"New avg: {trade.avg_price:.4f} | "
+            f"Total: {trade.total_qty:.6f} | Remaining: {trade.remaining_qty:.6f}"
+        )
+
+    def recalc_tps_after_scale_in(self, trade: Trade) -> None:
+        """Recalculate TP3/TP4 quantities after scale-in.
+
+        After scale-in, remaining qty is much larger. Redistribute TP3/TP4/trail
+        proportionally across the new remaining qty.
+        TP prices stay the same (signal targets), only quantities change.
+        """
+        remaining = trade.remaining_qty
+
+        unfilled_pcts = []
+        unfilled_indices = []
+        for i in range(len(trade.tp_filled)):
+            if not trade.tp_filled[i]:
+                unfilled_pcts.append(trade.tp_close_pcts[i])
+                unfilled_indices.append(i)
+
+        trail_pct = 100 - sum(trade.tp_close_pcts)
+        total_unfilled = sum(unfilled_pcts) + trail_pct
+
+        if total_unfilled <= 0:
+            return
+
+        for i, tp_idx in enumerate(unfilled_indices):
+            share = unfilled_pcts[i] / total_unfilled
+            trade.tp_close_qtys[tp_idx] = remaining * share
+
+        logger.info(
+            f"TPs recalculated after scale-in: {trade.symbol_display} | "
+            f"Remaining: {remaining:.6f} | "
+            f"TP qtys: {[f'{q:.6f}' for q in trade.tp_close_qtys]} | "
+            f"Trail: {trail_pct}/{total_unfilled:.0f} share"
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
     # ▌ MULTI-TP: Record TP fill (exchange-side)
     # ══════════════════════════════════════════════════════════════════════
 
@@ -665,6 +745,7 @@ class TradeManager:
                     "age": f"{t.age_hours:.1f}h",
                     "sl": round(t.hard_sl_price, 4) if t.hard_sl_price > 0 else "-",
                     "be_trail": "active" if t.be_trail_active else "-",
+                    "scale_in": "filled" if t.scale_in_filled else "-",
                 }
                 for t in active
             ],
