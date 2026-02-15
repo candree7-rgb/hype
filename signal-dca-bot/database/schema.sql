@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS trades (
     -- DCA / Exit details
     max_dca_reached     INTEGER DEFAULT 0,          -- 0 = E1 only, 3 = all DCAs
     tp1_hit             BOOLEAN DEFAULT FALSE,
+    tps_hit             INTEGER DEFAULT 0,          -- Total TPs filled (0-4)
+    trail_pnl_pct       DECIMAL(10, 4) DEFAULT 0,   -- Trail price-% from avg (universal, ignores size/lev)
     close_reason        VARCHAR(200),               -- 'TP1+trail', 'BE-trail', 'Hard SL', etc.
     signal_leverage     INTEGER DEFAULT 0,          -- Original signal leverage
 
@@ -141,6 +143,22 @@ BEGIN
             BEFORE UPDATE ON trades
             FOR EACH ROW
             EXECUTE FUNCTION update_updated_at_column();
+    END IF;
+END
+$$;
+
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- MIGRATIONS: Safe ADD COLUMN (idempotent, skips if exists)
+-- ══════════════════════════════════════════════════════════════════════════
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='tps_hit') THEN
+        ALTER TABLE trades ADD COLUMN tps_hit INTEGER DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='trail_pnl_pct') THEN
+        ALTER TABLE trades ADD COLUMN trail_pnl_pct DECIMAL(10,4) DEFAULT 0;
     END IF;
 END
 $$;

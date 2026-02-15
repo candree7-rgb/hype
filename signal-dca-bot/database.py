@@ -94,6 +94,7 @@ def _init_tables_inline(conn):
             realized_pnl DECIMAL(20,8) DEFAULT 0, pnl_pct_margin DECIMAL(10,4),
             pnl_pct_equity DECIMAL(10,6), equity_at_entry DECIMAL(12,2), equity_at_close DECIMAL(12,2),
             is_win BOOLEAN, max_dca_reached INTEGER DEFAULT 0, tp1_hit BOOLEAN DEFAULT FALSE,
+            tps_hit INTEGER DEFAULT 0, trail_pnl_pct DECIMAL(10,4) DEFAULT 0,
             close_reason VARCHAR(200), signal_leverage INTEGER DEFAULT 0,
             zone_source VARCHAR(20), zones_used INTEGER DEFAULT 0,
             opened_at TIMESTAMPTZ, closed_at TIMESTAMPTZ, duration_minutes INTEGER,
@@ -295,7 +296,8 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
                tp1_hit: bool, close_reason: str, opened_at: float,
                closed_at: float, signal_leverage: int,
                equity_at_entry: float = 0, equity_at_close: float = 0,
-               leverage: int = 20) -> bool:
+               leverage: int = 20, tps_hit: int = 0,
+               trail_pnl_pct: float = 0) -> bool:
     """Save a closed trade to history."""
     conn = get_connection()
     if not conn:
@@ -317,22 +319,24 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
                 (trade_id, symbol, side, entry_price, avg_price, close_price,
                  total_qty, total_margin, leverage, realized_pnl,
                  pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
-                 is_win, max_dca_reached, tp1_hit, close_reason, signal_leverage,
+                 is_win, max_dca_reached, tp1_hit, tps_hit, trail_pnl_pct,
+                 close_reason, signal_leverage,
                  opened_at, closed_at, duration_minutes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (trade_id) DO UPDATE SET
                 realized_pnl=%s, close_price=%s, close_reason=%s, closed_at=%s,
                 pnl_pct_margin=%s, pnl_pct_equity=%s, equity_at_close=%s, is_win=%s,
-                duration_minutes=%s
+                duration_minutes=%s, tps_hit=%s, trail_pnl_pct=%s
         """, (trade_id, symbol, side, entry_price, avg_price, close_price,
               total_qty, total_margin, leverage, realized_pnl,
               pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
-              is_win, max_dca, tp1_hit, close_reason, signal_leverage,
+              is_win, max_dca, tp1_hit, tps_hit, trail_pnl_pct,
+              close_reason, signal_leverage,
               opened_dt, closed_dt, duration_min,
               # ON CONFLICT updates:
               realized_pnl, close_price, close_reason, closed_dt,
               pnl_pct_margin, pnl_pct_equity, equity_at_close, is_win,
-              duration_min))
+              duration_min, tps_hit, trail_pnl_pct))
         cur.close()
         return True
     except Exception as e:
@@ -518,7 +522,7 @@ def get_recent_trades(limit: int = 20) -> list[dict]:
             SELECT trade_id, symbol, side, entry_price, avg_price, close_price,
                    total_margin, realized_pnl, pnl_pct_margin, max_dca_reached,
                    tp1_hit, close_reason, opened_at, closed_at, duration_minutes,
-                   is_win, leverage
+                   is_win, leverage, tps_hit, trail_pnl_pct
             FROM trades
             ORDER BY closed_at DESC
             LIMIT %s
@@ -538,6 +542,8 @@ def get_recent_trades(limit: int = 20) -> list[dict]:
                 "dca": r[9], "tp1": r[10], "reason": r[11],
                 "duration": f"{r[14]}min" if r[14] else "?",
                 "is_win": r[15], "leverage": r[16],
+                "tps_hit": r[17] or 0,
+                "trail_pnl_pct": f"{float(r[18]):+.2f}%" if r[18] else "0%",
             }
             for r in rows
         ]
@@ -658,8 +664,12 @@ def delete_active_trade(trade_id: str) -> bool:
         return False
 
 
-def get_all_active_trades() -> list[dict]:
-    """Load all active trades from DB (for startup recovery)."""
+def get_all_active_trades(limit: int = 6) -> list[dict]:
+    """Load most recent active trades from DB (for startup recovery).
+
+    Only loads the newest `limit` trades (default 6 = max_simultaneous_trades).
+    Stale entries beyond the limit are auto-deleted.
+    """
     conn = get_connection()
     if not conn:
         return []
@@ -667,11 +677,30 @@ def get_all_active_trades() -> list[dict]:
     try:
         import json
         cur = conn.cursor()
+
+        # Count total rows
+        cur.execute("SELECT COUNT(*) FROM active_trades")
+        total = cur.fetchone()[0]
+
+        # Load newest `limit` trades
         cur.execute(
             "SELECT trade_id, symbol, side, status, state_json "
-            "FROM active_trades ORDER BY created_at"
+            "FROM active_trades ORDER BY updated_at DESC LIMIT %s",
+            (limit,)
         )
         rows = cur.fetchall()
+
+        # Cleanup stale entries beyond limit
+        if total > limit:
+            kept_ids = [r[0] for r in rows]
+            placeholders = ",".join(["%s"] * len(kept_ids))
+            cur.execute(
+                f"DELETE FROM active_trades WHERE trade_id NOT IN ({placeholders})",
+                kept_ids
+            )
+            stale_count = total - len(kept_ids)
+            logger.info(f"DB cleanup: removed {stale_count} stale active_trades (kept {len(kept_ids)})")
+
         cur.close()
 
         results = []

@@ -106,6 +106,10 @@ class Trade:
     # P&L
     realized_pnl: float = 0.0
 
+    # Trail analysis: price-% from avg to trail close (universal, ignores size/lev)
+    # Positive = trail captured profit, negative = trail hit SL below avg
+    trail_pnl_pct: float = 0.0
+
     # Equity snapshot (for PnL % calculation)
     equity_at_entry: float = 0.0
 
@@ -172,6 +176,7 @@ def trade_to_dict(trade: Trade) -> dict:
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
         "realized_pnl": trade.realized_pnl,
+        "trail_pnl_pct": trade.trail_pnl_pct,
         "equity_at_entry": trade.equity_at_entry,
     }
 
@@ -220,6 +225,7 @@ def trade_from_dict(data: dict) -> Trade:
         opened_at=data.get("opened_at", 0),
         closed_at=data.get("closed_at", 0),
         realized_pnl=data.get("realized_pnl", 0),
+        trail_pnl_pct=data.get("trail_pnl_pct", 0),
         equity_at_entry=data.get("equity_at_entry", 0),
     )
 
@@ -564,6 +570,14 @@ class TradeManager:
         trade.closed_at = time.time()
         trade.realized_pnl = pnl
 
+        # Calculate trail_pnl_pct: price-% from avg to close (for remaining/trail qty)
+        # Universal metric: positive = trail captured profit, negative = SL below avg
+        if was_filled and trade.avg_price > 0:
+            if trade.side == "long":
+                trade.trail_pnl_pct = (close_price - trade.avg_price) / trade.avg_price * 100
+            else:
+                trade.trail_pnl_pct = (trade.avg_price - close_price) / trade.avg_price * 100
+
         if was_filled:
             if pnl > 0.01:
                 self.total_wins += 1
@@ -603,6 +617,8 @@ class TradeManager:
             signal_leverage=trade.signal_leverage,
             equity_at_entry=trade.equity_at_entry,
             equity_at_close=trade.equity_at_entry + pnl,
+            tps_hit=trade.tps_hit,
+            trail_pnl_pct=round(trade.trail_pnl_pct, 4),
         )
 
         total = self.total_wins + self.total_losses + self.total_breakeven
@@ -610,7 +626,7 @@ class TradeManager:
 
         logger.info(
             f"Trade closed: {trade.symbol_display} {trade.side.upper()} | "
-            f"PnL: ${pnl:+.2f} | Reason: {reason} | "
+            f"PnL: ${pnl:+.2f} | Trail: {trade.trail_pnl_pct:+.2f}% | Reason: {reason} | "
             f"Duration: {trade.age_hours:.1f}h | DCA: {trade.current_dca}/{trade.max_dca} | "
             f"TPs: {trade.tps_hit}/{len(trade.tp_prices)} | "
             f"Stats: {self.total_wins}W/{self.total_losses}L/{self.total_breakeven}BE "
