@@ -12,9 +12,10 @@ interface EquityChartProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
   simSettings: SimSettings
+  isSimulated?: boolean
 }
 
-export default function EquityChart({ timeRange, customDateRange, simSettings }: EquityChartProps) {
+export default function EquityChart({ timeRange, customDateRange, simSettings, isSimulated = true }: EquityChartProps) {
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
 

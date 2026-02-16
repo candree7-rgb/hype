@@ -13,6 +13,8 @@ import EquitySimulator from '@/components/equity-simulator'
 import { SimSettings } from '@/lib/simulation'
 import Image from 'next/image'
 
+const isSimulated = process.env.NEXT_PUBLIC_SIMULATED_MODE !== 'false'
+
 export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1M')
   const [showDatePicker, setShowDatePicker] = useState(false)
@@ -79,7 +81,7 @@ export default function Dashboard() {
       {/* Simulator Controls */}
       <div className="border-b border-border bg-card/30">
         <div className="container mx-auto px-4 py-3">
-          <EquitySimulator onChange={handleSimChange} />
+          <EquitySimulator onChange={handleSimChange} isSimulated={isSimulated} />
         </div>
       </div>
 
@@ -87,13 +89,13 @@ export default function Dashboard() {
       <div className="container mx-auto px-4 py-6 space-y-6">
         {/* Stats Cards */}
         <section>
-          <StatsCards timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
+          <StatsCards timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} isSimulated={isSimulated} />
         </section>
 
         {/* Charts Row */}
         <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <EquityChart timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
+            <EquityChart timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} isSimulated={isSimulated} />
           </div>
           <div>
             <TPDistributionChart timeRange={timeRange} customDateRange={customDateRange} />
@@ -107,7 +109,7 @@ export default function Dashboard() {
 
         {/* Trades Table */}
         <section>
-          <TradesTable timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
+          <TradesTable timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} isSimulated={isSimulated} />
         </section>
       </div>
 

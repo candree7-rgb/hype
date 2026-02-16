@@ -5,36 +5,59 @@ import { SimSettings } from '@/lib/simulation'
 
 interface EquitySimulatorProps {
   onChange: (settings: SimSettings) => void
+  isSimulated?: boolean
 }
 
 const STORAGE_KEY = 'equity-sim-v1'
 
-export default function EquitySimulator({ onChange }: EquitySimulatorProps) {
+export default function EquitySimulator({ onChange, isSimulated = true }: EquitySimulatorProps) {
   const [equity, setEquity] = useState(10000)
   const [tradePct, setTradePct] = useState(5)
   const [compounding, setCompounding] = useState(true)
   const [loaded, setLoaded] = useState(false)
 
-  // Load persisted settings once
+  // Load persisted settings once (only in simulated mode)
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY)
-      if (saved) {
-        const s = JSON.parse(saved)
-        if (s.equity > 0) setEquity(s.equity)
-        if (s.tradePct > 0) setTradePct(s.tradePct)
-        if (typeof s.compounding === 'boolean') setCompounding(s.compounding)
-      }
-    } catch { /* ignore */ }
+    if (isSimulated) {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY)
+        if (saved) {
+          const s = JSON.parse(saved)
+          if (s.equity > 0) setEquity(s.equity)
+          if (s.tradePct > 0) setTradePct(s.tradePct)
+          if (typeof s.compounding === 'boolean') setCompounding(s.compounding)
+        }
+      } catch { /* ignore */ }
+    }
     setLoaded(true)
-  }, [])
+  }, [isSimulated])
+
+  // In real mode: fetch actual account equity from Bybit
+  useEffect(() => {
+    if (isSimulated) return
+    async function fetchRealEquity() {
+      try {
+        const res = await fetch('/api/live-equity')
+        if (!res.ok) return
+        const data = await res.json()
+        if (data.equity > 0) {
+          setEquity(Math.round(data.equity))
+          setTradePct(5)
+          setCompounding(true)
+        }
+      } catch { /* ignore */ }
+    }
+    fetchRealEquity()
+  }, [isSimulated])
 
   // Persist and propagate settings
   useEffect(() => {
     if (!loaded) return
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ equity, tradePct, compounding }))
+    if (isSimulated) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ equity, tradePct, compounding }))
+    }
     onChange({ equity, tradePct, compounding })
-  }, [equity, tradePct, compounding, loaded])
+  }, [equity, tradePct, compounding, loaded, isSimulated])
 
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
