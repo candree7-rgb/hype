@@ -54,28 +54,33 @@ Next.js 14 + React 18 Dashboard mit Recharts. Zeigt Equity-Kurve, Trades-Tabelle
 
 ## Exit-Strategie: E1-Only (kein DCA gefüllt)
 
+### Signal-TP Abstände (typisch):
+- **TP1 = +1%**, TP2 = +2%, TP3 = +3%, TP4 = +4% vom Entry
+
 ### Multi-TP (Signal-Targets):
 | TP | Close % | SL-Aktion |
 |----|---------|-----------|
 | TP1 | 50% | SL → BE + 0.1% Buffer, DCA-Orders canceln |
-| TP2 | 10% | **Scale-In** (1/3 dazu, wenn kein DCA) + SL = exakt neuer Avg |
-| TP3 | 20% (weil doppelte Qty) | SL → TP2-Preis (Profit Lock) |
+| TP2 | 10% | SL bleibt bei BE+Buffer |
+| TP3 | 20% | SL → TP1-Preis (Profit Lock) |
 | TP4 | 10% | Trail 1% Callback |
 | Trail | 10% Rest | 1% Callback |
 
-### 2/3 Pyramiding (Scale-In bei TP2):
-- Wenn TP2 gefüllt → zusätzliche 1/3 Position (gleiche Größe wie E1) als **Limit Order** am TP2-Preis
-- **Nur wenn DCA NICHT gefüllt** (DCA nutzt bereits das 2/3 Budget)
-- 8/10 Trades die TP2 erreichen, erreichen auch TP3 → doppelte Exposure bei minimalem Risiko
-- Nach Scale-In: TP3/TP4 werden neu berechnet (neue Qtys für größere Position)
-- **SL nach Scale-In = exakt neuer Avg** (gewichteter Durchschnitt aus E1 + Scale-In) → Zero Risk
+### 2/3 Pyramiding — DEAKTIVIERT (Live-Test gescheitert)
+Scale-In bei TP2 wurde getestet und wieder deaktiviert:
+- **Problem:** SL nach Scale-In = exakt neuer Avg → nur **0.57% Pullback-Room** bei 2% TP2
+- **Vorher (ohne):** 8/10 Trades die TP2 erreichten → auch TP3 (SL bei BE+Buffer = 1.86% Room)
+- **Nachher (mit):** Nur 4/10 TP2 → TP3 (zu tighter SL, jeder kleine Pullback stoppt raus)
+- **Zusätzlich:** TP2-only Trades hatten ~1.5x weniger Gewinn (kein Buffer-Profit)
+- **EV-Rechnung:** Ohne Pyramiding EV=0.80 vs Mit Pyramiding EV=0.72 bei TP3
+- `scale_in_enabled: bool = False` in config.py
 
-### SL-Ladder (Strategie C):
+### SL-Ladder:
 ```
 Start:       Safety SL @ Entry - 10% (gibt DCA Raum)
 Nach TP1:    SL → BE + 0.1% Buffer (Fees abgedeckt)
-Nach TP2:    Scale-In + SL = exakt Avg (zero risk)
-Nach TP3:    SL → TP2 Preis (Profit Lock)
+Nach TP2:    SL bleibt bei BE + Buffer
+Nach TP3:    SL → TP1 Preis (Profit Lock)
 Nach TP4:    Trailing 1% Callback
 ```
 
@@ -177,8 +182,10 @@ Queried von Bybit `get_closed_pnl` API (inkl. Fees, exakte Fills). Nicht selbst 
 
 # Was als Nächstes geplant ist
 
-## GEPLANT: 2/3 Pyramiding (ist bereits implementiert!)
-Die Scale-In Logik bei TP2 ist komplett eingebaut und konfiguriert. Needs live testing.
+## ERLEDIGT: 2/3 Pyramiding (getestet, deaktiviert)
+Scale-In bei TP2 wurde implementiert und live getestet. Ergebnis: TP2→TP3 Rate fiel von 80% auf 40%,
+weil SL=exakt Avg nur 0.57% Room lässt. Deaktiviert (`scale_in_enabled = False`). Code bleibt drin für
+den Fall dass bei größeren TP-Abständen nochmal relevant.
 
 ## Offene Punkte
 - Live-Deployment auf Bybit Mainnet (aktuell Testnet)
