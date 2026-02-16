@@ -62,18 +62,17 @@ Next.js 14 + React 18 Dashboard mit Recharts. Zeigt Equity-Kurve, Trades-Tabelle
 |----|---------|-----------|
 | TP1 | 50% | SL → BE + 0.1% Buffer, DCA-Orders canceln |
 | TP2 | 10% | SL bleibt bei BE+Buffer |
-| TP3 | 20% | SL → TP1-Preis (Profit Lock) |
+| TP3 | 10% | SL → TP1-Preis (Profit Lock) |
 | TP4 | 10% | Trail 1% Callback |
-| Trail | 10% Rest | 1% Callback |
+| Trail | 20% Rest | 1% Callback |
 
 ### 2/3 Pyramiding — DEAKTIVIERT (Live-Test gescheitert)
-Scale-In bei TP2 wurde getestet und wieder deaktiviert:
+Scale-In bei TP2 wurde implementiert, live getestet und deaktiviert:
 - **Problem:** SL nach Scale-In = exakt neuer Avg → nur **0.57% Pullback-Room** bei 2% TP2
 - **Vorher (ohne):** 8/10 Trades die TP2 erreichten → auch TP3 (SL bei BE+Buffer = 1.86% Room)
 - **Nachher (mit):** Nur 4/10 TP2 → TP3 (zu tighter SL, jeder kleine Pullback stoppt raus)
-- **Zusätzlich:** TP2-only Trades hatten ~1.5x weniger Gewinn (kein Buffer-Profit)
-- **EV-Rechnung:** Ohne Pyramiding EV=0.80 vs Mit Pyramiding EV=0.72 bei TP3
-- `scale_in_enabled: bool = False` in config.py
+- **Fazit:** Bei 1-4% TP-Abständen strukturell zu wenig Room für Scale-In
+- `scale_in_enabled: bool = False` in config.py (Code bleibt für >5% TP-Abstände)
 
 ### SL-Ladder:
 ```
@@ -184,8 +183,9 @@ Queried von Bybit `get_closed_pnl` API (inkl. Fees, exakte Fills). Nicht selbst 
 
 ## ERLEDIGT: 2/3 Pyramiding (getestet, deaktiviert)
 Scale-In bei TP2 wurde implementiert und live getestet. Ergebnis: TP2→TP3 Rate fiel von 80% auf 40%,
-weil SL=exakt Avg nur 0.57% Room lässt. Deaktiviert (`scale_in_enabled = False`). Code bleibt drin für
-den Fall dass bei größeren TP-Abständen nochmal relevant.
+weil SL=exakt Avg nur 0.57% Room lässt. Bei 1-4% TP-Abständen strukturell nicht tragbar.
+Deaktiviert (`scale_in_enabled = False`). Code bleibt für >5% TP-Abstände.
+TP-Verteilung zurück auf 50/10/10/10 + 20% Trail (statt 50/10/20/10 + 10% mit Pyramiding).
 
 ## Offene Punkte
 - Live-Deployment auf Bybit Mainnet (aktuell Testnet)

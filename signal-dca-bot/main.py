@@ -230,15 +230,13 @@ async def execute_signal(signal: Signal) -> dict:
 async def price_monitor():
     """Background task: poll order fills and detect exchange-side closes.
 
-    SL Ladder with 2/3 Pyramiding (all exits exchange-side):
+    SL Ladder (all exits exchange-side):
     - Safety SL at entry-10% initially (gives DCA room to fill at -5%)
-    - TP1-4: reduceOnly limit orders at signal targets (50/10/20/10%)
+    - TP1-4: reduceOnly limit orders at signal targets (50/10/10/10%)
     - After TP1: SL → BE + 0.1% buffer, cancel DCA orders
-    - After TP2: Scale-in 1/3 more (if no DCA) → SL = exakt new Avg (zero risk)
-      → Cancel TP3/TP4, recalculate quantities for new position size
-    - After TP3: SL → TP2 price (profit lock)
-    - After TP4: trailing stop 1% CB on remaining
-    - If DCA already filled: no scale-in, SL stays at BE after TP2
+    - After TP2: SL stays at BE + buffer
+    - After TP3: SL → TP1 price (profit lock)
+    - After TP4: trailing stop 1% CB on remaining 20%
     - DCA fills (before TP1): cancel signal TPs, new TPs from avg (0.5%/1.25%), hard SL at DCA-fill+3%
     - DCA Quick-Trail: once price moves +0.5% from avg → SL tightens to avg+0.5% buffer
     """
