@@ -49,16 +49,16 @@ export default function Dashboard() {
               <Image
                 src="/images/sys_logo.svg"
                 alt="Systemic"
-                width={216}
-                height={43}
+                width={194}
+                height={39}
                 className="hidden dark:block"
                 priority
               />
               <Image
                 src="/images/sys_logo_pos.svg"
                 alt="Systemic"
-                width={216}
-                height={43}
+                width={194}
+                height={39}
                 className="block dark:hidden"
                 priority
               />
