@@ -8,7 +8,7 @@ export const metadata: Metadata = {
   title: 'Signal DCA Bot v2',
   description: 'Trading bot performance dashboard',
   icons: {
-    icon: 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📈</text></svg>',
+    icon: '/images/sys_logo.svg',
   },
 }
 

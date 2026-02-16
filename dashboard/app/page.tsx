@@ -49,13 +49,21 @@ export default function Dashboard() {
               <Image
                 src="/images/sys_logo.svg"
                 alt="Systemic"
-                width={180}
-                height={36}
-                className="dark:invert"
+                width={216}
+                height={43}
+                className="hidden dark:block"
+                priority
+              />
+              <Image
+                src="/images/sys_logo_pos.svg"
+                alt="Systemic"
+                width={216}
+                height={43}
+                className="block dark:hidden"
                 priority
               />
               <p className="text-sm text-muted-foreground">
-                Bybit Futures &bull; Live Market Execution &bull; 20x Leverage
+                Bybit Futures &bull; Live Execution &bull; 20x Leverage
               </p>
             </div>
             <TimeRangeSelector
@@ -106,7 +114,9 @@ export default function Dashboard() {
       {/* Footer */}
       <footer className="border-t border-border py-4 mt-8">
         <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          <Image src="/images/sys_logo.svg" alt="Systemic" width={100} height={20} className="inline dark:invert" /> &bull; Auto-refreshes every 30s
+          <Image src="/images/sys_logo.svg" alt="Systemic" width={100} height={20} className="hidden dark:inline" />
+          <Image src="/images/sys_logo_pos.svg" alt="Systemic" width={100} height={20} className="inline dark:hidden" />
+          &bull; Auto-refreshes every 30s
         </div>
       </footer>
     </main>
