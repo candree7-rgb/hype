@@ -49,8 +49,8 @@ export default function Dashboard() {
               <Image
                 src="/images/sys_logo.svg"
                 alt="Systemic"
-                width={180}
-                height={36}
+                width={240}
+                height={48}
                 className="dark:invert"
                 priority
               />
