@@ -465,6 +465,35 @@ def get_trade_by_symbol_close_time(symbol: str, close_time: float) -> bool:
         return False
 
 
+def get_trade_by_symbol_in_range(symbol: str, event_time: float) -> bool:
+    """Check if event_time falls within the open→close window of any known trade.
+
+    Used by Bybit sync to detect partial fills (e.g. TP2 close) that belong
+    to a bot-managed trade.  A 120s buffer is applied to both ends.
+    """
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromtimestamp(event_time, tz=timezone.utc)
+        buf = timedelta(seconds=120)
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM trades WHERE symbol = %s "
+            "AND opened_at <= %s AND closed_at >= %s LIMIT 1",
+            (symbol, dt + buf, dt - buf)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row is not None
+    except Exception as e:
+        logger.error(f"DB get_trade_by_symbol_in_range failed: {e}")
+        return False
+
+
 def get_trade_stats() -> dict:
     """Get aggregate trade stats from history."""
     conn = get_connection()

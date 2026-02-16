@@ -1543,6 +1543,14 @@ async def bybit_trade_sync():
                 if existing_close:
                     continue
 
+                # Check if this close event falls within an existing
+                # trade's lifetime (catches partial TP fills like TP2
+                # close events that are separate Bybit PnL records)
+                if db.get_trade_by_symbol_in_range(
+                    rec["symbol"], rec["created_time"]
+                ):
+                    continue
+
                 # Check if bot-managed (don't double-save)
                 is_tracked = False
                 for trade in trade_mgr.active_trades:
