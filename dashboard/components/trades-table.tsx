@@ -168,11 +168,9 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                   )}
                 </>
               ) : (
-                <>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L %</th>
-                </>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L</th>
               )}
+              <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L %</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Exit</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">DCA</th>
             </tr>
@@ -219,7 +217,7 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                   {formatDuration(trade.duration_minutes)}
                 </td>
 
-                {/* P&L columns: simulated mode shows sim P&L as "P&L", real mode shows account P&L + P&L% */}
+                {/* P&L $: simulated mode shows sim P&L, real mode shows account P&L */}
                 {isSimulated ? (
                   <>
                     {simResults && (() => {
@@ -241,27 +239,27 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                     })()}
                   </>
                 ) : (
-                  <>
-                    <td className="px-4 py-4">
-                      <span className={cn(
-                        'font-semibold',
-                        (trade.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger'
-                      )}>
-                        {(trade.realized_pnl || 0) >= 0 ? '+' : ''}
-                        {formatCurrency(parseFloat(trade.realized_pnl?.toString() || '0'))}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className={cn(
-                        'font-semibold text-sm',
-                        (trade.pnl_pct_equity || 0) >= 0 ? 'text-success' : 'text-danger'
-                      )}>
-                        {(trade.pnl_pct_equity || 0) >= 0 ? '+' : ''}
-                        {parseFloat(trade.pnl_pct_equity?.toString() || '0').toFixed(2)}%
-                      </span>
-                    </td>
-                  </>
+                  <td className="px-4 py-4">
+                    <span className={cn(
+                      'font-semibold',
+                      (trade.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger'
+                    )}>
+                      {(trade.realized_pnl || 0) >= 0 ? '+' : ''}
+                      {formatCurrency(parseFloat(trade.realized_pnl?.toString() || '0'))}
+                    </span>
+                  </td>
                 )}
+
+                {/* P&L % - always shown (same in both modes) */}
+                <td className="px-4 py-4">
+                  <span className={cn(
+                    'font-semibold text-sm',
+                    (trade.pnl_pct_equity || 0) >= 0 ? 'text-success' : 'text-danger'
+                  )}>
+                    {(trade.pnl_pct_equity || 0) >= 0 ? '+' : ''}
+                    {parseFloat(trade.pnl_pct_equity?.toString() || '0').toFixed(2)}%
+                  </span>
+                </td>
 
                 {/* Exit badges */}
                 <td className="px-4 py-4">
