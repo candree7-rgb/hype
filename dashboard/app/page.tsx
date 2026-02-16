@@ -55,7 +55,7 @@ export default function Dashboard() {
                 priority
               />
               <p className="text-sm text-muted-foreground">
-                Bybit Futures &bull; Live Market Execution &bull; 20x Leverage
+                Bybit Futures &bull; Live Execution &bull; 20x Leverage
               </p>
             </div>
             <TimeRangeSelector

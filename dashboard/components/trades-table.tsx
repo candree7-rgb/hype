@@ -51,7 +51,7 @@ function getExitBadges(trade: Trade): { label: string; variant: BadgeVariant }[]
     if (tpLevel >= 1) {
       badges.push({ label: `TP${tpLevel}`, variant: 'tp' })
     }
-    badges.push({ label: 'NEO', variant: 'neutral' })
+    badges.push({ label: 'Flip', variant: 'neutral' })
   } else if (reason.includes('manual') || reason.includes('tg')) {
     badges.push({ label: 'MANUAL', variant: 'neutral' })
   } else if (reason.includes('sync')) {
