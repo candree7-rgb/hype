@@ -205,18 +205,19 @@ def calc_smart_dca_levels(
     side: str,
     snap_min_pct: float = 2.0,
     filled_levels: list[bool] | None = None,
+    limit_buffer_pct: float = 0.0,
 ) -> list[tuple[float, str]]:
     """Calculate DCA levels with S1/R1 zone snapping.
 
     Zone IS the DCA level (not just a "snap"), with 3% minimum distance.
     Fixed 5% spacing is only a fallback when no zone or zone too close.
 
-    Examples (Long, entry=$100, fixed=5%, min=3%):
-      S1 at $93 (7%)  → DCA at $93 (zone ✓, deeper than fixed)
-      S1 at $96 (4%)  → DCA at $96 (zone ✓, closer but >3% min)
-      S1 at $97 (3%)  → DCA at $97 (zone ✓, exactly at min)
-      S1 at $98 (2%)  → DCA at $95 (zone too close, use fixed 5%)
-      No zone         → DCA at $95 (fallback fixed 5%)
+    Examples (Long, entry=$100, fixed=5%, min=3%, buffer=0.2%):
+      S1 at $93 (7%)  → DCA at $92.81 (zone + 0.2% deeper)
+      S1 at $96 (4%)  → DCA at $95.81 (zone + 0.2% deeper)
+      S1 at $97 (3%)  → DCA at $96.81 (zone + 0.2% deeper)
+      S1 at $98 (2%)  → DCA at $94.81 (fixed 5% + 0.2% buffer)
+      No zone         → DCA at $94.81 (fallback fixed 5% + 0.2% buffer)
 
     Only ONE unfilled DCA gets the zone snap per calculation.
     Filled DCAs don't consume the zone.
@@ -228,6 +229,7 @@ def calc_smart_dca_levels(
         side: "long" or "short"
         snap_min_pct: Minimum distance from entry for zone snap (hybrid mode)
         filled_levels: Boolean list [E1, DCA1] - True if filled.
+        limit_buffer_pct: Buffer % on limit price (0.2 = push 0.2% deeper into zone)
 
     Returns:
         List of (price, source) for each level including E1.
@@ -292,12 +294,21 @@ def calc_smart_dca_levels(
                 zone_used = True
                 fixed_dist_pct = abs(fixed_price - entry_price) / entry_price * 100
                 direction = "deeper" if zone_dist_pct > fixed_dist_pct else "closer"
+
+                # Apply limit buffer: push limit deeper into zone (1-candle lag)
+                buf = limit_buffer_pct / 100
+                if buf > 0:
+                    buffered_zone = zone_price * (1 - buf) if side == "long" else zone_price * (1 + buf)
+                else:
+                    buffered_zone = zone_price
+
                 logger.info(
                     f"DCA{level_idx} zone-snapped to {'S1' if side == 'long' else 'R1'}: "
-                    f"{fixed_price:.4f} → {zone_price:.4f} "
-                    f"({zone_dist_pct:.1f}% from entry, {direction} than fixed {fixed_dist_pct:.1f}%)"
+                    f"{fixed_price:.4f} → {buffered_zone:.4f} "
+                    f"(zone={zone_price:.4f}, {zone_dist_pct:.1f}% from entry, "
+                    f"+{limit_buffer_pct}% buffer, {direction} than fixed {fixed_dist_pct:.1f}%)"
                 )
-                results.append((zone_price, zone_label))
+                results.append((buffered_zone, zone_label))
                 continue
 
         results.append((fixed_price, "fixed"))

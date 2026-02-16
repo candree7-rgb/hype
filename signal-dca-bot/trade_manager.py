@@ -1,20 +1,23 @@
 """
-Trade Manager v2 - Multi-TP Strategy
+Trade Manager v2 - Multi-TP Strategy with 2/3 Pyramiding
 
-Exit Logic (Strategy C Hybrid SL):
+Exit Logic (with Scale-In at TP2):
   E1-only (Multi-TP from signal targets):
     → Safety SL at entry-10% (wide, gives DCA room to fill)
-    → Place TP1-TP4 as reduceOnly limits: 50%/10%/10%/10%
-    → After TP1 fills → SL moves to breakeven, DCA orders cancelled
-    → After TP2 fills → SL stays at BE (room for runners)
-    → After TP3 fills → SL moves to TP1 price (lock profit)
-    → After TP4 fills → remaining 20% trails (1% CB), SL floor at TP1
+    → Place TP1-TP4 as reduceOnly limits: 50%/10%/20%/10%
+    → After TP1 fills → SL moves to breakeven + 0.1% buffer, DCA orders cancelled
+    → After TP2 fills → Scale-in 1/3 more (if no DCA), SL = exakt new Avg
+      → Cancel TP3/TP4, recalculate quantities for new position size
+    → After TP3 fills → SL = TP2 price (profit lock)
+    → After TP4 fills → remaining trails (1% CB)
     → All exits are exchange-side (Bybit handles TP/SL/trailing)
+    → If DCA already filled: no scale-in, SL stays at BE after TP2
 
   DCA1 fills (price dipped to -5% before TP1):
-    → Cancel unfilled TPs → Hard SL at avg-3% (tight)
-    → BE-Trail when price returns to avg (0.5% CB)
-    → Close 100% on trail callback
+    → Cancel signal TPs → New TPs from avg: TP1=+0.5% (50%), TP2=+1.25% (20%)
+    → Trail remaining 30% with 1% CB after all DCA TPs
+    → Hard SL at DCA-fill+3% → Quick-Trail to avg+0.5% once +0.5% reached
+    → DCA TP1 fills → SL to exakt avg
 
   Neo Cloud trend switch → close all opposing positions
 """
@@ -89,6 +92,17 @@ class Trade:
     be_trail_active: bool = False    # Activated when price returns to avg
     be_trail_peak: float = 0.0      # Peak since BE-trail activated
 
+    # DCA Quick-Trail: tighten SL once bounce confirms (+0.5%)
+    quick_trail_active: bool = False  # True = SL already tightened from -3% to avg+0.5%
+
+    # 2/3 Pyramiding (scale-in at TP2)
+    scale_in_pending: bool = False    # True = limit order placed, waiting for fill
+    scale_in_order_id: str = ""       # Bybit order ID for scale-in limit
+    scale_in_filled: bool = False     # True = scale-in executed at TP2
+    scale_in_qty: float = 0.0        # Qty added via scale-in (coin units)
+    scale_in_price: float = 0.0      # Fill price of scale-in order
+    scale_in_margin: float = 0.0     # Margin used for scale-in (USD)
+
     # Hard SL
     hard_sl_price: float = 0.0
 
@@ -101,6 +115,11 @@ class Trade:
 
     # P&L
     realized_pnl: float = 0.0
+
+    # Trail analysis: trail contribution as % of margin (total_pnl - tp_pnl) / margin
+    # Positive = trail captured extra profit, negative = trail lost (SL hit)
+    # Universal: comparable across trades regardless of position size
+    trail_pnl_pct: float = 0.0
 
     # Equity snapshot (for PnL % calculation)
     equity_at_entry: float = 0.0
@@ -162,11 +181,19 @@ def trade_to_dict(trade: Trade) -> dict:
         "total_tp_closed_qty": trade.total_tp_closed_qty,
         "be_trail_active": trade.be_trail_active,
         "be_trail_peak": trade.be_trail_peak,
+        "quick_trail_active": trade.quick_trail_active,
+        "scale_in_pending": trade.scale_in_pending,
+        "scale_in_order_id": trade.scale_in_order_id,
+        "scale_in_filled": trade.scale_in_filled,
+        "scale_in_qty": trade.scale_in_qty,
+        "scale_in_price": trade.scale_in_price,
+        "scale_in_margin": trade.scale_in_margin,
         "hard_sl_price": trade.hard_sl_price,
         "dca_order_ids": trade.dca_order_ids,
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
         "realized_pnl": trade.realized_pnl,
+        "trail_pnl_pct": trade.trail_pnl_pct,
         "equity_at_entry": trade.equity_at_entry,
     }
 
@@ -209,11 +236,19 @@ def trade_from_dict(data: dict) -> Trade:
         total_tp_closed_qty=data.get("total_tp_closed_qty", 0),
         be_trail_active=data.get("be_trail_active", False),
         be_trail_peak=data.get("be_trail_peak", 0),
+        quick_trail_active=data.get("quick_trail_active", False),
+        scale_in_pending=data.get("scale_in_pending", False),
+        scale_in_order_id=data.get("scale_in_order_id", ""),
+        scale_in_filled=data.get("scale_in_filled", False),
+        scale_in_qty=data.get("scale_in_qty", 0),
+        scale_in_price=data.get("scale_in_price", 0),
+        scale_in_margin=data.get("scale_in_margin", 0),
         hard_sl_price=data.get("hard_sl_price", 0),
         dca_order_ids=data.get("dca_order_ids", []),
         opened_at=data.get("opened_at", 0),
         closed_at=data.get("closed_at", 0),
         realized_pnl=data.get("realized_pnl", 0),
+        trail_pnl_pct=data.get("trail_pnl_pct", 0),
         equity_at_entry=data.get("equity_at_entry", 0),
     )
 
@@ -455,6 +490,70 @@ class TradeManager:
                 trade.hard_sl_price = trade.avg_price * (1 + sl_pct)
 
     # ══════════════════════════════════════════════════════════════════════
+    # ▌ 2/3 PYRAMIDING: Scale-In at TP2
+    # ══════════════════════════════════════════════════════════════════════
+
+    def fill_scale_in(self, trade: Trade, fill_price: float,
+                      actual_qty: float, margin: float) -> None:
+        """Record scale-in as filled. Updates avg, qty, and marks scale_in_filled.
+
+        Called after TP2 fills and market order for scale-in is confirmed.
+        New avg is calculated from remaining position + scale-in qty.
+        """
+        remaining = trade.remaining_qty
+        old_cost = trade.avg_price * remaining
+        new_cost = fill_price * actual_qty
+        new_total_remaining = remaining + actual_qty
+
+        trade.avg_price = (old_cost + new_cost) / new_total_remaining
+        trade.total_qty += actual_qty
+        trade.total_margin += margin
+        trade.scale_in_filled = True
+        trade.scale_in_qty = actual_qty
+        trade.scale_in_price = fill_price
+        trade.scale_in_margin = margin
+
+        logger.info(
+            f"Scale-in filled: {trade.symbol_display} @ {fill_price:.4f} | "
+            f"+{actual_qty:.6f} coins (${margin:.2f} margin) | "
+            f"New avg: {trade.avg_price:.4f} | "
+            f"Total: {trade.total_qty:.6f} | Remaining: {trade.remaining_qty:.6f}"
+        )
+
+    def recalc_tps_after_scale_in(self, trade: Trade) -> None:
+        """Recalculate TP3/TP4 quantities after scale-in.
+
+        After scale-in, remaining qty is much larger. Redistribute TP3/TP4/trail
+        proportionally across the new remaining qty.
+        TP prices stay the same (signal targets), only quantities change.
+        """
+        remaining = trade.remaining_qty
+
+        unfilled_pcts = []
+        unfilled_indices = []
+        for i in range(len(trade.tp_filled)):
+            if not trade.tp_filled[i]:
+                unfilled_pcts.append(trade.tp_close_pcts[i])
+                unfilled_indices.append(i)
+
+        trail_pct = 100 - sum(trade.tp_close_pcts)
+        total_unfilled = sum(unfilled_pcts) + trail_pct
+
+        if total_unfilled <= 0:
+            return
+
+        for i, tp_idx in enumerate(unfilled_indices):
+            share = unfilled_pcts[i] / total_unfilled
+            trade.tp_close_qtys[tp_idx] = remaining * share
+
+        logger.info(
+            f"TPs recalculated after scale-in: {trade.symbol_display} | "
+            f"Remaining: {remaining:.6f} | "
+            f"TP qtys: {[f'{q:.6f}' for q in trade.tp_close_qtys]} | "
+            f"Trail: {trail_pct}/{total_unfilled:.0f} share"
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
     # ▌ MULTI-TP: Record TP fill (exchange-side)
     # ══════════════════════════════════════════════════════════════════════
 
@@ -467,6 +566,41 @@ class TradeManager:
         for pct in trade.tp_close_pcts:
             qty = trade.total_qty * pct / 100
             trade.tp_close_qtys.append(qty)
+
+    def setup_dca_tps(self, trade: Trade) -> None:
+        """Recalculate TP prices and quantities after DCA fill.
+
+        Replaces cancelled signal TPs with avg-based TPs for the full position.
+        DCA TPs: TP1=+0.5% (rescue), TP2=+1.25% from new avg, remaining trails.
+        SL after DCA TP1 = exakt avg (kein buffer, bei 0.5% TP1 unnötig).
+        """
+        # New TP prices based on new avg
+        trade.tp_prices = []
+        for pct in self.config.dca_tp_pcts:
+            if trade.side == "long":
+                tp = trade.avg_price * (1 + pct / 100)
+            else:
+                tp = trade.avg_price * (1 - pct / 100)
+            trade.tp_prices.append(tp)
+
+        trade.tp_filled = [False] * len(trade.tp_prices)
+        trade.tp_order_ids = [""] * len(trade.tp_prices)
+        trade.tp_close_pcts = list(self.config.dca_tp_close_pcts)
+        trade.tps_hit = 0
+        trade.total_tp_closed_qty = 0
+
+        # Recalculate close quantities from full position (E1 + DCA)
+        trade.tp_close_qtys = []
+        for pct in trade.tp_close_pcts:
+            qty = trade.total_qty * pct / 100
+            trade.tp_close_qtys.append(qty)
+
+        logger.info(
+            f"DCA TPs set: {trade.symbol_display} | Avg: {trade.avg_price:.4f} | "
+            f"TP1={trade.tp_prices[0]:.4f} ({self.config.dca_tp_pcts[0]}%), "
+            f"TP2={trade.tp_prices[1]:.4f} ({self.config.dca_tp_pcts[1]}%) | "
+            f"Qty: TP1={trade.tp_close_qtys[0]:.2f}, TP2={trade.tp_close_qtys[1]:.2f}"
+        )
 
     def record_tp_fill(self, trade: Trade, tp_idx: int,
                        closed_qty: float, fill_price: float) -> None:
@@ -521,6 +655,15 @@ class TradeManager:
 
         trade.status = TradeStatus.CLOSED
         trade.closed_at = time.time()
+
+        # Calculate trail_pnl_pct: trail contribution = total PnL minus TP PnL
+        # trade.realized_pnl has accumulated TP fills from record_tp_fill() before this call
+        # pnl = total trade PnL from Bybit (includes TPs + trail/SL close)
+        if was_filled and trade.total_margin > 0:
+            tp_pnl = trade.realized_pnl  # sum of TP fill PnLs (before overwrite)
+            trail_pnl = pnl - tp_pnl      # what the remaining trail portion added/lost
+            trade.trail_pnl_pct = trail_pnl / trade.total_margin * 100
+
         trade.realized_pnl = pnl
 
         if was_filled:
@@ -562,6 +705,8 @@ class TradeManager:
             signal_leverage=trade.signal_leverage,
             equity_at_entry=trade.equity_at_entry,
             equity_at_close=trade.equity_at_entry + pnl,
+            tps_hit=trade.tps_hit,
+            trail_pnl_pct=round(trade.trail_pnl_pct, 4),
         )
 
         total = self.total_wins + self.total_losses + self.total_breakeven
@@ -569,7 +714,7 @@ class TradeManager:
 
         logger.info(
             f"Trade closed: {trade.symbol_display} {trade.side.upper()} | "
-            f"PnL: ${pnl:+.2f} | Reason: {reason} | "
+            f"PnL: ${pnl:+.2f} | Trail: {trade.trail_pnl_pct:+.2f}% | Reason: {reason} | "
             f"Duration: {trade.age_hours:.1f}h | DCA: {trade.current_dca}/{trade.max_dca} | "
             f"TPs: {trade.tps_hit}/{len(trade.tp_prices)} | "
             f"Stats: {self.total_wins}W/{self.total_losses}L/{self.total_breakeven}BE "
@@ -606,6 +751,7 @@ class TradeManager:
                     "age": f"{t.age_hours:.1f}h",
                     "sl": round(t.hard_sl_price, 4) if t.hard_sl_price > 0 else "-",
                     "be_trail": "active" if t.be_trail_active else "-",
+                    "scale_in": "filled" if t.scale_in_filled else "-",
                 }
                 for t in active
             ],

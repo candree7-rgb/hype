@@ -579,6 +579,64 @@ class BybitEngine:
                     # Order might already be cancelled or filled
                     logger.debug(f"Cancel DCA{dca.level} failed (may be ok): {e}")
 
+    def place_scale_in_order(self, trade: Trade, qty: float,
+                             limit_price: float) -> tuple[str, float]:
+        """Place scale-in LIMIT order at TP2 price (same direction, adds to position).
+
+        Used for 2/3 pyramiding: after TP2 fills, add another 1/3 at TP2 price.
+        NOT reduceOnly - this ADDS to the position.
+        Limit order: no slippage, fills if price is still near TP2.
+        If price moved away → order sits → checked by price_monitor.
+
+        Args:
+            trade: The trade
+            qty: Quantity to add (in coin units, before rounding)
+            limit_price: Price for limit order (TP2 fill price)
+
+        Returns (order_id, rounded_qty). order_id="" if failed.
+        """
+        info = self.get_instrument_info(trade.symbol)
+        if not info:
+            return "", 0.0
+
+        qty = self.round_qty(qty, info["qty_step"])
+        if qty < info["min_qty"]:
+            logger.warning(
+                f"Scale-in qty too small: {qty} < {info['min_qty']} for {trade.symbol}"
+            )
+            return "", 0.0
+
+        limit_price = self.round_price(limit_price, info["tick_size"])
+        if limit_price <= 0:
+            logger.error(f"Scale-in price rounded to 0 for {trade.symbol}")
+            return "", 0.0
+
+        side_str = "Buy" if trade.side == "long" else "Sell"
+        pos_idx = self._position_idx(trade.side)
+
+        try:
+            result = self.session.place_order(
+                category="linear",
+                symbol=trade.symbol,
+                side=side_str,
+                orderType="Limit",
+                qty=str(qty),
+                price=str(limit_price),
+                timeInForce="GTC",
+                orderLinkId=f"{trade.trade_id}_SCALEIN",
+                **pos_idx,
+            )
+            order_id = result["result"]["orderId"]
+            logger.info(
+                f"Scale-in limit placed: {trade.symbol} {side_str} {qty} "
+                f"@ {limit_price} | Order: {order_id}"
+            )
+            return order_id, qty
+
+        except Exception as e:
+            logger.error(f"Scale-in order failed for {trade.symbol}: {e}")
+            return "", 0.0
+
     def cancel_all_orders(self, symbol: str) -> None:
         """Cancel ALL open orders for a symbol."""
         try:
@@ -763,7 +821,7 @@ class BybitEngine:
     # ══════════════════════════════════════════════════════════════════════
 
     def place_tp_order(self, trade: Trade, tp_price: float, qty: float,
-                       tp_num: int = 1) -> str | None:
+                       tp_num: int = 1, tag: str = "TP") -> str | None:
         """Place TP as reduceOnly limit order on Bybit.
 
         Args:
@@ -771,6 +829,7 @@ class BybitEngine:
             tp_price: TP target price
             qty: Quantity to close
             tp_num: TP number (1-4) for orderLinkId
+            tag: OrderLinkId tag ("TP" for E1, "DTP" for DCA) to avoid duplicates
 
         Returns order_id if successful, None otherwise.
         """
@@ -802,7 +861,7 @@ class BybitEngine:
                 price=str(tp_price),
                 timeInForce="GTC",
                 reduceOnly=True,
-                orderLinkId=f"{trade.trade_id}_TP{tp_num}",
+                orderLinkId=f"{trade.trade_id}_{tag}{tp_num}",
                 **pos_idx,
             )
             order_id = result["result"]["orderId"]

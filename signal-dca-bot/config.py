@@ -4,15 +4,16 @@ Telegram Signal → Bybit DCA Trading Bot
 
 Strategy:
 - 1 DCA [1, 2] at entry-5% (zone-snapped to S1/R1 with 3% min)
-- Multi-TP: TP1 50%, TP2 10%, TP3 10%, TP4 10% (signal targets)
-- Trail remaining 20% after TP4 (1% CB)
-- Strategy C Hybrid SL Ladder:
-    TP1 → SL = BE (entry)
-    TP2 → SL stays at BE (let runners breathe)
-    TP3 → SL = TP1 price (lock profit)
-    TP4 → Trail 1% CB with SL floor at TP1
-- Two-tier SL: Safety SL at entry-10% (pre-DCA), Hard SL at avg-3% (post-DCA)
-- DCA exit: BE-Trail from avg (0.5% CB)
+- Multi-TP: TP1 50%, TP2 10%, TP3 20%, TP4 10% (signal targets)
+- Trail remaining 10% after TP4 (1% CB)
+- 2/3 Pyramiding: TP2 → scale-in 1/3 more (if no DCA filled)
+- SL Ladder (with scale-in):
+    TP1 → SL = BE + 0.1% buffer
+    TP2 → Scale-in + SL = exakt new Avg (zero risk)
+    TP3 → SL = TP2 price (profit lock)
+    TP4 → Trail 1% CB
+- Two-tier SL: Safety SL at entry-10% (pre-DCA), Hard SL at DCA-fill+3% (post-DCA)
+- DCA exit: New TPs from avg (TP1=0.5%, TP2=1.25%, trail 30% @1%CB)
 - Neo Cloud trend switch: close on clear reversal
 - Zone-snapping: S1/R1 dynamic zones from LuxAlgo/Bybit candles
 - Crash recovery: active trades persisted to PostgreSQL, full Bybit reconciliation on startup
@@ -56,23 +57,49 @@ class BotConfig:
         default_factory=lambda: [0, 5]
     )
     max_dca_levels: int = 1  # 1 DCA = total 2 entries (E1 + DCA1)
+    dca_limit_buffer_pct: float = 0.2  # 0.2% buffer on DCA limit (deeper into zone, 1-candle lag compensation)
 
     # ── Multi-TP (E1-only mode, uses signal targets) ──
     # Close portions at signal's TP1-TP4 price targets.
     # Remaining position trails after last TP.
     tp_close_pcts: list[float] = field(
-        default_factory=lambda: [50, 10, 10, 10]  # TP1=50%, TP2=10%, TP3=10%, TP4=10%
+        default_factory=lambda: [50, 10, 20, 10]  # TP1=50%, TP2=10%, TP3=20%, TP4=10%
     )
     trailing_callback_pct: float = 1.0  # 1% CB for trail after all TPs (room for runners)
-    sl_to_be_after_tp1: bool = True     # Strategy C: TP1→BE, TP2→stay BE, TP3→SL@TP1, TP4→trail
+    sl_to_be_after_tp1: bool = True     # TP1→BE, TP2→scale-in+SL=avg, TP3→SL@TP2, TP4→trail
     be_buffer_pct: float = 0.1          # 0.1% buffer above/below entry for BE stop (covers fees)
 
-    # ── DCA Exit (BE-Trail, activates from DCA1) ──
-    be_trail_callback_pct: float = 0.5  # Trail from avg with 0.5% CB
+    # ── 2/3 Pyramiding (scale-in at TP2) ──
+    # When TP2 hits → add another 1/3 position (same as E1 size) → 2/3 in trade
+    # Only if DCA NOT already filled (DCA already uses the 2/3 budget)
+    # 8/10 trades that reach TP2 also reach TP3 → double exposure at low risk
+    scale_in_enabled: bool = True
+    scale_in_at_tp: int = 2  # 1-indexed: scale in when TP2 fills
+
+    # ── DCA Exit TPs (replaces BE-trail after DCA fills) ──
+    # After DCA: place new TPs from avg, trail remaining after all DCA TPs
+    # TP1 = rescue-only (0.5% from avg), TP2 = 1.25% from avg
+    # At 3x size (E1+DCA), 0.75% spacing gives fat returns without needing big moves
+    dca_tp_pcts: list[float] = field(
+        default_factory=lambda: [0.5, 1.25]  # TP1=+0.5%, TP2=+1.25% from avg
+    )
+    dca_tp_close_pcts: list[float] = field(
+        default_factory=lambda: [50, 20]  # TP1=50%, TP2=20%, remaining 30% trails
+    )
+    dca_trail_callback_pct: float = 1.0  # 1% CB trail for remaining 30% after DCA TPs
+    dca_be_buffer_pct: float = 0.0  # No buffer for DCA SL→BE (0.5% TP1 is tight enough)
+
+    # ── DCA Quick-Trail (tighten SL once bounce confirms) ──
+    # After DCA fills, SL starts at deepest_fill+3%. Once price moves 0.5%
+    # in our favor → SL tightens to avg+0.5% buffer. Reduces loss from ~4.7%
+    # equity to ~1.1% equity per stop-out, while keeping -3% as safety net.
+    dca_quick_trail_trigger_pct: float = 0.5  # Trail when price moves 0.5% in our favor
+    dca_quick_trail_buffer_pct: float = 0.5   # SL at avg + 0.5% (against us)
 
     # ── Stop Loss (two-tier) ──
     # Pre-DCA: safety SL at entry-10% (wide, gives DCA room to fill)
     # Post-DCA: hard SL at avg-3% (tight, protects averaged position)
+    # Post-DCA + quick trail: SL at avg+0.5% (once bounce confirms)
     safety_sl_pct: float = 10.0   # Initial SL before DCA fills (entry-10%)
     hard_sl_pct: float = 3.0      # SL after DCA fills (avg-3%)
 
@@ -123,14 +150,20 @@ class BotConfig:
         return self.e1_margin(equity) * self.dca_multipliers[level]
 
     def dca_price(self, entry_price: float, level: int, side: str) -> float:
-        """Price at which a DCA level triggers."""
+        """Price at which a DCA level triggers.
+
+        Includes limit buffer (0.2%) to push limit deeper into zone,
+        compensating for 1-candle lag from NEOCloud zone data.
+        Long: 0.2% lower, Short: 0.2% higher.
+        """
         if level == 0:
             return entry_price
         pct = self.dca_spacing_pct[level] / 100
+        buf = self.dca_limit_buffer_pct / 100
         if side == "long":
-            return entry_price * (1 - pct)
+            return entry_price * (1 - pct) * (1 - buf)
         else:
-            return entry_price * (1 + pct)
+            return entry_price * (1 + pct) * (1 + buf)
 
     def print_summary(self, equity: float = 2400):
         """Print configuration summary with example equity."""
@@ -153,19 +186,27 @@ class BotConfig:
         print(f"║  Max Trades:     {self.max_simultaneous_trades}")
         print(f"║")
         print(f"║  DCA:            {self.max_dca_levels} DCA {self.dca_multipliers[:self.max_dca_levels+1]} (sum={sm})")
-        print(f"║  DCA Spacing:    {self.dca_spacing_pct[:self.max_dca_levels+1]}%")
+        print(f"║  DCA Spacing:    {self.dca_spacing_pct[:self.max_dca_levels+1]}% (+{self.dca_limit_buffer_pct}% limit buffer)")
         print(f"║  E1 Notional:    ${e1n:.0f}")
         print(f"║")
         print(f"║  Multi-TP (signal targets):")
         tp_labels = [f"TP{i+1}={p}%" for i, p in enumerate(self.tp_close_pcts)]
         trail_pct = 100 - sum(self.tp_close_pcts)
         print(f"║    {', '.join(tp_labels)}, Trail={trail_pct}%")
-        print(f"║    SL Ladder (Strategy C):")
-        print(f"║      TP1→BE+{self.be_buffer_pct}%, TP2→stay BE, TP3→SL@TP1, TP4→Trail {self.trailing_callback_pct}% CB")
+        print(f"║    SL Ladder (with scale-in):")
+        if self.scale_in_enabled:
+            print(f"║      TP1→BE+{self.be_buffer_pct}%, TP2→Scale-In+SL=Avg, TP3→SL@TP2, TP4→Trail {self.trailing_callback_pct}% CB")
+        else:
+            print(f"║      TP1→BE+{self.be_buffer_pct}%, TP2→stay BE, TP3→SL@TP1, TP4→Trail {self.trailing_callback_pct}% CB")
+        print(f"║    DCA SL: TP1→BE+{self.dca_be_buffer_pct}% (exakt avg)")
+        print(f"║    TP qty consolidation: TPs below min_qty auto-merge into trail")
         print(f"║")
-        print(f"║  DCA Exit:       BE-Trail ({self.be_trail_callback_pct}% CB from avg)")
+        dca_tp_str = ", ".join(f"TP{i+1}={p}%" for i, p in enumerate(self.dca_tp_pcts))
+        dca_trail_pct = 100 - sum(self.dca_tp_close_pcts)
+        print(f"║  DCA Exit:       {dca_tp_str} from avg, trail {dca_trail_pct}% @{self.dca_trail_callback_pct}%CB")
         print(f"║  Safety SL:      Entry - {self.safety_sl_pct}% (pre-DCA)")
         print(f"║  Hard SL:        Avg - {self.hard_sl_pct}% (post-DCA)")
+        print(f"║  Quick Trail:    +{self.dca_quick_trail_trigger_pct}% → SL=avg+{self.dca_quick_trail_buffer_pct}%")
         print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")
         print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")

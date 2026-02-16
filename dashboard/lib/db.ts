@@ -283,35 +283,48 @@ export async function getExitDistribution(
       dateFilter = ` AND closed_at >= NOW() - INTERVAL '${days} days'`
     }
 
+    // Cumulative TP counting: a trade that hit TP3 also hit TP1 and TP2
+    // "Trailing stop" = all TPs hit, "after TPx" = x TPs hit sequentially
     const result = await client.query(`
-      WITH categorized AS (
+      WITH trade_data AS (
         SELECT
           CASE
-            WHEN close_reason ILIKE '%tp4%' THEN 'TP4'
-            WHEN close_reason ILIKE '%tp3%' THEN 'TP3'
-            WHEN close_reason ILIKE '%tp2%' THEN 'TP2'
-            WHEN tp1_hit OR close_reason ILIKE '%tp1%' THEN 'TP1'
-            WHEN close_reason ILIKE '%sl%' OR close_reason ILIKE '%stop%' THEN 'Stop Loss'
-            ELSE 'Other'
-          END as category
+            WHEN close_reason ILIKE '%trail%' AND tp1_hit THEN 4
+            WHEN close_reason ILIKE '%tp4%' THEN 4
+            WHEN close_reason ILIKE '%tp3%' THEN 3
+            WHEN close_reason ILIKE '%tp2%' THEN 2
+            WHEN tp1_hit THEN 1
+            ELSE 0
+          END as max_tp_hit,
+          CASE
+            WHEN close_reason ILIKE '%sl%' OR (close_reason ILIKE '%stop%' AND close_reason NOT ILIKE '%trail%') THEN true
+            ELSE false
+          END as is_sl
         FROM trades
         WHERE closed_at IS NOT NULL${dateFilter}
-      )
-      SELECT category as level, COUNT(*) as count
-      FROM categorized
-      GROUP BY category
-      ORDER BY
-        CASE category
-          WHEN 'TP4' THEN 1
-          WHEN 'TP3' THEN 2
-          WHEN 'TP2' THEN 3
-          WHEN 'TP1' THEN 4
-          WHEN 'Stop Loss' THEN 5
-          ELSE 6
-        END
+      ),
+      total AS (SELECT COUNT(*) as cnt FROM trade_data)
+      SELECT level, count FROM (
+        SELECT 'TP1' as level, COUNT(*) as count, 1 as sort_order FROM trade_data WHERE max_tp_hit >= 1
+        UNION ALL
+        SELECT 'TP2', COUNT(*), 2 FROM trade_data WHERE max_tp_hit >= 2
+        UNION ALL
+        SELECT 'TP3', COUNT(*), 3 FROM trade_data WHERE max_tp_hit >= 3
+        UNION ALL
+        SELECT 'TP4', COUNT(*), 4 FROM trade_data WHERE max_tp_hit >= 4
+        UNION ALL
+        SELECT 'Stop Loss', COUNT(*), 5 FROM trade_data WHERE max_tp_hit = 0 AND is_sl
+        UNION ALL
+        SELECT 'Other', COUNT(*), 6 FROM trade_data WHERE max_tp_hit = 0 AND NOT is_sl
+      ) sub
+      ORDER BY sort_order
     `)
 
-    const total = result.rows.reduce((sum: number, r: any) => sum + parseInt(r.count), 0)
+    const totalTrades = await client.query(`
+      SELECT COUNT(*) as cnt FROM trades WHERE closed_at IS NOT NULL${dateFilter}
+    `)
+    const total = parseInt(totalTrades.rows[0]?.cnt || '0')
+
     return result.rows
       .map((r: any) => ({
         level: r.level,

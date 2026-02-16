@@ -11,6 +11,7 @@ import TimeRangeSelector, { TimeRange } from '@/components/time-range-selector'
 import DateRangePicker from '@/components/date-range-picker'
 import EquitySimulator from '@/components/equity-simulator'
 import { SimSettings } from '@/lib/simulation'
+import Image from 'next/image'
 
 export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1M')
@@ -45,11 +46,16 @@ export default function Dashboard() {
         <div className="container mx-auto px-4 py-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
-              <h1 className="text-2xl font-bold text-foreground">
-                *Systemic
-              </h1>
+              <Image
+                src="/images/sys_logo.svg"
+                alt="Systemic"
+                width={180}
+                height={36}
+                className="dark:invert"
+                priority
+              />
               <p className="text-sm text-muted-foreground">
-                Bybit Perpetual &bull; 20x Leverage &bull; Neo Cloud filter &bull; RZ DCA
+                Bybit Futures &bull; Live Market Execution &bull; 20x Leverage
               </p>
             </div>
             <TimeRangeSelector
@@ -100,7 +106,7 @@ export default function Dashboard() {
       {/* Footer */}
       <footer className="border-t border-border py-4 mt-8">
         <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          *Systemic &bull; Auto-refreshes every 30s
+          <Image src="/images/sys_logo.svg" alt="Systemic" width={100} height={20} className="inline dark:invert" /> &bull; Auto-refreshes every 30s
         </div>
       </footer>
     </main>

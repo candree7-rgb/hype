@@ -94,6 +94,7 @@ def _init_tables_inline(conn):
             realized_pnl DECIMAL(20,8) DEFAULT 0, pnl_pct_margin DECIMAL(10,4),
             pnl_pct_equity DECIMAL(10,6), equity_at_entry DECIMAL(12,2), equity_at_close DECIMAL(12,2),
             is_win BOOLEAN, max_dca_reached INTEGER DEFAULT 0, tp1_hit BOOLEAN DEFAULT FALSE,
+            tps_hit INTEGER DEFAULT 0, trail_pnl_pct DECIMAL(10,4) DEFAULT 0,
             close_reason VARCHAR(200), signal_leverage INTEGER DEFAULT 0,
             zone_source VARCHAR(20), zones_used INTEGER DEFAULT 0,
             opened_at TIMESTAMPTZ, closed_at TIMESTAMPTZ, duration_minutes INTEGER,
@@ -295,7 +296,8 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
                tp1_hit: bool, close_reason: str, opened_at: float,
                closed_at: float, signal_leverage: int,
                equity_at_entry: float = 0, equity_at_close: float = 0,
-               leverage: int = 20) -> bool:
+               leverage: int = 20, tps_hit: int = 0,
+               trail_pnl_pct: float = 0) -> bool:
     """Save a closed trade to history."""
     conn = get_connection()
     if not conn:
@@ -317,27 +319,91 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
                 (trade_id, symbol, side, entry_price, avg_price, close_price,
                  total_qty, total_margin, leverage, realized_pnl,
                  pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
-                 is_win, max_dca_reached, tp1_hit, close_reason, signal_leverage,
+                 is_win, max_dca_reached, tp1_hit, tps_hit, trail_pnl_pct,
+                 close_reason, signal_leverage,
                  opened_at, closed_at, duration_minutes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (trade_id) DO UPDATE SET
                 realized_pnl=%s, close_price=%s, close_reason=%s, closed_at=%s,
                 pnl_pct_margin=%s, pnl_pct_equity=%s, equity_at_close=%s, is_win=%s,
-                duration_minutes=%s
+                duration_minutes=%s, tps_hit=%s, trail_pnl_pct=%s
         """, (trade_id, symbol, side, entry_price, avg_price, close_price,
               total_qty, total_margin, leverage, realized_pnl,
               pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
-              is_win, max_dca, tp1_hit, close_reason, signal_leverage,
+              is_win, max_dca, tp1_hit, tps_hit, trail_pnl_pct,
+              close_reason, signal_leverage,
               opened_dt, closed_dt, duration_min,
               # ON CONFLICT updates:
               realized_pnl, close_price, close_reason, closed_dt,
               pnl_pct_margin, pnl_pct_equity, equity_at_close, is_win,
-              duration_min))
+              duration_min, tps_hit, trail_pnl_pct))
         cur.close()
         return True
     except Exception as e:
         logger.error(f"DB save_trade failed for {trade_id}: {e}")
         return False
+
+
+def update_trade_pnl(trade_id: str, realized_pnl: float, total_margin: float,
+                     equity_at_entry: float) -> bool:
+    """Update PnL for an existing trade (used by admin fix-pnl)."""
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        pnl_pct_margin = (realized_pnl / total_margin * 100) if total_margin > 0 else 0
+        pnl_pct_equity = (realized_pnl / equity_at_entry * 100) if equity_at_entry > 0 else 0
+        is_win = realized_pnl > 0.01
+        equity_at_close = equity_at_entry + realized_pnl
+
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE trades SET
+                realized_pnl = %s, pnl_pct_margin = %s, pnl_pct_equity = %s,
+                equity_at_close = %s, is_win = %s
+            WHERE trade_id = %s
+        """, (realized_pnl, pnl_pct_margin, pnl_pct_equity,
+              equity_at_close, is_win, trade_id))
+        updated = cur.rowcount > 0
+        cur.close()
+        return updated
+    except Exception as e:
+        logger.error(f"DB update_trade_pnl failed for {trade_id}: {e}")
+        return False
+
+
+def get_recent_trade_ids(days: int = 7) -> list[dict]:
+    """Get recent trade IDs with metadata for PnL fixing."""
+    conn = get_connection()
+    if not conn:
+        return []
+
+    try:
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT trade_id, symbol, side, total_margin, equity_at_entry,
+                   realized_pnl, opened_at
+            FROM trades
+            WHERE opened_at >= %s
+            ORDER BY opened_at DESC
+        """, (cutoff,))
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            {
+                "trade_id": r[0], "symbol": r[1], "side": r[2],
+                "total_margin": float(r[3] or 0), "equity_at_entry": float(r[4] or 0),
+                "realized_pnl": float(r[5] or 0),
+                "opened_at": r[6].timestamp() if r[6] else 0,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error(f"DB get_recent_trade_ids failed: {e}")
+        return []
 
 
 def get_trade_by_symbol_time(symbol: str, created_time: float) -> bool:
@@ -399,6 +465,35 @@ def get_trade_by_symbol_close_time(symbol: str, close_time: float) -> bool:
         return False
 
 
+def get_trade_by_symbol_in_range(symbol: str, event_time: float) -> bool:
+    """Check if event_time falls within the open→close window of any known trade.
+
+    Used by Bybit sync to detect partial fills (e.g. TP2 close) that belong
+    to a bot-managed trade.  A 120s buffer is applied to both ends.
+    """
+    conn = get_connection()
+    if not conn:
+        return False
+
+    try:
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromtimestamp(event_time, tz=timezone.utc)
+        buf = timedelta(seconds=120)
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM trades WHERE symbol = %s "
+            "AND opened_at <= %s AND closed_at >= %s LIMIT 1",
+            (symbol, dt + buf, dt - buf)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row is not None
+    except Exception as e:
+        logger.error(f"DB get_trade_by_symbol_in_range failed: {e}")
+        return False
+
+
 def get_trade_stats() -> dict:
     """Get aggregate trade stats from history."""
     conn = get_connection()
@@ -456,7 +551,7 @@ def get_recent_trades(limit: int = 20) -> list[dict]:
             SELECT trade_id, symbol, side, entry_price, avg_price, close_price,
                    total_margin, realized_pnl, pnl_pct_margin, max_dca_reached,
                    tp1_hit, close_reason, opened_at, closed_at, duration_minutes,
-                   is_win, leverage
+                   is_win, leverage, tps_hit, trail_pnl_pct
             FROM trades
             ORDER BY closed_at DESC
             LIMIT %s
@@ -476,6 +571,8 @@ def get_recent_trades(limit: int = 20) -> list[dict]:
                 "dca": r[9], "tp1": r[10], "reason": r[11],
                 "duration": f"{r[14]}min" if r[14] else "?",
                 "is_win": r[15], "leverage": r[16],
+                "tps_hit": r[17] or 0,
+                "trail_pnl_pct": f"{float(r[18]):+.2f}%" if r[18] else "0%",
             }
             for r in rows
         ]
@@ -596,8 +693,12 @@ def delete_active_trade(trade_id: str) -> bool:
         return False
 
 
-def get_all_active_trades() -> list[dict]:
-    """Load all active trades from DB (for startup recovery)."""
+def get_all_active_trades(limit: int = 6) -> list[dict]:
+    """Load most recent active trades from DB (for startup recovery).
+
+    Only loads the newest `limit` trades (default 6 = max_simultaneous_trades).
+    Stale entries beyond the limit are auto-deleted.
+    """
     conn = get_connection()
     if not conn:
         return []
@@ -605,11 +706,30 @@ def get_all_active_trades() -> list[dict]:
     try:
         import json
         cur = conn.cursor()
+
+        # Count total rows
+        cur.execute("SELECT COUNT(*) FROM active_trades")
+        total = cur.fetchone()[0]
+
+        # Load newest `limit` trades
         cur.execute(
             "SELECT trade_id, symbol, side, status, state_json "
-            "FROM active_trades ORDER BY created_at"
+            "FROM active_trades ORDER BY updated_at DESC LIMIT %s",
+            (limit,)
         )
         rows = cur.fetchall()
+
+        # Cleanup stale entries beyond limit
+        if total > limit:
+            kept_ids = [r[0] for r in rows]
+            placeholders = ",".join(["%s"] * len(kept_ids))
+            cur.execute(
+                f"DELETE FROM active_trades WHERE trade_id NOT IN ({placeholders})",
+                kept_ids
+            )
+            stale_count = total - len(kept_ids)
+            logger.info(f"DB cleanup: removed {stale_count} stale active_trades (kept {len(kept_ids)})")
+
         cur.close()
 
         results = []
