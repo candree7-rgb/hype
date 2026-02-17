@@ -25,22 +25,29 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 2rem;
+      gap: 1.5rem;
       text-align: center;
     }
 
+    .logo {
+      width: clamp(120px, 25vw, 180px);
+      opacity: 0.85;
+    }
+
     .title {
-      font-size: clamp(2rem, 6vw, 3.5rem);
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      line-height: 1.1;
+      font-size: clamp(1.1rem, 3vw, 1.4rem);
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: hsl(215 16% 57%);
     }
 
     .subtitle {
-      font-size: clamp(0.95rem, 2.5vw, 1.15rem);
+      font-size: clamp(0.85rem, 2vw, 0.95rem);
       font-weight: 400;
-      color: hsl(215 16% 57%);
+      color: hsl(215 16% 42%);
       letter-spacing: 0.02em;
+      margin-top: -0.75rem;
     }
 
     /* ── Stats tiles ── */
@@ -109,20 +116,14 @@
     .btn:active {
       transform: translateY(0);
     }
-
-    .logo {
-      margin-top: 4rem;
-      width: clamp(160px, 30vw, 240px);
-      opacity: 0.85;
-    }
   </style>
 </head>
 <body>
   <div class="container">
-    <div>
-      <h1 class="title">Trading Systems</h1>
-      <p class="subtitle">by Andr&eacute; Carva</p>
-    </div>
+    <img src="/images/sys_logo.svg" alt="Systemic Trading Systems" class="logo">
+
+    <h1 class="title">Trading Systems</h1>
+    <p class="subtitle">by Andr&eacute; Carva</p>
 
     <div class="stats">
       <div class="stat-card loading" id="card-trades">
@@ -140,7 +141,6 @@
     </div>
 
     <a href="https://trades.systemic.systems/" class="btn">See Results</a>
-    <img src="/images/sys_logo.svg" alt="Systemic Trading Systems" class="logo">
   </div>
 
   <script>

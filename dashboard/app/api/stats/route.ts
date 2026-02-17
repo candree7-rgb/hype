@@ -1,6 +1,16 @@
 import { NextResponse } from 'next/server'
 import { getStats } from '@/lib/db'
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS })
+}
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url)
@@ -9,10 +19,10 @@ export async function GET(request: Request) {
     const from = searchParams.get('from') || undefined
     const to = searchParams.get('to') || undefined
     const stats = await getStats(days, from, to)
-    return NextResponse.json(stats)
+    return NextResponse.json(stats, { headers: CORS_HEADERS })
   } catch (error) {
     console.error('Failed to fetch stats:', error)
-    return NextResponse.json({ error: 'Failed to fetch stats' }, { status: 500 })
+    return NextResponse.json({ error: 'Failed to fetch stats' }, { status: 500, headers: CORS_HEADERS })
   }
 }
 
