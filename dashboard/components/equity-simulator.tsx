@@ -10,9 +10,12 @@ interface EquitySimulatorProps {
 
 const STORAGE_KEY = 'equity-sim-v1'
 
+const DEFAULT_EQUITY = Number(process.env.NEXT_PUBLIC_DEFAULT_EQUITY) || 10000
+const DEFAULT_TRADE_PCT = Number(process.env.NEXT_PUBLIC_DEFAULT_TRADE_PCT) || 5
+
 export default function EquitySimulator({ onChange, isSimulated = true }: EquitySimulatorProps) {
-  const [equity, setEquity] = useState(10000)
-  const [tradePct, setTradePct] = useState(5)
+  const [equity, setEquity] = useState(DEFAULT_EQUITY)
+  const [tradePct, setTradePct] = useState(DEFAULT_TRADE_PCT)
   const [compounding, setCompounding] = useState(true)
   const [loaded, setLoaded] = useState(false)
 

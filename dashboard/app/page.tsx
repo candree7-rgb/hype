@@ -19,7 +19,11 @@ export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1M')
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customDateRange, setCustomDateRange] = useState<{ from: string; to: string } | null>(null)
-  const [simSettings, setSimSettings] = useState<SimSettings>({ equity: 10000, tradePct: 5, compounding: true })
+  const [simSettings, setSimSettings] = useState<SimSettings>({
+    equity: Number(process.env.NEXT_PUBLIC_DEFAULT_EQUITY) || 10000,
+    tradePct: Number(process.env.NEXT_PUBLIC_DEFAULT_TRADE_PCT) || 5,
+    compounding: true,
+  })
 
   const handleSimChange = useCallback((settings: SimSettings) => {
     setSimSettings(settings)
