@@ -3,23 +3,31 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
   <title>Systemic Trading Systems</title>
   <link rel="icon" href="/images/sys_logo.svg" type="image/svg+xml">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    html, body {
+    html {
       background: #030711;
-      background-color: #030711;
+      color-scheme: dark;
+      height: 100%;
     }
 
-    html {
-      min-height: 100%;
+    /* Fixed full-screen backdrop — prevents any color bleed from browser chrome */
+    html::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: #030711;
+      z-index: -1;
     }
 
     body {
       font-family: 'Inter', -apple-system, sans-serif;
+      background: #030711;
       color: hsl(213 31% 91%);
       min-height: 100vh;
       display: flex;
