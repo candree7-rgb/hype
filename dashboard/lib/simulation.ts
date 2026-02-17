@@ -20,9 +20,10 @@ export interface SimSummary {
   per_trade: Map<string, SimTradeResult>
 }
 
-// Bot's configured equity allocation per trade slot (matches config.py equity_per_trade_pct).
-// pnl_pct_equity from the DB already bakes in this allocation.
-const ORIGINAL_TRADE_PCT = Number(process.env.NEXT_PUBLIC_DEFAULT_TRADE_PCT) || 5
+// Bot's ACTUAL equity allocation per trade on testnet (matches config.py EQUITY_PCT).
+// pnl_pct_equity from the DB was recorded at this rate. Must stay fixed at 5
+// so the simulation correctly scales when NEXT_PUBLIC_DEFAULT_TRADE_PCT differs.
+const ORIGINAL_TRADE_PCT = 5
 
 export function runSimulation(trades: Trade[], settings: SimSettings): SimSummary {
   // Sort chronologically (oldest first) for correct compounding order
