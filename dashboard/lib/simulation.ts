@@ -22,8 +22,8 @@ export interface SimSummary {
 }
 
 // Fallback for trades recorded before equity_pct_per_trade was stored in DB.
-// All historical testnet trades used 5% equity allocation.
-const DEFAULT_EQUITY_PCT = 5
+// Reads from NEXT_PUBLIC_BOT_EQUITY_PCT so it stays in sync with the bot's actual config.
+const DEFAULT_EQUITY_PCT = Number(process.env.NEXT_PUBLIC_BOT_EQUITY_PCT) || 5
 
 export function runSimulation(trades: Trade[], settings: SimSettings): SimSummary {
   // Sort chronologically (oldest first) for correct compounding order
