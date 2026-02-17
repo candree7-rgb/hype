@@ -41,7 +41,7 @@ Next.js 14 + React 18 Dashboard mit Recharts. Zeigt Equity-Kurve, Trades-Tabelle
 ## Entry
 
 1. **Signal kommt** via Telegram VIP Club (Side, Entry, 4 TPs, SL)
-2. **Batch Buffer:** 5 Sekunden sammeln, nach Signal-Leverage sortieren, Top N nehmen
+2. **Batch Buffer:** 5 Sekunden sammeln, Neo Cloud pre-filtern, alle validen platzieren (bis free_slots), nach 3 Fills Rest canceln
 3. **Neo Cloud Filter:** Signal wird nur ausgeführt wenn Neo Cloud Trend passt (Long = "up", Short = "down")
 4. **E1 Order:** Limit @ Signal-Preis (oder Market), 1/3 des Trade-Budgets
 5. **DCA1 Limit:** Gleichzeitig platziert bei Entry-5% (zone-snapped zu S1/R1 wenn >3% Abstand)
@@ -50,7 +50,7 @@ Next.js 14 + React 18 Dashboard mit Recharts. Zeigt Equity-Kurve, Trades-Tabelle
 
 - **5% Equity pro Trade**, 20x Leverage
 - **DCA Multipliers:** [1, 2] → E1 = 1/3, DCA1 = 2/3 des Budgets
-- **Max 6 gleichzeitige Trades**
+- **Max 6 gleichzeitige Trades**, max 3 Fills pro Batch (Surplus PENDING wird gecancelt)
 
 ## Exit-Strategie: E1-Only (kein DCA gefüllt)
 

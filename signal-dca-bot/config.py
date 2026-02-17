@@ -40,6 +40,7 @@ class BotConfig:
     leverage: int = 20                  # Fixed leverage for all trades
     equity_pct_per_trade: float = 5.0   # 5% of equity per trade
     max_simultaneous_trades: int = 6
+    max_fills_per_batch: int = 3        # Max E1 fills per signal batch (extras cancelled after N fills)
     e1_limit_order: bool = True         # True = Limit at signal price, False = Market
     e1_timeout_minutes: int = 30        # Cancel E1 limit if not filled after X minutes
 
@@ -183,6 +184,7 @@ class BotConfig:
         print(f"║  Max Loss (no DCA): ${safety_loss:.0f} ({safety_loss/equity*100:.1f}% eq) [entry-{self.safety_sl_pct}%]")
         print(f"║  Max Loss (DCA):    ${dca_loss:.0f} ({dca_loss/equity*100:.1f}% eq) [avg-{self.hard_sl_pct}%]")
         print(f"║  Max Trades:     {self.max_simultaneous_trades}")
+        print(f"║  Batch Cap:      {self.max_fills_per_batch} fills/batch (extras cancelled)")
         print(f"║")
         print(f"║  DCA:            {self.max_dca_levels} DCA {self.dca_multipliers[:self.max_dca_levels+1]} (sum={sm})")
         print(f"║  DCA Spacing:    {self.dca_spacing_pct[:self.max_dca_levels+1]}% (+{self.dca_limit_buffer_pct}% limit buffer)")
@@ -233,6 +235,7 @@ def load_config() -> BotConfig:
         leverage=int(os.getenv("LEVERAGE", "20")),
         equity_pct_per_trade=float(os.getenv("EQUITY_PCT", "5")),
         max_simultaneous_trades=int(os.getenv("MAX_TRADES", "6")),
+        max_fills_per_batch=int(os.getenv("MAX_FILLS_PER_BATCH", "3")),
         database_url=os.getenv("DATABASE_URL", ""),
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
