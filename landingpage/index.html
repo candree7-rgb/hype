@@ -43,9 +43,51 @@
       letter-spacing: 0.02em;
     }
 
+    /* ── Stats tiles ── */
+    .stats {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 0.5rem;
+    }
+
+    .stat-card {
+      background: hsl(224 71% 6%);
+      border: 1px solid hsl(216 34% 17%);
+      border-radius: 0.75rem;
+      padding: 1.25rem 1.75rem;
+      min-width: 140px;
+      transition: opacity 0.3s;
+    }
+
+    .stat-card.loading {
+      opacity: 0.4;
+    }
+
+    .stat-label {
+      font-size: 0.75rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: hsl(215 16% 57%);
+      margin-bottom: 0.35rem;
+    }
+
+    .stat-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #12d393;
+    }
+
+    .stat-value.neutral {
+      color: hsl(213 31% 91%);
+    }
+
+    /* ── Button ── */
     .btn {
       display: inline-block;
-      margin-top: 1rem;
+      margin-top: 0.5rem;
       padding: 0.85rem 2.5rem;
       background: #12d393;
       color: hsl(224 71% 4%);
@@ -81,8 +123,48 @@
       <h1 class="title">Trading Systems</h1>
       <p class="subtitle">by Andr&eacute; Carva</p>
     </div>
-    <a href="/trades" class="btn">See Results</a>
+
+    <div class="stats">
+      <div class="stat-card loading" id="card-trades">
+        <div class="stat-label">Total Trades</div>
+        <div class="stat-value neutral" id="val-trades">&mdash;</div>
+      </div>
+      <div class="stat-card loading" id="card-pnl">
+        <div class="stat-label">Total Return</div>
+        <div class="stat-value" id="val-pnl">&mdash;</div>
+      </div>
+      <div class="stat-card loading" id="card-wr">
+        <div class="stat-label">Win Rate</div>
+        <div class="stat-value" id="val-wr">&mdash;</div>
+      </div>
+    </div>
+
+    <a href="https://trades.systemic.systems/" class="btn">See Results</a>
     <img src="/images/sys_logo.svg" alt="Systemic Trading Systems" class="logo">
   </div>
+
+  <script>
+    const API = 'https://trades.systemic.systems/api/stats';
+
+    async function loadStats() {
+      try {
+        const res = await fetch(API);
+        if (!res.ok) return;
+        const s = await res.json();
+
+        document.getElementById('val-trades').textContent = s.total_trades ?? '—';
+        document.getElementById('val-pnl').textContent =
+          (s.total_pnl_pct >= 0 ? '+' : '') + parseFloat(s.total_pnl_pct).toFixed(1) + '%';
+        document.getElementById('val-wr').textContent =
+          parseFloat(s.win_rate).toFixed(1) + '%';
+
+        document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('loading'));
+      } catch (e) {
+        // silently keep dashes on error
+      }
+    }
+
+    loadStats();
+  </script>
 </body>
 </html>
