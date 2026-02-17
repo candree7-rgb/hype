@@ -48,7 +48,7 @@ export default function Dashboard() {
       />
 
       {/* Header */}
-      <header className="border-b border-border bg-card sticky top-0 z-40">
+      <header className="border-b border-border bg-background sticky top-0 z-40">
         <div className="container mx-auto px-4 py-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
@@ -83,7 +83,7 @@ export default function Dashboard() {
       </header>
 
       {/* Simulator Controls */}
-      <div className="border-b border-border bg-card">
+      <div className="border-b border-border bg-background">
         <div className="container mx-auto px-4 py-3">
           <EquitySimulator onChange={handleSimChange} isSimulated={isSimulated} />
         </div>
