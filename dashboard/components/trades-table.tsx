@@ -250,15 +250,20 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                   </td>
                 )}
 
-                {/* P&L % - always shown (same in both modes) */}
+                {/* P&L % - simulated mode uses scaled %, real mode uses raw DB value */}
                 <td className="px-4 py-4">
-                  <span className={cn(
-                    'font-semibold text-sm',
-                    (trade.pnl_pct_equity || 0) >= 0 ? 'text-success' : 'text-danger'
-                  )}>
-                    {(trade.pnl_pct_equity || 0) >= 0 ? '+' : ''}
-                    {parseFloat(trade.pnl_pct_equity?.toString() || '0').toFixed(2)}%
-                  </span>
+                  {(() => {
+                    const sim = isSimulated && simResults ? simResults.per_trade.get(trade.trade_id) : null
+                    const pct = sim ? sim.sim_pnl_pct : parseFloat(trade.pnl_pct_equity?.toString() || '0')
+                    return (
+                      <span className={cn(
+                        'font-semibold text-sm',
+                        pct >= 0 ? 'text-success' : 'text-danger'
+                      )}>
+                        {pct >= 0 ? '+' : ''}{pct.toFixed(2)}%
+                      </span>
+                    )
+                  })()}
                 </td>
 
                 {/* Exit badges */}

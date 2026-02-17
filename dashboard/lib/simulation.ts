@@ -8,6 +8,7 @@ export interface SimSettings {
 
 export interface SimTradeResult {
   sim_pnl: number
+  sim_pnl_pct: number         // pnl_pct_equity scaled by tradePct/originalPct
   sim_equity_after: number
 }
 
@@ -70,6 +71,7 @@ export function runSimulation(trades: Trade[], settings: SimSettings): SimSummar
 
     perTrade.set(trade.trade_id, {
       sim_pnl: simPnl,
+      sim_pnl_pct: pnlPctEquity * scaleFactor,
       sim_equity_after: runningEquity,
     })
   }
