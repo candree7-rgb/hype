@@ -12,22 +12,21 @@
     :root { color-scheme: dark; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    html {
-      background: #030711 !important;
-      min-height: 100%;
+    html, body {
+      background: #030711;
     }
 
     body {
-      background: #030711 !important;
-      min-height: 100%;
       font-family: 'Inter', -apple-system, sans-serif;
       color: hsl(213 31% 91%);
     }
 
+    /* Fixed to viewport edges — physically covers every pixel */
     .container {
+      position: fixed;
+      inset: 0;
+      overflow-y: auto;
       background: #030711;
-      min-height: 100vh;
-      min-height: 100dvh;
       display: grid;
       place-content: center;
       justify-items: center;
