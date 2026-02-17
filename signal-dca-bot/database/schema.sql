@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS trades (
     close_reason        VARCHAR(200),               -- 'TP1+trail', 'BE-trail', 'Hard SL', etc.
     signal_leverage     INTEGER DEFAULT 0,          -- Original signal leverage
 
+    -- Config at time of trade
+    equity_pct_per_trade DECIMAL(5, 2) DEFAULT 5.0, -- Bot's EQUITY_PCT when trade was opened
+
     -- Zone snapping
     zone_source         VARCHAR(20),                -- luxalgo, swing, fixed
     zones_used          INTEGER DEFAULT 0,          -- How many DCAs snapped to zones
@@ -159,6 +162,9 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='trail_pnl_pct') THEN
         ALTER TABLE trades ADD COLUMN trail_pnl_pct DECIMAL(10,4) DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='equity_pct_per_trade') THEN
+        ALTER TABLE trades ADD COLUMN equity_pct_per_trade DECIMAL(5,2) DEFAULT 5.0;
     END IF;
 END
 $$;

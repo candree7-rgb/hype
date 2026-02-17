@@ -20,21 +20,15 @@ export interface SimSummary {
   per_trade: Map<string, SimTradeResult>
 }
 
-// Bot's ACTUAL equity allocation per trade on testnet (matches config.py EQUITY_PCT).
-// pnl_pct_equity from the DB was recorded at this rate. Must stay fixed at 5
-// so the simulation correctly scales when NEXT_PUBLIC_DEFAULT_TRADE_PCT differs.
-const ORIGINAL_TRADE_PCT = 5
+// Fallback for trades recorded before equity_pct_per_trade was stored in DB.
+// All historical testnet trades used 5% equity allocation.
+const DEFAULT_EQUITY_PCT = 5
 
 export function runSimulation(trades: Trade[], settings: SimSettings): SimSummary {
   // Sort chronologically (oldest first) for correct compounding order
   const sorted = [...trades].sort((a, b) =>
     new Date(a.closed_at).getTime() - new Date(b.closed_at).getTime()
   )
-
-  // Scale PnL proportionally when user simulates a different equity % per trade.
-  // pnl_pct_equity was recorded at ORIGINAL_TRADE_PCT (5%). If the user sets
-  // tradePct=10%, returns double; tradePct=2.5%, returns halve.
-  const scaleFactor = settings.tradePct / ORIGINAL_TRADE_PCT
 
   let runningEquity = settings.equity
   let totalSimPnl = 0
@@ -45,6 +39,13 @@ export function runSimulation(trades: Trade[], settings: SimSettings): SimSummar
 
   for (const trade of sorted) {
     const baseEquity = settings.compounding ? runningEquity : settings.equity
+
+    // Scale PnL proportionally when user simulates a different equity % per trade.
+    // Each trade stores the ACTUAL equity_pct it was recorded at (falls back to 5%
+    // for trades before this column existed). This handles mid-run config changes
+    // correctly: e.g. first 50 trades at 5%, then switch to 10%.
+    const originalPct = parseFloat(trade.equity_pct_per_trade?.toString() || '0') || DEFAULT_EQUITY_PCT
+    const scaleFactor = settings.tradePct / originalPct
 
     // Use pnl_pct_equity (return on account equity) instead of pnl_pct_margin.
     // pnl_pct_margin is the return on DEPLOYED margin only, which is ~1/3 of

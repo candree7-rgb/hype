@@ -1581,6 +1581,7 @@ async def bybit_trade_sync():
                     equity_at_entry=equity,
                     equity_at_close=equity,
                     leverage=config.leverage,
+                    equity_pct_per_trade=config.equity_pct_per_trade,
                 )
                 fill_info = f" ({rec['fill_count']} fills)" if rec.get("fill_count", 1) > 1 else ""
                 logger.info(

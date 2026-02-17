@@ -707,6 +707,7 @@ class TradeManager:
             equity_at_close=trade.equity_at_entry + pnl,
             tps_hit=trade.tps_hit,
             trail_pnl_pct=round(trade.trail_pnl_pct, 4),
+            equity_pct_per_trade=self.config.equity_pct_per_trade,
         )
 
         total = self.total_wins + self.total_losses + self.total_breakeven
