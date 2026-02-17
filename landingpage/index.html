@@ -130,10 +130,6 @@
         <div class="stat-label">Total Trades</div>
         <div class="stat-value neutral" id="val-trades">&mdash;</div>
       </div>
-      <div class="stat-card loading" id="card-pnl">
-        <div class="stat-label">Total Return</div>
-        <div class="stat-value" id="val-pnl">&mdash;</div>
-      </div>
       <div class="stat-card loading" id="card-wr">
         <div class="stat-label">Win Rate</div>
         <div class="stat-value" id="val-wr">&mdash;</div>
@@ -153,8 +149,6 @@
         const s = await res.json();
 
         document.getElementById('val-trades').textContent = s.total_trades ?? '—';
-        document.getElementById('val-pnl').textContent =
-          (s.total_pnl_pct >= 0 ? '+' : '') + parseFloat(s.total_pnl_pct).toFixed(1) + '%';
         document.getElementById('val-wr').textContent =
           parseFloat(s.win_rate).toFixed(1) + '%';
 
