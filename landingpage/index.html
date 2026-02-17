@@ -116,13 +116,41 @@
     .btn:active {
       transform: translateY(0);
     }
+
+    /* ── Beta badge ── */
+    .beta {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: hsl(45 100% 60%);
+      border: 1.5px solid hsl(45 100% 40%);
+      border-radius: 4px;
+      padding: 0.15rem 0.5rem;
+      vertical-align: middle;
+      margin-left: 0.5rem;
+    }
+
+    /* ── Notice box ── */
+    .notice {
+      max-width: 380px;
+      font-size: 0.78rem;
+      line-height: 1.5;
+      color: hsl(45 80% 70%);
+      background: hsla(45 80% 40% / 0.08);
+      border: 1px solid hsla(45 80% 50% / 0.25);
+      border-radius: 0.6rem;
+      padding: 0.75rem 1.25rem;
+      margin-top: 0.25rem;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <img src="/images/sys_logo.svg" alt="Systemic Trading Systems" class="logo">
 
-    <h1 class="title">Trading Systems</h1>
+    <h1 class="title">Trading Systems <span class="beta">Beta</span></h1>
     <p class="subtitle">by Andr&eacute; Carva</p>
 
     <div class="stats">
@@ -135,6 +163,8 @@
         <div class="stat-value" id="val-wr">&mdash;</div>
       </div>
     </div>
+
+    <div class="notice">Private beta &mdash; family &amp; friends only. Not a public product.</div>
 
     <a href="https://trades.systemic.systems/" class="btn">See Results</a>
   </div>
