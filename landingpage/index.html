@@ -10,21 +10,13 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    /* Fixed backdrop — always covers entire viewport, even mid-resize */
-    html::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background: #030711;
-      z-index: -1;
-    }
-
     html {
       background-color: #030711;
+      /* Single source of truth — propagates to browser canvas.
+         Body has NO background so there's only ONE painted layer. */
     }
 
     body {
-      background-color: #030711;
       font-family: 'Inter', -apple-system, sans-serif;
       color: hsl(213 31% 91%);
     }
@@ -32,10 +24,9 @@
     .container {
       min-height: 100vh;
       min-height: 100dvh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
+      display: grid;
+      place-content: center;
+      justify-items: center;
       gap: 1.5rem;
       text-align: center;
       padding: 2rem;
