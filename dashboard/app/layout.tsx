@@ -8,7 +8,7 @@ export const metadata: Metadata = {
   title: 'Trades | Systemic Trading Systems',
   description: 'Trading bot performance dashboard',
   icons: {
-    icon: '/images/sys_logo.svg',
+    icon: '/images/favicon.svg',
   },
 }
 
