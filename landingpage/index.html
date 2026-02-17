@@ -12,7 +12,7 @@
     :root { color-scheme: dark; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    html, body {
+    html {
       background: #030711;
     }
 
@@ -21,12 +21,11 @@
       color: hsl(213 31% 91%);
     }
 
-    /* Fixed to viewport edges — physically covers every pixel */
+    /* Fixed to viewport edges — no own background, html canvas shows through */
     .container {
       position: fixed;
       inset: 0;
       overflow-y: auto;
-      background: #030711;
       display: grid;
       place-content: center;
       justify-items: center;
@@ -66,7 +65,6 @@
     }
 
     .stat-card {
-      background: #030711;
       border: 1px solid hsl(216 34% 17%);
       border-radius: 0.75rem;
       padding: 1.25rem 1.75rem;
@@ -152,7 +150,7 @@
     }
   </style>
 </head>
-<body style="background:#030711">
+<body>
   <div class="container">
     <img src="/images/sys_logo.svg" alt="Systemic Trading Systems" class="logo">
 
