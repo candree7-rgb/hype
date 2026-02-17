@@ -3,35 +3,36 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#030711">
   <title>Systemic Trading Systems</title>
   <link rel="icon" href="/images/sys_logo.svg" type="image/svg+xml">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    html, body {
+    html {
       background: #030711;
-      color-scheme: dark;
+      height: 100%;
     }
 
     body {
+      background: #030711;
       font-family: 'Inter', -apple-system, sans-serif;
       color: hsl(213 31% 91%);
+      height: 100%;
+      overflow: auto;
+    }
+
+    .container {
+      min-height: 100vh;
       min-height: 100dvh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 2rem;
-    }
-
-    .container {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
       gap: 1.5rem;
       text-align: center;
+      padding: 2rem;
     }
 
     .logo {
