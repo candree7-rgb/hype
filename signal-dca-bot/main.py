@@ -1692,6 +1692,40 @@ async def bybit_trade_sync():
 # ▌ FASTAPI APP
 # ══════════════════════════════════════════════════════════════════════════
 
+async def handle_tg_tp_hit(tp_hit: dict):
+    """Cancel unfilled PENDING orders when VIP Club reports TP hit.
+
+    If the channel says "Target #1 Done" for a symbol and we have a PENDING
+    (unfilled) limit order for it, the move already happened without us.
+    No point waiting for a pullback — cancel and free the slot.
+    """
+    symbol = tp_hit["symbol"]
+    tp_number = tp_hit["tp_number"]
+
+    for trade in list(trade_mgr.active_trades):
+        if trade.symbol != symbol:
+            continue
+
+        # Only cancel PENDING (unfilled E1 limit orders)
+        if trade.status != TradeStatus.PENDING:
+            logger.info(
+                f"TP hit cancel: {trade.symbol_display} is {trade.status.value} "
+                f"(not PENDING) — keeping trade"
+            )
+            continue
+
+        # Cancel the E1 limit order on Bybit
+        bybit.cancel_e1(trade)
+        trade_mgr.close_trade(
+            trade, 0, 0,
+            f"TP#{tp_number} already hit (unfilled)"
+        )
+        logger.info(
+            f"TP hit cancel: {trade.symbol_display} PENDING cancelled | "
+            f"VIP Club Target #{tp_number} Done — entry missed"
+        )
+
+
 async def handle_tg_close(close_cmd: dict):
     """Handle a close signal from Telegram."""
     symbol = close_cmd["symbol"]
@@ -1743,6 +1777,7 @@ async def lifespan(app: FastAPI):
         config,
         on_signal=add_signal_to_batch,
         on_close=handle_tg_close,
+        on_tp_hit=handle_tg_tp_hit,
     )
     await tg_listener.start()
 

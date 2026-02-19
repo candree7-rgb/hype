@@ -17,7 +17,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 from config import BotConfig
-from telegram_parser import parse_signal, parse_close_signal
+from telegram_parser import parse_signal, parse_close_signal, parse_tp_hit
 
 logger = logging.getLogger("telegram")
 
@@ -25,10 +25,11 @@ logger = logging.getLogger("telegram")
 class TelegramListener:
     """Listens to a Telegram channel and forwards signals to the bot."""
 
-    def __init__(self, config: BotConfig, on_signal=None, on_close=None):
+    def __init__(self, config: BotConfig, on_signal=None, on_close=None, on_tp_hit=None):
         self.config = config
-        self.on_signal = on_signal  # async callback: Signal → dict
-        self.on_close = on_close    # async callback: dict → None
+        self.on_signal = on_signal    # async callback: Signal → dict
+        self.on_close = on_close      # async callback: dict → None
+        self.on_tp_hit = on_tp_hit    # async callback: dict → None (cancel unfilled on TP hit)
         self.client: TelegramClient | None = None
         self._running = False
 
@@ -131,6 +132,19 @@ class TelegramListener:
                     await self.on_close(close_cmd)
                 except Exception as e:
                     logger.error(f"Error processing close: {e}", exc_info=True)
+            return
+
+        # Try parsing as a TP hit notification (cancel unfilled PENDING orders)
+        tp_hit = parse_tp_hit(text)
+        if tp_hit:
+            logger.info(
+                f"TG TP hit: {tp_hit['symbol_display']} Target #{tp_hit['tp_number']}"
+            )
+            if self.on_tp_hit:
+                try:
+                    await self.on_tp_hit(tp_hit)
+                except Exception as e:
+                    logger.error(f"Error processing TP hit: {e}", exc_info=True)
             return
 
         # Not a signal - log for visibility (truncate long messages)
