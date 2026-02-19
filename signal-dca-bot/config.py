@@ -47,6 +47,12 @@ class BotConfig:
     # ── Neo Cloud Trend Filter ──
     neo_cloud_filter: bool = True       # Only take trades matching Neo Cloud trend
 
+    # ── Reversal Zone Filter ──
+    # Skip signals where price is already in the reversal zone:
+    #   SHORT + price < S1 → skip (already at/below support, likely to bounce)
+    #   LONG  + price > R1 → skip (already at/above resistance, likely to reject)
+    zone_filter_enabled: bool = True
+
     # ── DCA Configuration ──
     # 1 DCA: E1 + DCA1 with sizing [1, 2] = sum 3
     dca_multipliers: list[float] = field(
@@ -210,6 +216,7 @@ class BotConfig:
         print(f"║  Quick Trail:    +{self.dca_quick_trail_trigger_pct}% → SL=avg+{self.dca_quick_trail_buffer_pct}%")
         print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")
         print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
+        print(f"║  Zone Filter:    {'ON (skip shorts<S1, longs>R1)' if self.zone_filter_enabled else 'OFF'}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")
         print(f"║")
         print(f"║  Levels (Long @ $100):")

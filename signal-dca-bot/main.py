@@ -132,6 +132,21 @@ async def flush_batch():
                         f"filtered → Neo Cloud={neo_trend.upper()}"
                     )
                     continue
+        if config.zone_filter_enabled:
+            zones = zone_mgr.get_zones(signal.symbol)
+            if zones and zones.is_valid:
+                if signal.side == "short" and zones.s1 and signal.entry_price < zones.s1:
+                    logger.info(
+                        f"Batch pre-filter: {signal.symbol_display} SHORT "
+                        f"filtered → price {signal.entry_price:.4f} < S1 {zones.s1:.4f}"
+                    )
+                    continue
+                if signal.side == "long" and zones.r1 and signal.entry_price > zones.r1:
+                    logger.info(
+                        f"Batch pre-filter: {signal.symbol_display} LONG "
+                        f"filtered → price {signal.entry_price:.4f} > R1 {zones.r1:.4f}"
+                    )
+                    continue
         valid.append(signal)
 
     if not valid:
@@ -177,6 +192,31 @@ async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
                 logger.info(
                     f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | "
                     f"Neo Cloud says {neo_trend.upper()} → SKIP"
+                )
+                return {"status": "filtered", "reason": reason}
+
+    # Reversal Zone filter: skip if price is already in the reversal zone
+    # SHORT + price < S1 → shorting into support (likely bounce) → skip
+    # LONG  + price > R1 → longing into resistance (likely rejection) → skip
+    if config.zone_filter_enabled:
+        zones = zone_mgr.get_zones(signal.symbol)
+        if zones and zones.is_valid:
+            if signal.side == "short" and zones.s1 and signal.entry_price < zones.s1:
+                reason = (
+                    f"Zone filter: SHORT but price {signal.entry_price:.4f} "
+                    f"< S1 {zones.s1:.4f} (in support zone)"
+                )
+                logger.info(
+                    f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {reason}"
+                )
+                return {"status": "filtered", "reason": reason}
+            if signal.side == "long" and zones.r1 and signal.entry_price > zones.r1:
+                reason = (
+                    f"Zone filter: LONG but price {signal.entry_price:.4f} "
+                    f"> R1 {zones.r1:.4f} (in resistance zone)"
+                )
+                logger.info(
+                    f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {reason}"
                 )
                 return {"status": "filtered", "reason": reason}
 
