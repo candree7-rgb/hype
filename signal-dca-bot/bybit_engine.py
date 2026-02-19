@@ -313,6 +313,11 @@ class BybitEngine:
                 break
 
             dca = trade.dca_levels[i]
+
+            # Skip already filled or already placed DCAs
+            if dca.filled or dca.order_id:
+                continue
+
             dca_qty = self.round_qty(dca.qty, qty_step)
             dca_price = self.round_price(dca.price, tick_size)
 

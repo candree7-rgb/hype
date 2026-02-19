@@ -1179,6 +1179,29 @@ async def resnap_active_dcas(symbol: str):
                     f"DCA{i} re-snapped: {trade.symbol_display} | "
                     f"{old_price:.4f} → {new_price:.4f} ({source}, {pct_change:.1f}% shift)"
                 )
+            else:
+                # Amend failed → order likely gone from Bybit, re-place it
+                logger.warning(
+                    f"DCA{i} amend failed, re-placing: {trade.symbol_display} | "
+                    f"old order_id={dca.order_id}"
+                )
+                bybit.cancel_order(trade.symbol, dca.order_id)  # cleanup attempt
+                dca.order_id = ""
+                dca.price = new_price
+                dca.qty = dca.margin * trade.leverage / new_price
+                bybit.place_dca_for_trade(trade)
+                if dca.order_id:
+                    trade_mgr.persist_trade(trade)
+                    logger.info(
+                        f"DCA{i} re-placed: {trade.symbol_display} | "
+                        f"{old_price:.4f} → {new_price:.4f} ({source}) | "
+                        f"new order_id={dca.order_id}"
+                    )
+                else:
+                    logger.critical(
+                        f"DCA{i} re-place FAILED: {trade.symbol_display} | "
+                        f"price={new_price:.4f}"
+                    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1433,6 +1456,10 @@ async def _recover_and_check_positions():
                             )
 
             # ── Check DCA order fills that happened during downtime ──
+            # ── Also verify unfilled DCA orders still exist on Bybit ──
+            open_orders = bybit.get_open_orders(trade.symbol)
+            open_order_ids = {o["order_id"] for o in open_orders}
+
             for i in range(1, trade.max_dca + 1):
                 if i >= len(trade.dca_levels):
                     break
@@ -1453,6 +1480,26 @@ async def _recover_and_check_positions():
                         f"RECOVERY: DCA{i} was filled during downtime | "
                         f"{trade.symbol_display} @ {dca_fill_price:.4f}"
                     )
+                elif dca.order_id not in open_order_ids:
+                    # Order vanished from Bybit (cancelled during redeploy)
+                    # → Re-place it so resnap and fills keep working
+                    logger.warning(
+                        f"RECOVERY: DCA{i} order missing on Bybit | "
+                        f"{trade.symbol_display} | old order_id={dca.order_id} → re-placing"
+                    )
+                    dca.order_id = ""
+                    bybit.place_dca_for_trade(trade)
+                    if dca.order_id:
+                        logger.info(
+                            f"RECOVERY: DCA{i} re-placed | "
+                            f"{trade.symbol_display} @ {dca.price:.4f} | "
+                            f"new order_id={dca.order_id}"
+                        )
+                    else:
+                        logger.critical(
+                            f"RECOVERY: DCA{i} re-place FAILED | "
+                            f"{trade.symbol_display} @ {dca.price:.4f}"
+                        )
 
             # ── Verify SL is set on exchange ──
             if pos["stop_loss"] == 0 and pos["trailing_stop"] == 0:
