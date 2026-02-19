@@ -40,7 +40,6 @@
     }
 
     .title {
-      position: relative;
       font-size: clamp(1.1rem, 3vw, 1.4rem);
       font-weight: 500;
       letter-spacing: 0.06em;
@@ -124,10 +123,6 @@
 
     /* ── Beta badge ── */
     .beta {
-      position: absolute;
-      top: 50%;
-      transform: translateY(-50%);
-      margin-left: 0.5rem;
       font-size: 0.65rem;
       font-weight: 700;
       letter-spacing: 0.08em;
@@ -135,8 +130,8 @@
       color: hsl(210 80% 65%);
       border: 1.5px solid hsl(210 60% 45%);
       border-radius: 4px;
-      padding: 0.15rem 0.5rem;
-      white-space: nowrap;
+      padding: 0.1rem 0.45rem;
+      vertical-align: 1px;
     }
 
     /* ── Uptime dot ── */
@@ -182,8 +177,8 @@
   <div class="container">
     <img src="/images/sys_logo.svg" alt="Systemic Trading Systems" class="logo">
 
-    <h1 class="title">Trading Systems <span class="beta">Beta</span></h1>
-    <p class="subtitle">by Andr&eacute; Carva</p>
+    <h1 class="title">Trading Systems</h1>
+    <p class="subtitle">by Andr&eacute; Carva &nbsp;&middot;&nbsp; <span class="beta">Beta</span></p>
 
     <div class="stats">
       <div class="stat-card loading" id="card-trades">
