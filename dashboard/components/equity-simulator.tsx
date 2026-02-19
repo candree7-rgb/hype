@@ -5,36 +5,62 @@ import { SimSettings } from '@/lib/simulation'
 
 interface EquitySimulatorProps {
   onChange: (settings: SimSettings) => void
+  isSimulated?: boolean
 }
 
 const STORAGE_KEY = 'equity-sim-v1'
 
-export default function EquitySimulator({ onChange }: EquitySimulatorProps) {
-  const [equity, setEquity] = useState(10000)
-  const [tradePct, setTradePct] = useState(5)
+const DEFAULT_EQUITY = Number(process.env.NEXT_PUBLIC_DEFAULT_EQUITY) || 10000
+const DEFAULT_TRADE_PCT = Number(process.env.NEXT_PUBLIC_DEFAULT_TRADE_PCT) || 5
+
+export default function EquitySimulator({ onChange, isSimulated = true }: EquitySimulatorProps) {
+  const [equity, setEquity] = useState(DEFAULT_EQUITY)
+  const [tradePct, setTradePct] = useState(DEFAULT_TRADE_PCT)
   const [compounding, setCompounding] = useState(true)
   const [loaded, setLoaded] = useState(false)
 
-  // Load persisted settings once
+  // Load persisted settings once (only in simulated mode)
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY)
-      if (saved) {
-        const s = JSON.parse(saved)
-        if (s.equity > 0) setEquity(s.equity)
-        if (s.tradePct > 0) setTradePct(s.tradePct)
-        if (typeof s.compounding === 'boolean') setCompounding(s.compounding)
-      }
-    } catch { /* ignore */ }
+    if (isSimulated) {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY)
+        if (saved) {
+          const s = JSON.parse(saved)
+          if (s.equity > 0) setEquity(s.equity)
+          if (s.tradePct > 0) setTradePct(s.tradePct)
+          if (typeof s.compounding === 'boolean') setCompounding(s.compounding)
+        }
+      } catch { /* ignore */ }
+    }
     setLoaded(true)
-  }, [])
+  }, [isSimulated])
+
+  // In real mode: fetch actual account equity from Bybit
+  useEffect(() => {
+    if (isSimulated) return
+    async function fetchRealEquity() {
+      try {
+        const res = await fetch('/api/live-equity')
+        if (!res.ok) return
+        const data = await res.json()
+        if (data.equity > 0) {
+          setEquity(Math.round(data.equity))
+          setTradePct(5)
+          setCompounding(true)
+        }
+      } catch { /* ignore */ }
+    }
+    fetchRealEquity()
+  }, [isSimulated])
 
   // Persist and propagate settings
   useEffect(() => {
     if (!loaded) return
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ equity, tradePct, compounding }))
+    if (isSimulated) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ equity, tradePct, compounding }))
+    }
     onChange({ equity, tradePct, compounding })
-  }, [equity, tradePct, compounding, loaded])
+  }, [equity, tradePct, compounding, loaded, isSimulated])
 
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -54,9 +80,9 @@ export default function EquitySimulator({ onChange }: EquitySimulatorProps) {
         <input
           type="range"
           min={100}
-          max={50000}
+          max={100000}
           step={100}
-          value={Math.min(equity, 50000)}
+          value={Math.min(equity, 100000)}
           onChange={(e) => setEquity(Number(e.target.value))}
           className="w-24 h-1.5"
           style={{ accentColor: 'hsl(var(--primary))' }}
@@ -70,9 +96,9 @@ export default function EquitySimulator({ onChange }: EquitySimulatorProps) {
           <input
             type="number"
             min={1}
-            max={100}
+            max={20}
             value={tradePct}
-            onChange={(e) => setTradePct(Math.min(100, Math.max(1, Number(e.target.value) || 1)))}
+            onChange={(e) => setTradePct(Math.min(20, Math.max(1, Number(e.target.value) || 1)))}
             className="w-14 bg-muted border border-border rounded px-2 py-1 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
           />
           <span className="text-sm text-muted-foreground">%</span>
@@ -80,9 +106,9 @@ export default function EquitySimulator({ onChange }: EquitySimulatorProps) {
         <input
           type="range"
           min={1}
-          max={50}
+          max={20}
           step={1}
-          value={Math.min(tradePct, 50)}
+          value={Math.min(tradePct, 20)}
           onChange={(e) => setTradePct(Number(e.target.value))}
           className="w-20 h-1.5"
           style={{ accentColor: 'hsl(var(--primary))' }}

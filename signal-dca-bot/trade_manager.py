@@ -109,6 +109,9 @@ class Trade:
     # Orders
     dca_order_ids: list[str] = field(default_factory=list)
 
+    # Batch tracking (cancel surplus PENDING after N fills per batch)
+    batch_id: str = ""
+
     # Timing
     opened_at: float = 0.0
     closed_at: float = 0.0
@@ -190,6 +193,7 @@ def trade_to_dict(trade: Trade) -> dict:
         "scale_in_margin": trade.scale_in_margin,
         "hard_sl_price": trade.hard_sl_price,
         "dca_order_ids": trade.dca_order_ids,
+        "batch_id": trade.batch_id,
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
         "realized_pnl": trade.realized_pnl,
@@ -245,6 +249,7 @@ def trade_from_dict(data: dict) -> Trade:
         scale_in_margin=data.get("scale_in_margin", 0),
         hard_sl_price=data.get("hard_sl_price", 0),
         dca_order_ids=data.get("dca_order_ids", []),
+        batch_id=data.get("batch_id", ""),
         opened_at=data.get("opened_at", 0),
         closed_at=data.get("closed_at", 0),
         realized_pnl=data.get("realized_pnl", 0),
@@ -707,6 +712,7 @@ class TradeManager:
             equity_at_close=trade.equity_at_entry + pnl,
             tps_hit=trade.tps_hit,
             trail_pnl_pct=round(trade.trail_pnl_pct, 4),
+            equity_pct_per_trade=self.config.equity_pct_per_trade,
         )
 
         total = self.total_wins + self.total_losses + self.total_breakeven

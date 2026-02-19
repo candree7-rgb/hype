@@ -29,6 +29,7 @@ export interface Trade {
   tp1_hit: boolean
   close_reason: string
   signal_leverage: number
+  equity_pct_per_trade: number | null
   zone_source: string
   zones_used: number
   opened_at: Date

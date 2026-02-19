@@ -10,9 +10,10 @@ interface StatsCardsProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
   simSettings: SimSettings
+  isSimulated?: boolean
 }
 
-export default function StatsCards({ timeRange, customDateRange, simSettings }: StatsCardsProps) {
+export default function StatsCards({ timeRange, customDateRange, simSettings, isSimulated = true }: StatsCardsProps) {
   const [stats, setStats] = useState<Stats | null>(null)
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
@@ -106,8 +107,8 @@ export default function StatsCards({ timeRange, customDateRange, simSettings }: 
     )
   }
 
-  // Use sim values for monetary stats, keep DB values for counts/rates
-  const s = simStats
+  // In simulated mode: use sim values for monetary stats. In real mode: use DB values directly.
+  const s = isSimulated ? simStats : null
   const totalPnl = s ? s.total_pnl : stats.total_pnl
   const totalPnlPct = s ? s.total_pnl_pct : stats.total_pnl_pct
   const avgPnl = s ? s.avg_pnl : stats.avg_pnl

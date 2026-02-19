@@ -96,6 +96,7 @@ def _init_tables_inline(conn):
             is_win BOOLEAN, max_dca_reached INTEGER DEFAULT 0, tp1_hit BOOLEAN DEFAULT FALSE,
             tps_hit INTEGER DEFAULT 0, trail_pnl_pct DECIMAL(10,4) DEFAULT 0,
             close_reason VARCHAR(200), signal_leverage INTEGER DEFAULT 0,
+            equity_pct_per_trade DECIMAL(5,2) DEFAULT 5.0,
             zone_source VARCHAR(20), zones_used INTEGER DEFAULT 0,
             opened_at TIMESTAMPTZ, closed_at TIMESTAMPTZ, duration_minutes INTEGER,
             created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -297,7 +298,8 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
                closed_at: float, signal_leverage: int,
                equity_at_entry: float = 0, equity_at_close: float = 0,
                leverage: int = 20, tps_hit: int = 0,
-               trail_pnl_pct: float = 0) -> bool:
+               trail_pnl_pct: float = 0,
+               equity_pct_per_trade: float = 5.0) -> bool:
     """Save a closed trade to history."""
     conn = get_connection()
     if not conn:
@@ -320,9 +322,9 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
                  total_qty, total_margin, leverage, realized_pnl,
                  pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
                  is_win, max_dca_reached, tp1_hit, tps_hit, trail_pnl_pct,
-                 close_reason, signal_leverage,
+                 close_reason, signal_leverage, equity_pct_per_trade,
                  opened_at, closed_at, duration_minutes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (trade_id) DO UPDATE SET
                 realized_pnl=%s, close_price=%s, close_reason=%s, closed_at=%s,
                 pnl_pct_margin=%s, pnl_pct_equity=%s, equity_at_close=%s, is_win=%s,
@@ -331,7 +333,7 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
               total_qty, total_margin, leverage, realized_pnl,
               pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
               is_win, max_dca, tp1_hit, tps_hit, trail_pnl_pct,
-              close_reason, signal_leverage,
+              close_reason, signal_leverage, equity_pct_per_trade,
               opened_dt, closed_dt, duration_min,
               # ON CONFLICT updates:
               realized_pnl, close_price, close_reason, closed_dt,

@@ -12,12 +12,19 @@ import DateRangePicker from '@/components/date-range-picker'
 import EquitySimulator from '@/components/equity-simulator'
 import { SimSettings } from '@/lib/simulation'
 import Image from 'next/image'
+import UptimeBadge from '@/components/uptime-badge'
+
+const isSimulated = process.env.NEXT_PUBLIC_SIMULATED_MODE !== 'false'
 
 export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1M')
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customDateRange, setCustomDateRange] = useState<{ from: string; to: string } | null>(null)
-  const [simSettings, setSimSettings] = useState<SimSettings>({ equity: 10000, tradePct: 5, compounding: true })
+  const [simSettings, setSimSettings] = useState<SimSettings>({
+    equity: Number(process.env.NEXT_PUBLIC_DEFAULT_EQUITY) || 10000,
+    tradePct: Number(process.env.NEXT_PUBLIC_DEFAULT_TRADE_PCT) || 5,
+    compounding: true,
+  })
 
   const handleSimChange = useCallback((settings: SimSettings) => {
     setSimSettings(settings)
@@ -42,29 +49,32 @@ export default function Dashboard() {
       />
 
       {/* Header */}
-      <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-40">
+      <header className="border-b border-border bg-background sticky top-0 z-40">
         <div className="container mx-auto px-4 py-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <Image
                 src="/images/sys_logo.svg"
                 alt="Systemic"
-                width={216}
-                height={43}
+                width={194}
+                height={39}
                 className="hidden dark:block"
                 priority
               />
               <Image
                 src="/images/sys_logo_pos.svg"
                 alt="Systemic"
-                width={216}
-                height={43}
+                width={194}
+                height={39}
                 className="block dark:hidden"
                 priority
               />
-              <p className="text-sm text-muted-foreground">
-                Bybit Futures &bull; Live Execution &bull; 20x Leverage
-              </p>
+              <div className="flex items-center gap-3 mt-0.5">
+                <p className="text-sm text-muted-foreground">
+                  Bybit Futures &bull; Live Execution &bull; 20x Leverage
+                </p>
+                <UptimeBadge />
+              </div>
             </div>
             <TimeRangeSelector
               selected={timeRange}
@@ -77,9 +87,9 @@ export default function Dashboard() {
       </header>
 
       {/* Simulator Controls */}
-      <div className="border-b border-border bg-card/30">
+      <div className="border-b border-border bg-background">
         <div className="container mx-auto px-4 py-3">
-          <EquitySimulator onChange={handleSimChange} />
+          <EquitySimulator onChange={handleSimChange} isSimulated={isSimulated} />
         </div>
       </div>
 
@@ -87,13 +97,13 @@ export default function Dashboard() {
       <div className="container mx-auto px-4 py-6 space-y-6">
         {/* Stats Cards */}
         <section>
-          <StatsCards timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
+          <StatsCards timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} isSimulated={isSimulated} />
         </section>
 
         {/* Charts Row */}
         <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <EquityChart timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
+            <EquityChart timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} isSimulated={isSimulated} />
           </div>
           <div>
             <TPDistributionChart timeRange={timeRange} customDateRange={customDateRange} />
@@ -107,7 +117,7 @@ export default function Dashboard() {
 
         {/* Trades Table */}
         <section>
-          <TradesTable timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
+          <TradesTable timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} isSimulated={isSimulated} />
         </section>
       </div>
 

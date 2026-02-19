@@ -10,6 +10,7 @@ interface TradesTableProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
   simSettings: SimSettings
+  isSimulated?: boolean
 }
 
 type BadgeVariant = 'tp' | 'trail' | 'be' | 'sl' | 'neutral'
@@ -76,7 +77,7 @@ const badgeColors: Record<BadgeVariant, string> = {
   neutral: 'bg-muted text-muted-foreground',
 }
 
-export default function TradesTable({ timeRange, customDateRange, simSettings }: TradesTableProps) {
+export default function TradesTable({ timeRange, customDateRange, simSettings, isSimulated = true }: TradesTableProps) {
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -160,11 +161,16 @@ export default function TradesTable({ timeRange, customDateRange, simSettings }:
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Side</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Entry</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Duration</th>
-              <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L</th>
-              <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L %</th>
-              {simResults && (
-                <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Sim P&L</th>
+              {isSimulated ? (
+                <>
+                  {simResults && (
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L</th>
+                  )}
+                </>
+              ) : (
+                <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L</th>
               )}
+              <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">P&L %</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">Exit</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase">DCA</th>
             </tr>
@@ -211,46 +217,54 @@ export default function TradesTable({ timeRange, customDateRange, simSettings }:
                   {formatDuration(trade.duration_minutes)}
                 </td>
 
-                {/* P&L */}
-                <td className="px-4 py-4">
-                  <span className={cn(
-                    'font-semibold',
-                    (trade.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger'
-                  )}>
-                    {(trade.realized_pnl || 0) >= 0 ? '+' : ''}
-                    {formatCurrency(parseFloat(trade.realized_pnl?.toString() || '0'))}
-                  </span>
-                </td>
+                {/* P&L $: simulated mode shows sim P&L, real mode shows account P&L */}
+                {isSimulated ? (
+                  <>
+                    {simResults && (() => {
+                      const sim = simResults.per_trade.get(trade.trade_id)
+                      return (
+                        <td className="px-4 py-4">
+                          {sim ? (
+                            <span className={cn(
+                              'font-semibold',
+                              sim.sim_pnl >= 0 ? 'text-success' : 'text-danger'
+                            )}>
+                              {sim.sim_pnl >= 0 ? '+' : ''}{formatCurrency(sim.sim_pnl)}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">-</span>
+                          )}
+                        </td>
+                      )
+                    })()}
+                  </>
+                ) : (
+                  <td className="px-4 py-4">
+                    <span className={cn(
+                      'font-semibold',
+                      (trade.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger'
+                    )}>
+                      {(trade.realized_pnl || 0) >= 0 ? '+' : ''}
+                      {formatCurrency(parseFloat(trade.realized_pnl?.toString() || '0'))}
+                    </span>
+                  </td>
+                )}
 
-                {/* P&L % */}
+                {/* P&L % - simulated mode uses scaled %, real mode uses raw DB value */}
                 <td className="px-4 py-4">
-                  <span className={cn(
-                    'font-semibold text-sm',
-                    (trade.pnl_pct_equity || 0) >= 0 ? 'text-success' : 'text-danger'
-                  )}>
-                    {(trade.pnl_pct_equity || 0) >= 0 ? '+' : ''}
-                    {parseFloat(trade.pnl_pct_equity?.toString() || '0').toFixed(2)}%
-                  </span>
+                  {(() => {
+                    const sim = isSimulated && simResults ? simResults.per_trade.get(trade.trade_id) : null
+                    const pct = sim ? sim.sim_pnl_pct : parseFloat(trade.pnl_pct_equity?.toString() || '0')
+                    return (
+                      <span className={cn(
+                        'font-semibold text-sm',
+                        pct >= 0 ? 'text-success' : 'text-danger'
+                      )}>
+                        {pct >= 0 ? '+' : ''}{pct.toFixed(2)}%
+                      </span>
+                    )
+                  })()}
                 </td>
-
-                {/* Sim P&L */}
-                {simResults && (() => {
-                  const sim = simResults.per_trade.get(trade.trade_id)
-                  return (
-                    <td className="px-4 py-4">
-                      {sim ? (
-                        <span className={cn(
-                          'font-semibold',
-                          sim.sim_pnl >= 0 ? 'text-success' : 'text-danger'
-                        )}>
-                          {sim.sim_pnl >= 0 ? '+' : ''}{formatCurrency(sim.sim_pnl)}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">-</span>
-                      )}
-                    </td>
-                  )
-                })()}
 
                 {/* Exit badges */}
                 <td className="px-4 py-4">

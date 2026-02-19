@@ -5,10 +5,10 @@ import './globals.css'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'Signal DCA Bot v2',
+  title: 'Trades | Systemic Trading Systems',
   description: 'Trading bot performance dashboard',
   icons: {
-    icon: '/images/sys_logo.svg',
+    icon: '/images/favicon.svg',
   },
 }
 

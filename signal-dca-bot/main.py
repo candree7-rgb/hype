@@ -100,7 +100,7 @@ async def add_signal_to_batch(signal: Signal) -> dict:
 
 
 async def flush_batch():
-    """Process buffered batch: sort by priority, take top N."""
+    """Process buffered batch: Neo Cloud pre-filter, place all valid, cancel after N fills."""
     global _batch_flush_handle
     _batch_flush_handle = None
 
@@ -115,36 +115,62 @@ async def flush_batch():
         logger.info(f"Batch of {len(batch)} signals: NO free slots, all rejected")
         return
 
-    batch.sort(key=lambda s: s.signal_leverage, reverse=True)
-    selected = batch[:free_slots]
-    rejected = batch[free_slots:]
+    # Pre-filter: Neo Cloud + can_open checks (order as received, no sorting)
+    valid = []
+    for signal in batch:
+        can_open, reason = trade_mgr.can_open_trade(signal.symbol)
+        if not can_open:
+            logger.info(f"Batch pre-filter: {signal.symbol_display} rejected → {reason}")
+            continue
+        if config.neo_cloud_filter:
+            neo_trend = db.get_neo_cloud(signal.symbol)
+            if neo_trend:
+                expected = "up" if signal.side == "long" else "down"
+                if neo_trend != expected:
+                    logger.info(
+                        f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                        f"filtered → Neo Cloud={neo_trend.upper()}"
+                    )
+                    continue
+        valid.append(signal)
+
+    if not valid:
+        logger.info(f"Batch of {len(batch)} signals: all filtered/rejected")
+        return
+
+    # Place up to free_slots orders; batch_id groups them for fill tracking
+    selected = valid[:free_slots]
+    batch_id = f"batch_{int(time.time())}"
 
     logger.info(
         f"Batch processing: {len(batch)} signals → "
-        f"{len(selected)} selected, {len(rejected)} rejected | "
-        f"Priority: {', '.join(f'{s.symbol_display}({s.signal_leverage}x)' for s in selected)}"
+        f"{len(valid)} passed filter → {len(selected)} placed | "
+        f"batch_id={batch_id} | max_fills={config.max_fills_per_batch} | "
+        f"Signals: {', '.join(s.symbol_display for s in selected)}"
     )
 
     results = []
     for signal in selected:
-        result = await execute_signal(signal)
+        result = await execute_signal(signal, batch_id=batch_id)
         results.append(result)
 
     return results
 
 
-async def execute_signal(signal: Signal) -> dict:
-    """Execute a single signal (open trade on Bybit)."""
+async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
+    """Execute a single signal (open trade on Bybit).
+
+    Neo Cloud filter is applied in flush_batch() before calling this.
+    """
     can_open, reason = trade_mgr.can_open_trade(signal.symbol)
     if not can_open:
         logger.info(f"Signal rejected: {signal.symbol_display} | {reason}")
         return {"status": "rejected", "reason": reason}
 
-    # Neo Cloud trend filter: skip counter-trend signals
-    if config.neo_cloud_filter:
+    # Neo Cloud trend filter for non-batch calls (webhook direct)
+    if not batch_id and config.neo_cloud_filter:
         neo_trend = db.get_neo_cloud(signal.symbol)
         if neo_trend:
-            # Long signal requires "up" trend, Short requires "down"
             expected = "up" if signal.side == "long" else "down"
             if neo_trend != expected:
                 reason = f"Neo Cloud filter: {signal.side} vs trend={neo_trend}"
@@ -153,7 +179,6 @@ async def execute_signal(signal: Signal) -> dict:
                     f"Neo Cloud says {neo_trend.upper()} → SKIP"
                 )
                 return {"status": "filtered", "reason": reason}
-        # No Neo Cloud data for this symbol → allow trade (no filter)
 
     equity = bybit.get_equity()
     if equity <= 0:
@@ -164,6 +189,8 @@ async def execute_signal(signal: Signal) -> dict:
 
     # Create trade
     trade = trade_mgr.create_trade(signal, equity)
+    if batch_id:
+        trade.batch_id = batch_id
 
     # Zone-snap DCA levels
     if config.zone_snap_enabled:
@@ -230,15 +257,13 @@ async def execute_signal(signal: Signal) -> dict:
 async def price_monitor():
     """Background task: poll order fills and detect exchange-side closes.
 
-    SL Ladder with 2/3 Pyramiding (all exits exchange-side):
+    SL Ladder (all exits exchange-side):
     - Safety SL at entry-10% initially (gives DCA room to fill at -5%)
-    - TP1-4: reduceOnly limit orders at signal targets (50/10/20/10%)
+    - TP1-4: reduceOnly limit orders at signal targets (50/10/10/10%)
     - After TP1: SL → BE + 0.1% buffer, cancel DCA orders
-    - After TP2: Scale-in 1/3 more (if no DCA) → SL = exakt new Avg (zero risk)
-      → Cancel TP3/TP4, recalculate quantities for new position size
-    - After TP3: SL → TP2 price (profit lock)
-    - After TP4: trailing stop 1% CB on remaining
-    - If DCA already filled: no scale-in, SL stays at BE after TP2
+    - After TP2: SL stays at BE + buffer
+    - After TP3: SL → TP1 price (profit lock)
+    - After TP4: trailing stop 1% CB on remaining 20%
     - DCA fills (before TP1): cancel signal TPs, new TPs from avg (0.5%/1.25%), hard SL at DCA-fill+3%
     - DCA Quick-Trail: once price moves +0.5% from avg → SL tightens to avg+0.5% buffer
     """
@@ -270,6 +295,32 @@ async def price_monitor():
                         _set_initial_sl(trade)
                         trade_mgr.persist_trade(trade)
                         logger.info(f"E1 filled → OPEN: {trade.symbol_display}")
+
+                        # Batch fill cap: cancel surplus PENDING trades from same batch
+                        if trade.batch_id and config.max_fills_per_batch > 0:
+                            batch_fills = sum(
+                                1 for t in trade_mgr.active_trades
+                                if t.batch_id == trade.batch_id
+                                and t.status != TradeStatus.PENDING
+                            )
+                            if batch_fills >= config.max_fills_per_batch:
+                                pending_same_batch = [
+                                    t for t in trade_mgr.active_trades
+                                    if t.batch_id == trade.batch_id
+                                    and t.status == TradeStatus.PENDING
+                                ]
+                                for pt in pending_same_batch:
+                                    bybit.cancel_e1(pt)
+                                    trade_mgr.close_trade(
+                                        pt, 0, 0,
+                                        f"Batch cap ({config.max_fills_per_batch} fills reached)"
+                                    )
+                                if pending_same_batch:
+                                    logger.info(
+                                        f"Batch cap reached: {batch_fills}/{config.max_fills_per_batch} fills | "
+                                        f"Cancelled {len(pending_same_batch)} PENDING: "
+                                        f"{', '.join(t.symbol_display for t in pending_same_batch)}"
+                                    )
                     else:
                         age_min = (time.time() - trade.opened_at) / 60
                         if age_min >= config.e1_timeout_minutes:
@@ -1583,6 +1634,7 @@ async def bybit_trade_sync():
                     equity_at_entry=equity,
                     equity_at_close=equity,
                     leverage=config.leverage,
+                    equity_pct_per_trade=config.equity_pct_per_trade,
                 )
                 fill_info = f" ({rec['fill_count']} fills)" if rec.get("fill_count", 1) > 1 else ""
                 logger.info(
@@ -2186,6 +2238,7 @@ async def status():
         "leverage": config.leverage,
         "equity_pct": config.equity_pct_per_trade,
         "max_trades": config.max_simultaneous_trades,
+        "max_fills_per_batch": config.max_fills_per_batch,
         "dca_levels": config.max_dca_levels,
         "dca_mults": config.dca_multipliers[:config.max_dca_levels + 1],
         "tp_pcts": config.tp_close_pcts,
