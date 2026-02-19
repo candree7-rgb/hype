@@ -80,9 +80,9 @@ export default function EquitySimulator({ onChange, isSimulated = true }: Equity
         <input
           type="range"
           min={100}
-          max={50000}
+          max={100000}
           step={100}
-          value={Math.min(equity, 50000)}
+          value={Math.min(equity, 100000)}
           onChange={(e) => setEquity(Number(e.target.value))}
           className="w-24 h-1.5"
           style={{ accentColor: 'hsl(var(--primary))' }}
@@ -96,9 +96,9 @@ export default function EquitySimulator({ onChange, isSimulated = true }: Equity
           <input
             type="number"
             min={1}
-            max={100}
+            max={20}
             value={tradePct}
-            onChange={(e) => setTradePct(Math.min(100, Math.max(1, Number(e.target.value) || 1)))}
+            onChange={(e) => setTradePct(Math.min(20, Math.max(1, Number(e.target.value) || 1)))}
             className="w-14 bg-muted border border-border rounded px-2 py-1 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
           />
           <span className="text-sm text-muted-foreground">%</span>
@@ -106,9 +106,9 @@ export default function EquitySimulator({ onChange, isSimulated = true }: Equity
         <input
           type="range"
           min={1}
-          max={50}
+          max={20}
           step={1}
-          value={Math.min(tradePct, 50)}
+          value={Math.min(tradePct, 20)}
           onChange={(e) => setTradePct(Number(e.target.value))}
           className="w-20 h-1.5"
           style={{ accentColor: 'hsl(var(--primary))' }}

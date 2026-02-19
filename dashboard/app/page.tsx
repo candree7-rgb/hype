@@ -12,6 +12,7 @@ import DateRangePicker from '@/components/date-range-picker'
 import EquitySimulator from '@/components/equity-simulator'
 import { SimSettings } from '@/lib/simulation'
 import Image from 'next/image'
+import UptimeBadge from '@/components/uptime-badge'
 
 const isSimulated = process.env.NEXT_PUBLIC_SIMULATED_MODE !== 'false'
 
@@ -68,9 +69,12 @@ export default function Dashboard() {
                 className="block dark:hidden"
                 priority
               />
-              <p className="text-sm text-muted-foreground">
-                Bybit Futures &bull; Live Execution &bull; 20x Leverage
-              </p>
+              <div className="flex items-center gap-3 mt-0.5">
+                <p className="text-sm text-muted-foreground">
+                  Bybit Futures &bull; Live Execution &bull; 20x Leverage
+                </p>
+                <UptimeBadge />
+              </div>
             </div>
             <TimeRangeSelector
               selected={timeRange}
