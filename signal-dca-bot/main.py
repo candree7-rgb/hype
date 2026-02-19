@@ -1086,9 +1086,11 @@ async def zone_refresh_loop():
             logger.info(f"Zone refresh: {len(symbols)} active symbols")
 
             for symbol in symbols:
-                # Skip if recent LuxAlgo zones exist
+                # Skip if FRESH LuxAlgo zones exist (< stale threshold)
                 existing = zone_mgr.get_zones(symbol)
-                if existing and existing.is_valid and existing.source == "luxalgo":
+                if (existing and existing.is_valid
+                        and existing.source == "luxalgo"
+                        and existing.age_minutes < config.zone_luxalgo_stale_minutes):
                     continue
 
                 candles = bybit.get_klines(
@@ -1098,7 +1100,10 @@ async def zone_refresh_loop():
                     zones = calc_swing_zones(candles)
                     if zones:
                         zones.symbol = symbol
-                        updated = zone_mgr.update_from_auto_calc(symbol, zones)
+                        updated = zone_mgr.update_from_auto_calc(
+                            symbol, zones,
+                            luxalgo_stale_minutes=config.zone_luxalgo_stale_minutes,
+                        )
                         if updated:
                             await resnap_active_dcas(symbol)
 
