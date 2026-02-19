@@ -118,22 +118,11 @@ class ZoneDataManager:
         )
         return True
 
-    def update_from_auto_calc(self, symbol: str, zones: CoinZones,
-                              luxalgo_stale_minutes: float = 30) -> bool:
-        """Update zones from auto-calc, but ONLY if no recent LuxAlgo zones exist.
-
-        LuxAlgo zones are protected while fresh (< luxalgo_stale_minutes).
-        Once stale, swing zones can override to keep DCA resnap current.
-        """
+    def update_from_auto_calc(self, symbol: str, zones: CoinZones) -> bool:
+        """Update zones from auto-calc, but ONLY if no recent LuxAlgo zones exist."""
         existing = self._cache.get(symbol)
         if existing and existing.is_valid and existing.source == "luxalgo":
-            if existing.age_minutes < luxalgo_stale_minutes:
-                return False  # Fresh LuxAlgo zones take priority
-            logger.info(
-                f"LuxAlgo zones stale for {symbol} "
-                f"({existing.age_minutes:.0f}min old > {luxalgo_stale_minutes}min) "
-                f"→ allowing swing override"
-            )
+            return False  # LuxAlgo zones take priority
         zones.source = "swing"
         return self.update_zones(symbol, zones)
 

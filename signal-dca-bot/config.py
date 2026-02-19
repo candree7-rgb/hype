@@ -115,7 +115,6 @@ class BotConfig:
     zone_refresh_minutes: int = 15        # Refresh zones every 15min
     zone_candle_count: int = 100          # Candles to analyze for swing H/L
     zone_candle_interval: str = "15"      # 15min candles
-    zone_luxalgo_stale_minutes: int = 30  # LuxAlgo zones older than this → allow swing override + resnap
 
     # ── Filters ──
     min_leverage_signal: int = 0    # Skip signals below this leverage
