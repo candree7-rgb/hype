@@ -227,7 +227,10 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
 
                 {/* Entry */}
                 <td className="px-4 py-4 font-mono text-sm">
-                  ${parseFloat(trade.entry_price?.toString() || '0').toFixed(4)}
+                  {trade.side === 'update'
+                    ? <span className="text-muted-foreground">-</span>
+                    : `$${parseFloat(trade.entry_price?.toString() || '0').toFixed(4)}`
+                  }
                 </td>
 
                 {/* Duration */}
@@ -236,7 +239,11 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                 </td>
 
                 {/* P&L $: simulated mode shows sim P&L, real mode shows account P&L */}
-                {isSimulated ? (
+                {trade.side === 'update' ? (
+                  <td className="px-4 py-4">
+                    <span className="text-sm text-muted-foreground">-</span>
+                  </td>
+                ) : isSimulated ? (
                   <>
                     {simResults && (() => {
                       const sim = simResults.per_trade.get(trade.trade_id)
@@ -270,7 +277,9 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
 
                 {/* P&L % - simulated mode uses scaled %, real mode uses raw DB value */}
                 <td className="px-4 py-4">
-                  {(() => {
+                  {trade.side === 'update' ? (
+                    <span className="text-sm text-muted-foreground">-</span>
+                  ) : (() => {
                     const sim = isSimulated && simResults ? simResults.per_trade.get(trade.trade_id) : null
                     const pct = sim ? sim.sim_pnl_pct : parseFloat(trade.pnl_pct_equity?.toString() || '0')
                     return (
