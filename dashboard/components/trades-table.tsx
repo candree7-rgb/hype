@@ -13,11 +13,18 @@ interface TradesTableProps {
   isSimulated?: boolean
 }
 
-type BadgeVariant = 'tp' | 'trail' | 'be' | 'sl' | 'neutral'
+type BadgeVariant = 'tp' | 'trail' | 'be' | 'sl' | 'neutral' | 'update'
 
 function getExitBadges(trade: Trade): { label: string; variant: BadgeVariant }[] {
   const reason = (trade.close_reason || '').toLowerCase()
   const badges: { label: string; variant: BadgeVariant }[] = []
+
+  // UPDATE trades: show close_reason as info badge
+  if (trade.side === 'update') {
+    const label = trade.close_reason?.trim() || 'CORRECTED'
+    badges.push({ label: label.length > 20 ? label.slice(0, 20) + '…' : label, variant: 'update' })
+    return badges
+  }
 
   // Parse highest TP level from close_reason
   const tpMatch = reason.match(/tp(\d)/)
@@ -75,6 +82,7 @@ const badgeColors: Record<BadgeVariant, string> = {
   be: 'bg-warning/20 text-warning',
   sl: 'bg-danger/20 text-danger',
   neutral: 'bg-muted text-muted-foreground',
+  update: 'bg-blue-500/20 text-blue-400 italic',
 }
 
 export default function TradesTable({ timeRange, customDateRange, simSettings, isSimulated = true }: TradesTableProps) {
@@ -177,7 +185,10 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
           </thead>
           <tbody className="divide-y divide-border/50">
             {trades.map((trade) => (
-              <tr key={trade.trade_id} className="hover:bg-muted/20 transition-colors">
+              <tr key={trade.trade_id} className={cn(
+                'hover:bg-muted/20 transition-colors',
+                trade.side === 'update' && 'border-l-2 border-l-blue-500 bg-blue-500/5'
+              )}>
                 {/* Symbol */}
                 <td className="px-4 py-4">
                   <div className="flex items-center gap-2">
@@ -201,7 +212,9 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                     'px-2 py-1 rounded text-xs font-semibold',
                     trade.side === 'long'
                       ? 'bg-success/20 text-success'
-                      : 'bg-danger/20 text-danger'
+                      : trade.side === 'update'
+                        ? 'bg-blue-500/20 text-blue-400'
+                        : 'bg-danger/20 text-danger'
                   )}>
                     {trade.side.toUpperCase()}
                   </span>
