@@ -61,8 +61,9 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
 
   // Run simulation and compute sim stats
   const simStats = useMemo(() => {
-    if (trades.length === 0) return null
-    const sim = runSimulation(trades, simSettings)
+    const realTrades = trades.filter(t => t.side !== 'update')
+    if (realTrades.length === 0) return null
+    const sim = runSimulation(realTrades, simSettings)
     const perTrade = Array.from(sim.per_trade.values())
     const wins = perTrade.filter(t => t.sim_pnl > 0)
     const losses = perTrade.filter(t => t.sim_pnl < 0)

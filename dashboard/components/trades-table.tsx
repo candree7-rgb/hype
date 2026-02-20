@@ -157,7 +157,7 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
     <div className="bg-card border border-border rounded-lg overflow-hidden">
       <div className="p-6 pb-4">
         <h2 className="text-xl font-bold">Trade History</h2>
-        <p className="text-sm text-muted-foreground mt-1">Last {trades.length} trades</p>
+        <p className="text-sm text-muted-foreground mt-1">Last {trades.filter(t => t.side !== 'update').length} trades</p>
       </div>
 
       <div className="overflow-x-auto">
@@ -225,101 +225,103 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                   </span>
                 </td>
 
-                {/* Entry */}
-                <td className="px-4 py-4 font-mono text-sm">
-                  {trade.side === 'update'
-                    ? <span className="text-muted-foreground">-</span>
-                    : `$${parseFloat(trade.entry_price?.toString() || '0').toFixed(4)}`
-                  }
-                </td>
-
-                {/* Duration */}
-                <td className="px-4 py-4 text-sm text-muted-foreground">
-                  {formatDuration(trade.duration_minutes)}
-                </td>
-
-                {/* P&L $: simulated mode shows sim P&L, real mode shows account P&L */}
                 {trade.side === 'update' ? (
-                  <td className="px-4 py-4">
-                    <span className="text-sm text-muted-foreground">-</span>
+                  /* UPDATE row: span from Entry through DCA with note text */
+                  <td colSpan={6} className="px-4 py-4">
+                    <span className="text-sm text-muted-foreground italic">
+                      {trade.close_reason?.trim() || 'Strategy update'}
+                    </span>
                   </td>
-                ) : isSimulated ? (
-                  <>
-                    {simResults && (() => {
-                      const sim = simResults.per_trade.get(trade.trade_id)
-                      return (
-                        <td className="px-4 py-4">
-                          {sim ? (
-                            <span className={cn(
-                              'font-semibold',
-                              sim.sim_pnl >= 0 ? 'text-success' : 'text-danger'
-                            )}>
-                              {sim.sim_pnl >= 0 ? '+' : ''}{formatCurrency(sim.sim_pnl)}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">-</span>
-                          )}
-                        </td>
-                      )
-                    })()}
-                  </>
                 ) : (
-                  <td className="px-4 py-4">
-                    <span className={cn(
-                      'font-semibold',
-                      (trade.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger'
-                    )}>
-                      {(trade.realized_pnl || 0) >= 0 ? '+' : ''}
-                      {formatCurrency(parseFloat(trade.realized_pnl?.toString() || '0'))}
-                    </span>
-                  </td>
+                  <>
+                    {/* Entry */}
+                    <td className="px-4 py-4 font-mono text-sm">
+                      ${parseFloat(trade.entry_price?.toString() || '0').toFixed(4)}
+                    </td>
+
+                    {/* Duration */}
+                    <td className="px-4 py-4 text-sm text-muted-foreground">
+                      {formatDuration(trade.duration_minutes)}
+                    </td>
+
+                    {/* P&L $: simulated mode shows sim P&L, real mode shows account P&L */}
+                    {isSimulated ? (
+                      <>
+                        {simResults && (() => {
+                          const sim = simResults.per_trade.get(trade.trade_id)
+                          return (
+                            <td className="px-4 py-4">
+                              {sim ? (
+                                <span className={cn(
+                                  'font-semibold',
+                                  sim.sim_pnl >= 0 ? 'text-success' : 'text-danger'
+                                )}>
+                                  {sim.sim_pnl >= 0 ? '+' : ''}{formatCurrency(sim.sim_pnl)}
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">-</span>
+                              )}
+                            </td>
+                          )
+                        })()}
+                      </>
+                    ) : (
+                      <td className="px-4 py-4">
+                        <span className={cn(
+                          'font-semibold',
+                          (trade.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger'
+                        )}>
+                          {(trade.realized_pnl || 0) >= 0 ? '+' : ''}
+                          {formatCurrency(parseFloat(trade.realized_pnl?.toString() || '0'))}
+                        </span>
+                      </td>
+                    )}
+
+                    {/* P&L % - simulated mode uses scaled %, real mode uses raw DB value */}
+                    <td className="px-4 py-4">
+                      {(() => {
+                        const sim = isSimulated && simResults ? simResults.per_trade.get(trade.trade_id) : null
+                        const pct = sim ? sim.sim_pnl_pct : parseFloat(trade.pnl_pct_equity?.toString() || '0')
+                        return (
+                          <span className={cn(
+                            'font-semibold text-sm',
+                            pct >= 0 ? 'text-success' : 'text-danger'
+                          )}>
+                            {pct >= 0 ? '+' : ''}{pct.toFixed(2)}%
+                          </span>
+                        )
+                      })()}
+                    </td>
+
+                    {/* Exit badges */}
+                    <td className="px-4 py-4">
+                      <div className="flex flex-wrap gap-1">
+                        {getExitBadges(trade).map((badge, idx) => (
+                          <span
+                            key={idx}
+                            className={cn(
+                              'px-2 py-0.5 rounded text-xs font-semibold',
+                              badgeColors[badge.variant]
+                            )}
+                          >
+                            {badge.label}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+
+                    {/* DCA badge */}
+                    <td className="px-4 py-4">
+                      {trade.max_dca_reached > 0 ? (
+                        <span className="px-2 py-0.5 rounded text-xs font-semibold bg-orange-500/20 text-orange-400">
+                          DCA
+                        </span>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">-</span>
+                      )}
+                    </td>
+                  </>
                 )}
-
-                {/* P&L % - simulated mode uses scaled %, real mode uses raw DB value */}
-                <td className="px-4 py-4">
-                  {trade.side === 'update' ? (
-                    <span className="text-sm text-muted-foreground">-</span>
-                  ) : (() => {
-                    const sim = isSimulated && simResults ? simResults.per_trade.get(trade.trade_id) : null
-                    const pct = sim ? sim.sim_pnl_pct : parseFloat(trade.pnl_pct_equity?.toString() || '0')
-                    return (
-                      <span className={cn(
-                        'font-semibold text-sm',
-                        pct >= 0 ? 'text-success' : 'text-danger'
-                      )}>
-                        {pct >= 0 ? '+' : ''}{pct.toFixed(2)}%
-                      </span>
-                    )
-                  })()}
-                </td>
-
-                {/* Exit badges */}
-                <td className="px-4 py-4">
-                  <div className="flex flex-wrap gap-1">
-                    {getExitBadges(trade).map((badge, idx) => (
-                      <span
-                        key={idx}
-                        className={cn(
-                          'px-2 py-0.5 rounded text-xs font-semibold',
-                          badgeColors[badge.variant]
-                        )}
-                      >
-                        {badge.label}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-
-                {/* DCA badge */}
-                <td className="px-4 py-4">
-                  {trade.max_dca_reached > 0 ? (
-                    <span className="px-2 py-0.5 rounded text-xs font-semibold bg-orange-500/20 text-orange-400">
-                      DCA
-                    </span>
-                  ) : (
-                    <span className="text-sm text-muted-foreground">-</span>
-                  )}
-                </td>
               </tr>
             ))}
           </tbody>

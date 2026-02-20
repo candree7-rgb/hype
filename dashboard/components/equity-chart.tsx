@@ -54,12 +54,13 @@ export default function EquityChart({ timeRange, customDateRange, simSettings, i
 
   // Build equity curve from simulation
   const chartData = useMemo(() => {
-    if (trades.length === 0) return []
+    const realTrades = trades.filter(t => t.side !== 'update')
+    if (realTrades.length === 0) return []
 
-    const sim = runSimulation(trades, simSettings)
+    const sim = runSimulation(realTrades, simSettings)
 
     // Sort trades chronologically
-    const sorted = [...trades].sort((a, b) =>
+    const sorted = [...realTrades].sort((a, b) =>
       new Date(a.closed_at).getTime() - new Date(b.closed_at).getTime()
     )
 

@@ -177,7 +177,7 @@ export async function getStats(
             ELSE 0
           END as tp_fills
         FROM trades
-        WHERE closed_at IS NOT NULL${dateFilter}
+        WHERE closed_at IS NOT NULL AND side != 'update'${dateFilter}
       )
       SELECT
         COUNT(*) as total_trades,
@@ -302,7 +302,7 @@ export async function getExitDistribution(
             ELSE false
           END as is_sl
         FROM trades
-        WHERE closed_at IS NOT NULL${dateFilter}
+        WHERE closed_at IS NOT NULL AND side != 'update'${dateFilter}
       ),
       total AS (SELECT COUNT(*) as cnt FROM trade_data)
       SELECT level, count FROM (
@@ -322,7 +322,7 @@ export async function getExitDistribution(
     `)
 
     const totalTrades = await client.query(`
-      SELECT COUNT(*) as cnt FROM trades WHERE closed_at IS NOT NULL${dateFilter}
+      SELECT COUNT(*) as cnt FROM trades WHERE closed_at IS NOT NULL AND side != 'update'${dateFilter}
     `)
     const total = parseInt(totalTrades.rows[0]?.cnt || '0')
 
@@ -357,7 +357,7 @@ export async function getDCADistribution(
         CASE WHEN max_dca_reached = 0 THEN 'NO DCA' ELSE 'DCA' END as label,
         COUNT(*) as count
       FROM trades
-      WHERE closed_at IS NOT NULL${dateFilter}
+      WHERE closed_at IS NOT NULL AND side != 'update'${dateFilter}
       GROUP BY CASE WHEN max_dca_reached = 0 THEN 'NO DCA' ELSE 'DCA' END
       ORDER BY label
     `)
