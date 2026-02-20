@@ -116,6 +116,13 @@ class BotConfig:
     zone_candle_count: int = 100          # Candles to analyze for swing H/L
     zone_candle_interval: str = "15"      # 15min candles
 
+    # ── Neo Cloud + DCA interaction ──
+    # When Neo Cloud flips AFTER DCA filled: don't close immediately.
+    # Instead, set SL to recent swing (low for long, high for short).
+    # This gives DCA recovery a fair chance while still protecting.
+    # Hard SL acts as cap (never worse than dca_fill - hard_sl_pct).
+    neo_dca_swing_candles: int = 3  # 3 × 15min = 45min lookback for swing SL
+
     # ── Filters ──
     min_leverage_signal: int = 0    # Skip signals below this leverage
     max_leverage_signal: int = 100  # Skip signals above this leverage

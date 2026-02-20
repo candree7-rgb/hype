@@ -1064,6 +1064,47 @@ def _set_exchange_stops_after_dca(trade: Trade) -> None:
             )
 
 
+def _neo_switch_dca_swing_sl(trade: Trade) -> bool:
+    """Neo Cloud flipped but DCA is filled: set SL to recent swing instead of closing.
+
+    Fetches last N 15min candles and uses min(low) for longs / max(high) for shorts.
+    Hard SL acts as cap (never worse than current hard_sl_price).
+
+    Returns True if swing SL was set successfully, False on failure.
+    """
+    n = config.neo_dca_swing_candles
+    candles = bybit.get_klines(trade.symbol, "15", limit=n)
+    if not candles:
+        logger.warning(
+            f"Neo+DCA swing SL: no candles for {trade.symbol_display}, "
+            f"falling back to immediate close"
+        )
+        return False
+
+    if trade.side == "long":
+        swing = min(c["low"] for c in candles)
+        # Cap: never worse than hard SL (which is lower for longs)
+        sl = max(swing, trade.hard_sl_price)
+    else:
+        swing = max(c["high"] for c in candles)
+        # Cap: never worse than hard SL (which is higher for shorts)
+        sl = min(swing, trade.hard_sl_price)
+
+    sl_ok = bybit.set_trading_stop(trade.symbol, trade.side, stop_loss=sl)
+    if sl_ok:
+        logger.info(
+            f"Neo+DCA swing SL: {trade.symbol_display} {trade.side.upper()} | "
+            f"Swing={swing:.4f} | HardSL={trade.hard_sl_price:.4f} | "
+            f"Final SL={sl:.4f} | DCA recovery chance"
+        )
+    else:
+        logger.warning(
+            f"Neo+DCA swing SL FAILED: {trade.symbol_display}, "
+            f"falling back to immediate close"
+        )
+    return sl_ok
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ▌ ZONE REFRESH (auto-calc swing zones for active symbols)
 # ══════════════════════════════════════════════════════════════════════════
@@ -1975,7 +2016,19 @@ async def trend_switch(request: Request):
             )
             continue
 
-        # FILLED trades: close position on exchange
+        # DCA filled? → swing SL instead of immediate close
+        if trade.current_dca > 0 and config.neo_dca_swing_candles > 0:
+            if _neo_switch_dca_swing_sl(trade):
+                closed.append({
+                    "trade_id": trade.trade_id,
+                    "symbol": trade.symbol_display,
+                    "side": trade.side,
+                    "pnl": "swing SL (DCA recovery)",
+                })
+                continue
+            # Fallthrough: swing SL failed → close immediately
+
+        # FILLED trades (no DCA or swing SL failed): close position on exchange
         # close_full() handles: cancel_all → market close → verify → force-close residual
         price = bybit.get_ticker_price(trade.symbol)
         success = bybit.close_full(trade, f"Neo Cloud {direction}")
@@ -2158,7 +2211,18 @@ async def push_zones(request: Request):
                     )
                     continue
 
-                # FILLED trades: close position on exchange
+                # DCA filled? → swing SL instead of immediate close
+                if trade.current_dca > 0 and config.neo_dca_swing_candles > 0:
+                    if _neo_switch_dca_swing_sl(trade):
+                        closed.append({
+                            "trade_id": trade.trade_id,
+                            "side": trade.side,
+                            "pnl": "swing SL (DCA recovery)",
+                        })
+                        continue
+                    # Fallthrough: swing SL failed → close immediately
+
+                # FILLED trades (no DCA or swing SL failed): close position on exchange
                 # close_full() handles: cancel_all → market close → verify → force-close residual
                 price = bybit.get_ticker_price(trade.symbol)
                 success = bybit.close_full(trade, f"Neo Cloud {new_direction}")
