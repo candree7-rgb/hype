@@ -516,6 +516,7 @@ def get_trade_stats() -> dict:
                 MIN(realized_pnl) as worst_trade,
                 COALESCE(AVG(duration_minutes), 0) as avg_duration
             FROM trades
+            WHERE side != 'update'
         """)
         row = cur.fetchone()
         cur.close()
