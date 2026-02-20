@@ -118,10 +118,10 @@ class BotConfig:
 
     # ── Neo Cloud + DCA interaction ──
     # When Neo Cloud flips AFTER DCA filled: don't close immediately.
-    # Instead, set SL to recent swing (low for long, high for short).
-    # This gives DCA recovery a fair chance while still protecting.
-    # Hard SL acts as cap (never worse than dca_fill - hard_sl_pct).
-    neo_dca_swing_candles: int = 3  # 3 × 15min = 45min lookback for swing SL
+    # Instead, tighten hard SL from 3% to 1.5% (from deepest DCA fill).
+    # This gives DCA recovery a fair chance while capping loss at ~3% equity.
+    # Set to 0 to disable (= always close immediately on Neo flip).
+    neo_dca_tight_sl_pct: float = 1.5  # Tightened SL after Neo flip + DCA
 
     # ── Filters ──
     min_leverage_signal: int = 0    # Skip signals below this leverage

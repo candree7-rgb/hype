@@ -1064,42 +1064,49 @@ def _set_exchange_stops_after_dca(trade: Trade) -> None:
             )
 
 
-def _neo_switch_dca_swing_sl(trade: Trade) -> bool:
-    """Neo Cloud flipped but DCA is filled: set SL to recent swing instead of closing.
+def _neo_switch_dca_tighten_sl(trade: Trade) -> bool:
+    """Neo Cloud flipped but DCA is filled: tighten SL instead of closing.
 
-    Fetches last N 15min candles and uses min(low) for longs / max(high) for shorts.
-    Hard SL acts as cap (never worse than current hard_sl_price).
+    Sets SL to deepest_dca_fill ± neo_dca_tight_sl_pct (1.5% default).
+    This is tighter than hard_sl (3%) but gives DCA recovery a fair chance.
+    Worst case ~3% equity loss vs ~5% with full hard SL.
 
-    Returns True if swing SL was set successfully, False on failure.
+    Returns True if SL was set successfully, False on failure.
     """
-    n = config.neo_dca_swing_candles
-    candles = bybit.get_klines(trade.symbol, "15", limit=n)
-    if not candles:
+    tight_pct = config.neo_dca_tight_sl_pct / 100
+
+    # Find deepest DCA fill price (same logic as _update_hard_sl)
+    deepest_fill = None
+    for dca in trade.dca_levels[1:]:
+        if dca.filled and dca.price > 0:
+            if trade.side == "long":
+                deepest_fill = min(deepest_fill, dca.price) if deepest_fill else dca.price
+            else:
+                deepest_fill = max(deepest_fill, dca.price) if deepest_fill else dca.price
+
+    if not deepest_fill:
         logger.warning(
-            f"Neo+DCA swing SL: no candles for {trade.symbol_display}, "
+            f"Neo+DCA tight SL: no DCA fill price for {trade.symbol_display}, "
             f"falling back to immediate close"
         )
         return False
 
     if trade.side == "long":
-        swing = min(c["low"] for c in candles)
-        # Cap: never worse than hard SL (which is lower for longs)
-        sl = max(swing, trade.hard_sl_price)
+        sl = deepest_fill * (1 - tight_pct)
     else:
-        swing = max(c["high"] for c in candles)
-        # Cap: never worse than hard SL (which is higher for shorts)
-        sl = min(swing, trade.hard_sl_price)
+        sl = deepest_fill * (1 + tight_pct)
 
     sl_ok = bybit.set_trading_stop(trade.symbol, trade.side, stop_loss=sl)
     if sl_ok:
         logger.info(
-            f"Neo+DCA swing SL: {trade.symbol_display} {trade.side.upper()} | "
-            f"Swing={swing:.4f} | HardSL={trade.hard_sl_price:.4f} | "
-            f"Final SL={sl:.4f} | DCA recovery chance"
+            f"Neo+DCA tight SL: {trade.symbol_display} {trade.side.upper()} | "
+            f"DCA fill={deepest_fill:.4f} | Old SL={trade.hard_sl_price:.4f} | "
+            f"New SL={sl:.4f} ({config.neo_dca_tight_sl_pct}%) | DCA recovery chance"
         )
+        trade.hard_sl_price = sl
     else:
         logger.warning(
-            f"Neo+DCA swing SL FAILED: {trade.symbol_display}, "
+            f"Neo+DCA tight SL FAILED: {trade.symbol_display}, "
             f"falling back to immediate close"
         )
     return sl_ok
@@ -2017,8 +2024,8 @@ async def trend_switch(request: Request):
             continue
 
         # DCA filled? → swing SL instead of immediate close
-        if trade.current_dca > 0 and config.neo_dca_swing_candles > 0:
-            if _neo_switch_dca_swing_sl(trade):
+        if trade.current_dca > 0 and config.neo_dca_tight_sl_pct > 0:
+            if _neo_switch_dca_tighten_sl(trade):
                 closed.append({
                     "trade_id": trade.trade_id,
                     "symbol": trade.symbol_display,
@@ -2212,8 +2219,8 @@ async def push_zones(request: Request):
                     continue
 
                 # DCA filled? → swing SL instead of immediate close
-                if trade.current_dca > 0 and config.neo_dca_swing_candles > 0:
-                    if _neo_switch_dca_swing_sl(trade):
+                if trade.current_dca > 0 and config.neo_dca_tight_sl_pct > 0:
+                    if _neo_switch_dca_tighten_sl(trade):
                         closed.append({
                             "trade_id": trade.trade_id,
                             "side": trade.side,
