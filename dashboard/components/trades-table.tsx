@@ -192,12 +192,17 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                 {/* Symbol */}
                 <td className="px-4 py-4">
                   <div className="flex items-center gap-2">
-                    <span className="font-mono font-semibold">
+                    <span className={cn(
+                      'font-mono font-semibold',
+                      trade.side === 'update' && 'text-blue-400 italic'
+                    )}>
                       {trade.symbol.replace('USDT', '')}
                     </span>
-                    <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-muted/80 text-muted-foreground">
-                      {trade.leverage}x
-                    </span>
+                    {trade.side !== 'update' && (
+                      <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-muted/80 text-muted-foreground">
+                        {trade.leverage}x
+                      </span>
+                    )}
                   </div>
                 </td>
 
