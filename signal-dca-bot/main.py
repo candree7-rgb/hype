@@ -752,10 +752,62 @@ async def price_monitor():
                         )
                         break  # One DCA per cycle
 
-                # ── 2b. DCA Quick-Trail: tighten SL once bounce confirms ──
+                # ── 2b. DCA Midpoint SL: tighten SL when price reaches avg ──
                 # After DCA fills, SL is at deepest_fill+3% (~4.7% equity risk).
-                # Once price moves 0.5% in our favor → tighten SL to avg+0.5%
-                # (~1.1% equity risk). Keeps -3% as safety net until bounce confirms.
+                # Once price bounces back to avg → SL = midpoint(deepest_fill, avg).
+                # This halves the loss if bounce fails (~1.7% equity vs ~4.7%).
+                # Triggers BEFORE quick-trail (at avg, not avg+0.5%).
+                if (trade.status == TradeStatus.DCA_ACTIVE
+                        and trade.current_dca > 0
+                        and not trade.midpoint_sl_active
+                        and not trade.quick_trail_active
+                        and trade.tps_hit == 0):
+                    current_price = bybit.get_ticker_price(trade.symbol)
+                    if current_price:
+                        if trade.side == "long":
+                            price_at_avg = current_price >= trade.avg_price
+                        else:
+                            price_at_avg = current_price <= trade.avg_price
+
+                        if price_at_avg:
+                            # Find deepest DCA fill price
+                            deepest_fill = None
+                            for dca in trade.dca_levels[1:]:
+                                if dca.filled and dca.price > 0:
+                                    if trade.side == "long":
+                                        deepest_fill = min(deepest_fill, dca.price) if deepest_fill else dca.price
+                                    else:
+                                        deepest_fill = max(deepest_fill, dca.price) if deepest_fill else dca.price
+
+                            if deepest_fill:
+                                midpoint_sl = (deepest_fill + trade.avg_price) / 2
+                                old_sl = trade.hard_sl_price
+                                sl_ok = bybit.set_trading_stop(
+                                    trade.symbol, trade.side,
+                                    stop_loss=midpoint_sl,
+                                )
+                                trade.hard_sl_price = midpoint_sl
+                                trade.midpoint_sl_active = True
+                                trade_mgr.persist_trade(trade)
+                                if sl_ok:
+                                    loss_pct = abs(midpoint_sl - trade.avg_price) / trade.avg_price * 100
+                                    logger.info(
+                                        f"DCA Midpoint SL: {trade.symbol_display} | "
+                                        f"Price {current_price:.4f} reached avg {trade.avg_price:.4f} | "
+                                        f"SL: {old_sl:.4f} → {midpoint_sl:.4f} "
+                                        f"(midpoint of DCA {deepest_fill:.4f} + avg {trade.avg_price:.4f}) | "
+                                        f"Loss capped at ~{loss_pct:.1f}%"
+                                    )
+                                else:
+                                    logger.critical(
+                                        f"DCA Midpoint SL FAILED: {trade.symbol_display} | "
+                                        f"SL={midpoint_sl:.4f} NOT VERIFIED!"
+                                    )
+
+                # ── 2c. DCA Quick-Trail: tighten SL once bounce confirms ──
+                # After midpoint SL, SL is at midpoint(deepest_fill, avg).
+                # Once price moves 0.5% past avg → tighten SL to avg+0.5%
+                # (~1.1% equity risk). Progressive tightening.
                 if (trade.status == TradeStatus.DCA_ACTIVE
                         and trade.current_dca > 0
                         and not trade.quick_trail_active

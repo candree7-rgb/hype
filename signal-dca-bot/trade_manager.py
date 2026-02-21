@@ -95,6 +95,10 @@ class Trade:
     # DCA Quick-Trail: tighten SL once bounce confirms (+0.5%)
     quick_trail_active: bool = False  # True = SL already tightened from -3% to avg+0.5%
 
+    # DCA Midpoint SL: tighten SL when price reaches avg after DCA fill
+    # SL = midpoint(deepest_dca_fill, avg_price) — halves loss vs hard SL
+    midpoint_sl_active: bool = False  # True = SL already tightened to midpoint
+
     # 2/3 Pyramiding (scale-in at TP2)
     scale_in_pending: bool = False    # True = limit order placed, waiting for fill
     scale_in_order_id: str = ""       # Bybit order ID for scale-in limit
@@ -185,6 +189,7 @@ def trade_to_dict(trade: Trade) -> dict:
         "be_trail_active": trade.be_trail_active,
         "be_trail_peak": trade.be_trail_peak,
         "quick_trail_active": trade.quick_trail_active,
+        "midpoint_sl_active": trade.midpoint_sl_active,
         "scale_in_pending": trade.scale_in_pending,
         "scale_in_order_id": trade.scale_in_order_id,
         "scale_in_filled": trade.scale_in_filled,
@@ -241,6 +246,7 @@ def trade_from_dict(data: dict) -> Trade:
         be_trail_active=data.get("be_trail_active", False),
         be_trail_peak=data.get("be_trail_peak", 0),
         quick_trail_active=data.get("quick_trail_active", False),
+        midpoint_sl_active=data.get("midpoint_sl_active", False),
         scale_in_pending=data.get("scale_in_pending", False),
         scale_in_order_id=data.get("scale_in_order_id", ""),
         scale_in_filled=data.get("scale_in_filled", False),
