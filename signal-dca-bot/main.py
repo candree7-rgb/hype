@@ -740,8 +740,18 @@ def _get_bybit_realized_pnl(trade: Trade) -> float | None:
 
     total_pnl = sum(r["closed_pnl"] for r in matching)
     total_qty = sum(r["qty"] for r in matching)
+
+    # Log each fill's actual prices for slippage diagnosis
+    for i, r in enumerate(matching, 1):
+        logger.info(
+            f"Bybit closed PnL [{i}/{len(matching)}]: {trade.symbol_display} | "
+            f"Entry: {r['entry_price']:.6f} → Exit: {r['exit_price']:.6f} | "
+            f"Qty: {r['qty']:.4f} | PnL: ${r['closed_pnl']:+.4f} | "
+            f"Type: {r['order_type']}"
+        )
+
     logger.info(
-        f"Bybit closed PnL: {trade.symbol_display} | "
+        f"Bybit closed PnL total: {trade.symbol_display} | "
         f"{len(matching)} records | Total qty: {total_qty:.4f} | "
         f"PnL: ${total_pnl:+.4f}"
     )
