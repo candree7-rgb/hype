@@ -111,7 +111,11 @@ class BotConfig:
 
     # ── Zone Snapping ──
     zone_snap_enabled: bool = True
-    zone_snap_min_pct: float = 3.0        # Min distance for zone snap (S1/R1 only if >3%)
+    zone_snap_min_pct: float = 3.0        # Min distance for zone snap (default, signal lev <75x)
+    zone_snap_min_pct_high: float = 2.0   # Zone snap min for signal lev 75x+ (tighter moves)
+    zone_snap_min_pct_ultra: float = 1.5  # Zone snap min for signal lev 100x+ (BTC/majors)
+    zone_snap_lev_high: int = 75          # Signal leverage threshold for "high" tier
+    zone_snap_lev_ultra: int = 100        # Signal leverage threshold for "ultra" tier
     zone_refresh_minutes: int = 15        # Refresh zones every 15min
     zone_candle_count: int = 100          # Candles to analyze for swing H/L
     zone_candle_interval: str = "15"      # 15min candles
@@ -178,6 +182,18 @@ class BotConfig:
         else:
             return entry_price * (1 + pct) * (1 + buf)
 
+    def get_zone_snap_min_pct(self, signal_leverage: int) -> float:
+        """Get zone snap minimum % based on signal leverage tier.
+
+        High-leverage signals (ETH, BTC) have tighter moves, so zone snap
+        minimum is reduced to allow snapping at closer support/resistance.
+        """
+        if signal_leverage >= self.zone_snap_lev_ultra:
+            return self.zone_snap_min_pct_ultra
+        if signal_leverage >= self.zone_snap_lev_high:
+            return self.zone_snap_min_pct_high
+        return self.zone_snap_min_pct
+
     def print_summary(self, equity: float = 2400):
         """Print configuration summary with example equity."""
         sm = self.sum_multipliers
@@ -221,7 +237,10 @@ class BotConfig:
         print(f"║  Safety SL:      Entry - {self.safety_sl_pct}% (pre-DCA)")
         print(f"║  Hard SL:        Avg - {self.hard_sl_pct}% (post-DCA)")
         print(f"║  Quick Trail:    +{self.dca_quick_trail_trigger_pct}% → SL=avg+{self.dca_quick_trail_buffer_pct}%")
-        print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")
+        snap_info = (f"ON ({self.zone_snap_min_pct}%/<{self.zone_snap_lev_high}x, "
+                     f"{self.zone_snap_min_pct_high}%/{self.zone_snap_lev_high}x+, "
+                     f"{self.zone_snap_min_pct_ultra}%/{self.zone_snap_lev_ultra}x+)")
+        print(f"║  Zone Snap:      {snap_info if self.zone_snap_enabled else 'OFF'}")
         print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
         print(f"║  Zone Filter:    {'ON (skip shorts<S1, longs>R1)' if self.zone_filter_enabled else 'OFF'}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")

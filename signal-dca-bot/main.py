@@ -250,11 +250,13 @@ async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
                     logger.info(f"Auto-zones calculated for {signal.symbol}")
 
         if zones and zones.is_valid:
+            snap_pct = config.get_zone_snap_min_pct(signal.signal_leverage)
             smart_levels = calc_smart_dca_levels(
                 signal.entry_price, config.dca_spacing_pct, zones, signal.side,
-                snap_min_pct=config.zone_snap_min_pct,
+                snap_min_pct=snap_pct,
                 limit_buffer_pct=config.dca_limit_buffer_pct,
             )
+            logger.info(f"Zone snap min: {snap_pct}% (signal lev {signal.signal_leverage}x)")
             for i, (price, source) in enumerate(smart_levels):
                 if i < len(trade.dca_levels) and source not in ("entry", "fixed", "filled"):
                     old_price = trade.dca_levels[i].price
@@ -1194,9 +1196,10 @@ async def resnap_active_dcas(symbol: str):
         filled_mask = [dca.filled for dca in trade.dca_levels]
 
         # Re-calculate smart DCA levels with fresh zones + filled status
+        snap_pct = config.get_zone_snap_min_pct(trade.signal_leverage)
         smart_levels = calc_smart_dca_levels(
             trade.signal_entry, config.dca_spacing_pct, zones, trade.side,
-            snap_min_pct=config.zone_snap_min_pct,
+            snap_min_pct=snap_pct,
             filled_levels=filled_mask,
             limit_buffer_pct=config.dca_limit_buffer_pct,
         )
