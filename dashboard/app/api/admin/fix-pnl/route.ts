@@ -88,13 +88,13 @@ export async function GET() {
       return NextResponse.json({ error: 'Bybit credentials not configured' }, { status: 500 })
     }
 
-    // Get recent trades from DB
+    // Get recent trades from DB (skip manually edited 'update' rows)
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
     const { rows } = await pool.query(
       `SELECT trade_id, symbol, side, total_margin, equity_at_entry,
               realized_pnl, opened_at
        FROM trades
-       WHERE opened_at >= $1
+       WHERE opened_at >= $1 AND side != 'update'
        ORDER BY opened_at DESC`,
       [cutoff]
     )

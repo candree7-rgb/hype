@@ -1960,7 +1960,8 @@ async def bybit_trade_sync():
                 if is_tracked:
                     continue
 
-                # Not tracked and not in DB → save it
+                # Not tracked and not in DB → save it (allow_overwrite=False
+                # so manually edited trades are never overwritten by sync)
                 trade_id = f"bybit_{rec['symbol']}_{rec['side']}_{int(rec['created_time'])}"
                 equity = bybit.get_equity() or 0
                 db.save_trade(
@@ -1983,6 +1984,7 @@ async def bybit_trade_sync():
                     equity_at_close=equity,
                     leverage=config.leverage,
                     equity_pct_per_trade=config.equity_pct_per_trade,
+                    allow_overwrite=False,
                 )
                 fill_info = f" ({rec['fill_count']} fills)" if rec.get("fill_count", 1) > 1 else ""
                 logger.info(
