@@ -127,6 +127,18 @@ class BotConfig:
     # Set to 0 to disable (= always close immediately on Neo flip).
     neo_dca_tight_sl_pct: float = 1.5  # Tightened SL after Neo flip + DCA
 
+    # ── Wick Spike Filter ──
+    # Skip signals triggered by a single abnormal wick (fake breakout / stop hunt).
+    # Compares the directional wick of the trigger candle (the candle right before
+    # the signal) against the median range of the preceding candles.
+    # Short signal → check lower wick (= min(open,close) - low)
+    # Long signal  → check upper wick (= high - max(open,close))
+    # If wick > multiplier * median_range → skip (spike, not real move).
+    wick_spike_filter: bool = True
+    wick_spike_multiplier: float = 1.5     # Wick must be >1.5x median range to skip
+    wick_spike_lookback: int = 6           # Candles to compute median range (excl. trigger)
+    wick_spike_candle_interval: str = "15" # Candle timeframe (match signal source)
+
     # ── Extended Move Filter ──
     # Skip signals where price has already moved too far in the signal direction.
     # SHORT + price >X% below 24h-high → skip (extended down, bounce likely)
@@ -270,6 +282,11 @@ class BotConfig:
         else:
             ext_info = "OFF"
         print(f"║  Extended Move:  {ext_info}")
+        if self.wick_spike_filter:
+            wick_info = f"ON ({self.wick_spike_multiplier}x median, {self.wick_spike_lookback} candles, {self.wick_spike_candle_interval}m)"
+        else:
+            wick_info = "OFF"
+        print(f"║  Wick Spike:     {wick_info}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")
         print(f"║")
         print(f"║  Levels (Long @ $100):")

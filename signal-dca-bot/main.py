@@ -99,6 +99,76 @@ async def add_signal_to_batch(signal: Signal) -> dict:
     return {"status": "buffered", "buffer_size": count}
 
 
+def check_wick_spike(signal: Signal) -> tuple[bool, str]:
+    """Check if the trigger candle has an abnormal wick (fake breakout / stop hunt).
+
+    Fetches recent candles, takes the LAST one as trigger candle (the one that
+    caused the signal), and compares its directional wick against the median
+    range of the preceding candles.
+
+    Short signal → lower wick = min(open,close) - low  (spike down)
+    Long signal  → upper wick = high - max(open,close) (spike up)
+
+    Returns (is_spike, reason). If is_spike=True, signal should be skipped.
+    """
+    if not config.wick_spike_filter:
+        return False, ""
+
+    # Fetch lookback + 1 candles (N context + 1 trigger)
+    total_candles = config.wick_spike_lookback + 1
+    candles = bybit.get_klines(
+        signal.symbol,
+        interval=config.wick_spike_candle_interval,
+        limit=total_candles,
+    )
+    if not candles or len(candles) < total_candles:
+        logger.warning(
+            f"Wick spike: only {len(candles) if candles else 0} candles for "
+            f"{signal.symbol}, need {total_candles}, allowing"
+        )
+        return False, ""
+
+    # Last candle = trigger, preceding = context
+    trigger = candles[-1]
+    context = candles[:-1]
+
+    # Median range of context candles
+    ranges = sorted(c["high"] - c["low"] for c in context)
+    n = len(ranges)
+    if n % 2 == 0:
+        median_range = (ranges[n // 2 - 1] + ranges[n // 2]) / 2
+    else:
+        median_range = ranges[n // 2]
+
+    if median_range <= 0:
+        return False, ""
+
+    # Directional wick of trigger candle
+    body_low = min(trigger["open"], trigger["close"])
+    body_high = max(trigger["open"], trigger["close"])
+
+    if signal.side == "short":
+        wick = body_low - trigger["low"]  # Lower wick (spike down)
+    else:
+        wick = trigger["high"] - body_high  # Upper wick (spike up)
+
+    if wick <= 0:
+        return False, ""
+
+    ratio = wick / median_range
+
+    if ratio >= config.wick_spike_multiplier:
+        wick_pct = wick / trigger["close"] * 100 if trigger["close"] > 0 else 0
+        reason = (
+            f"Wick spike: {signal.side.upper()} trigger candle wick "
+            f"{wick:.4f} ({wick_pct:.2f}%) = {ratio:.1f}x median range "
+            f"{median_range:.4f} (threshold {config.wick_spike_multiplier}x)"
+        )
+        return True, reason
+
+    return False, ""
+
+
 def check_extended_move(signal: Signal) -> tuple[bool, str]:
     """Check if price has already moved too far in the signal direction (24h).
 
@@ -201,6 +271,13 @@ async def flush_batch():
                 f"filtered → {ext_reason}"
             )
             continue
+        is_spike, spike_reason = check_wick_spike(signal)
+        if is_spike:
+            logger.info(
+                f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                f"filtered → {spike_reason}"
+            )
+            continue
         valid.append(signal)
 
     if not valid:
@@ -274,14 +351,22 @@ async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
                 )
                 return {"status": "filtered", "reason": reason}
 
-    # Extended move filter: skip if price already moved too far in signal direction
-    if not batch_id:  # Batch signals are already filtered in flush_batch()
+    # Extended move + wick spike filters for non-batch calls (webhook direct)
+    # Batch signals are already filtered in flush_batch()
+    if not batch_id:
         is_extended, ext_reason = check_extended_move(signal)
         if is_extended:
             logger.info(
                 f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {ext_reason}"
             )
             return {"status": "filtered", "reason": ext_reason}
+
+        is_spike, spike_reason = check_wick_spike(signal)
+        if is_spike:
+            logger.info(
+                f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {spike_reason}"
+            )
+            return {"status": "filtered", "reason": spike_reason}
 
     equity = bybit.get_equity()
     if equity <= 0:
@@ -2521,6 +2606,8 @@ async def status():
         "neo_cloud": config.neo_cloud_filter,
         "extended_move_filter": config.extended_move_filter,
         "extended_move_pct": f"{config.extended_move_pct}/{config.extended_move_pct_high}/{config.extended_move_pct_ultra}%",
+        "wick_spike_filter": config.wick_spike_filter,
+        "wick_spike_multiplier": f"{config.wick_spike_multiplier}x median ({config.wick_spike_lookback} candles)",
         "testnet": config.bybit_testnet,
     }
 
