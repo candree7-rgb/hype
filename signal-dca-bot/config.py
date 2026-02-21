@@ -127,6 +127,18 @@ class BotConfig:
     # Set to 0 to disable (= always close immediately on Neo flip).
     neo_dca_tight_sl_pct: float = 1.5  # Tightened SL after Neo flip + DCA
 
+    # ── Extended Move Filter ──
+    # Skip signals where price has already moved too far in the signal direction.
+    # SHORT + price >X% below 24h-high → skip (extended down, bounce likely)
+    # LONG  + price >X% above 24h-low  → skip (extended up, pullback likely)
+    # Leverage-tiered: majors (100x+) need less % to be "extended".
+    extended_move_filter: bool = True
+    extended_move_pct: float = 8.0          # Default threshold (<75x signal leverage)
+    extended_move_pct_high: float = 6.0     # For signal leverage 75x+
+    extended_move_pct_ultra: float = 4.0    # For signal leverage 100x+
+    extended_move_lookback: str = "60"      # Kline interval ("60" = 1h candles)
+    extended_move_candles: int = 24         # 24 x 1h = 24h lookback
+
     # ── Filters ──
     min_leverage_signal: int = 0    # Skip signals below this leverage
     max_leverage_signal: int = 100  # Skip signals above this leverage
@@ -194,6 +206,14 @@ class BotConfig:
             return self.zone_snap_min_pct_high
         return self.zone_snap_min_pct
 
+    def get_extended_move_pct(self, signal_leverage: int) -> float:
+        """Get extended move threshold based on signal leverage tier."""
+        if signal_leverage >= self.zone_snap_lev_ultra:
+            return self.extended_move_pct_ultra
+        if signal_leverage >= self.zone_snap_lev_high:
+            return self.extended_move_pct_high
+        return self.extended_move_pct
+
     def print_summary(self, equity: float = 2400):
         """Print configuration summary with example equity."""
         sm = self.sum_multipliers
@@ -243,6 +263,13 @@ class BotConfig:
         print(f"║  Zone Snap:      {snap_info if self.zone_snap_enabled else 'OFF'}")
         print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
         print(f"║  Zone Filter:    {'ON (skip shorts<S1, longs>R1)' if self.zone_filter_enabled else 'OFF'}")
+        if self.extended_move_filter:
+            ext_info = (f"ON ({self.extended_move_pct}%/<{self.zone_snap_lev_high}x, "
+                        f"{self.extended_move_pct_high}%/{self.zone_snap_lev_high}x+, "
+                        f"{self.extended_move_pct_ultra}%/{self.zone_snap_lev_ultra}x+)")
+        else:
+            ext_info = "OFF"
+        print(f"║  Extended Move:  {ext_info}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")
         print(f"║")
         print(f"║  Levels (Long @ $100):")

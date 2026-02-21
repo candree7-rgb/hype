@@ -99,6 +99,53 @@ async def add_signal_to_batch(signal: Signal) -> dict:
     return {"status": "buffered", "buffer_size": count}
 
 
+def check_extended_move(signal: Signal) -> tuple[bool, str]:
+    """Check if price has already moved too far in the signal direction (24h).
+
+    SHORT + price >X% below 24h-high → skip (extended down, bounce likely)
+    LONG  + price >X% above 24h-low  → skip (extended up, pullback likely)
+
+    Returns (is_extended, reason). If is_extended=True, signal should be skipped.
+    """
+    if not config.extended_move_filter:
+        return False, ""
+
+    hl = bybit.get_24h_high_low(
+        signal.symbol,
+        interval=config.extended_move_lookback,
+        candles=config.extended_move_candles,
+    )
+    if not hl:
+        logger.warning(f"Extended move: could not fetch 24h H/L for {signal.symbol}, allowing")
+        return False, ""
+
+    high_24h, low_24h = hl
+    threshold = config.get_extended_move_pct(signal.signal_leverage)
+
+    if signal.side == "short":
+        if high_24h > 0:
+            drop_pct = (high_24h - signal.entry_price) / high_24h * 100
+            if drop_pct >= threshold:
+                reason = (
+                    f"Extended move: SHORT but price already {drop_pct:.1f}% below "
+                    f"24h-high {high_24h:.4f} (threshold {threshold}%, "
+                    f"signal lev {signal.signal_leverage}x)"
+                )
+                return True, reason
+    else:  # long
+        if low_24h > 0:
+            pump_pct = (signal.entry_price - low_24h) / low_24h * 100
+            if pump_pct >= threshold:
+                reason = (
+                    f"Extended move: LONG but price already {pump_pct:.1f}% above "
+                    f"24h-low {low_24h:.4f} (threshold {threshold}%, "
+                    f"signal lev {signal.signal_leverage}x)"
+                )
+                return True, reason
+
+    return False, ""
+
+
 async def flush_batch():
     """Process buffered batch: Neo Cloud pre-filter, place all valid, cancel after N fills."""
     global _batch_flush_handle
@@ -147,6 +194,13 @@ async def flush_batch():
                         f"filtered → price {signal.entry_price:.4f} > R1 {zones.r1:.4f}"
                     )
                     continue
+        is_extended, ext_reason = check_extended_move(signal)
+        if is_extended:
+            logger.info(
+                f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                f"filtered → {ext_reason}"
+            )
+            continue
         valid.append(signal)
 
     if not valid:
@@ -219,6 +273,15 @@ async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
                     f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {reason}"
                 )
                 return {"status": "filtered", "reason": reason}
+
+    # Extended move filter: skip if price already moved too far in signal direction
+    if not batch_id:  # Batch signals are already filtered in flush_batch()
+        is_extended, ext_reason = check_extended_move(signal)
+        if is_extended:
+            logger.info(
+                f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {ext_reason}"
+            )
+            return {"status": "filtered", "reason": ext_reason}
 
     equity = bybit.get_equity()
     if equity <= 0:
@@ -2456,6 +2519,8 @@ async def status():
         "dca_trail_cb": config.dca_trail_callback_pct,
         "zones": config.zone_snap_enabled,
         "neo_cloud": config.neo_cloud_filter,
+        "extended_move_filter": config.extended_move_filter,
+        "extended_move_pct": f"{config.extended_move_pct}/{config.extended_move_pct_high}/{config.extended_move_pct_ultra}%",
         "testnet": config.bybit_testnet,
     }
 
