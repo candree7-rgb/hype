@@ -255,6 +255,8 @@ def load_config() -> BotConfig:
         port=int(os.getenv("PORT", "8000")),
         telegram_notify_chat_id=os.getenv("TELEGRAM_NOTIFY_CHAT_ID", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        blocked_coins=[c.strip().upper().replace("USDT", "") for c in os.getenv("BLOCKED_COINS", "").split(",") if c.strip()],
+        allowed_coins=[c.strip().upper().replace("USDT", "") for c in os.getenv("ALLOWED_COINS", "").split(",") if c.strip()],
     )
     return config
 
