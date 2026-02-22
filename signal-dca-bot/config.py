@@ -46,12 +46,18 @@ class BotConfig:
 
     # ── Neo Cloud Trend Filter ──
     neo_cloud_filter: bool = True       # Only take trades matching Neo Cloud trend
+    neo_min_gap_pct: float = 0.2        # Min gap between neo_lead and neo_lag (% of lead)
+                                        # Below this → ranging/thin trend, skip trade
+                                        # 0.13% gap = ice floor, 0.2%+ = confirmed direction
 
     # ── Reversal Zone Filter ──
     # Skip signals where price is already in the reversal zone:
     #   SHORT + price < S1 → skip (already at/below support, likely to bounce)
     #   LONG  + price > R1 → skip (already at/above resistance, likely to reject)
     zone_filter_enabled: bool = True
+    zone_proximity_pct: float = 1.5     # Skip if price is within X% of reversal boundary
+                                        # LONG near S1 → bounce not confirmed, could dip back
+                                        # SHORT near R1 → rejection not confirmed, could push higher
 
     # ── DCA Configuration ──
     # 1 DCA: E1 + DCA1 with sizing [1, 2] = sum 3
@@ -273,8 +279,10 @@ class BotConfig:
                      f"{self.zone_snap_min_pct_high}%/{self.zone_snap_lev_high}x+, "
                      f"{self.zone_snap_min_pct_ultra}%/{self.zone_snap_lev_ultra}x+)")
         print(f"║  Zone Snap:      {snap_info if self.zone_snap_enabled else 'OFF'}")
-        print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
-        print(f"║  Zone Filter:    {'ON (skip shorts<S1, longs>R1)' if self.zone_filter_enabled else 'OFF'}")
+        neo_info = f"FILTER ON (min gap {self.neo_min_gap_pct}%)" if self.neo_cloud_filter else "OFF"
+        print(f"║  Neo Cloud:      {neo_info}")
+        zone_info = f"ON (in-zone + proximity {self.zone_proximity_pct}%)" if self.zone_filter_enabled else "OFF"
+        print(f"║  Zone Filter:    {zone_info}")
         if self.extended_move_filter:
             ext_info = (f"ON ({self.extended_move_pct}%/<{self.zone_snap_lev_high}x, "
                         f"{self.extended_move_pct_high}%/{self.zone_snap_lev_high}x+, "

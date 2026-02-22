@@ -70,6 +70,73 @@ signal_buffer: list[Signal] = []
 buffer_lock = asyncio.Lock()
 _batch_flush_handle: asyncio.TimerHandle | None = None
 
+# Neo Cloud lead/lag values for strength check (updated by /zones/push)
+neo_cloud_values: dict[str, tuple[float, float]] = {}  # symbol → (neo_lead, neo_lag)
+
+
+def check_neo_cloud_strength(symbol: str) -> tuple[bool, str]:
+    """Check if Neo Cloud trend has enough strength (lead/lag gap).
+
+    Returns (is_weak, reason). is_weak=True means trade should be skipped.
+    """
+    if not config.neo_cloud_filter or config.neo_min_gap_pct <= 0:
+        return False, ""
+
+    values = neo_cloud_values.get(symbol)
+    if not values:
+        return False, ""  # No data → don't block
+
+    neo_lead, neo_lag = values
+    if neo_lead == 0:
+        return False, ""
+
+    gap_pct = abs(neo_lead - neo_lag) / abs(neo_lead) * 100
+    if gap_pct < config.neo_min_gap_pct:
+        return True, (
+            f"Neo Cloud too weak: lead/lag gap {gap_pct:.3f}% "
+            f"< min {config.neo_min_gap_pct}% (ranging, not trending)"
+        )
+
+    return False, ""
+
+
+def check_zone_proximity(signal) -> tuple[bool, str]:
+    """Check if price is too close to reversal zone boundary.
+
+    LONG near S1 → bounce not confirmed, could dip back into support
+    SHORT near R1 → rejection not confirmed, could push into resistance
+
+    Returns (too_close, reason).
+    """
+    if not config.zone_filter_enabled or config.zone_proximity_pct <= 0:
+        return False, ""
+
+    zones = zone_mgr.get_zones(signal.symbol)
+    if not zones or not zones.is_valid:
+        return False, ""
+
+    threshold = config.zone_proximity_pct / 100
+
+    if signal.side == "long" and zones.s1:
+        dist = abs(signal.entry_price - zones.s1) / zones.s1
+        if dist < threshold:
+            return True, (
+                f"Zone proximity: LONG entry {signal.entry_price:.4f} only "
+                f"{dist*100:.2f}% from S1 {zones.s1:.4f} "
+                f"(need >{config.zone_proximity_pct}% - bounce not confirmed)"
+            )
+
+    if signal.side == "short" and zones.r1:
+        dist = abs(signal.entry_price - zones.r1) / zones.r1
+        if dist < threshold:
+            return True, (
+                f"Zone proximity: SHORT entry {signal.entry_price:.4f} only "
+                f"{dist*100:.2f}% from R1 {zones.r1:.4f} "
+                f"(need >{config.zone_proximity_pct}% - rejection not confirmed)"
+            )
+
+    return False, ""
+
 
 async def add_signal_to_batch(signal: Signal) -> dict:
     """Add signal to batch buffer. Processes after BATCH_BUFFER_SECONDS."""
@@ -249,6 +316,14 @@ async def flush_batch():
                         f"filtered → Neo Cloud={neo_trend.upper()}"
                     )
                     continue
+            # Neo Cloud strength: skip if lead/lag gap too small (ranging)
+            is_weak, weak_reason = check_neo_cloud_strength(signal.symbol)
+            if is_weak:
+                logger.info(
+                    f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                    f"filtered → {weak_reason}"
+                )
+                continue
         if config.zone_filter_enabled:
             zones = zone_mgr.get_zones(signal.symbol)
             if zones and zones.is_valid:
@@ -264,6 +339,14 @@ async def flush_batch():
                         f"filtered → price {signal.entry_price:.4f} > R1 {zones.r1:.4f}"
                     )
                     continue
+            # Zone proximity: skip if price too close to reversal boundary
+            too_close, prox_reason = check_zone_proximity(signal)
+            if too_close:
+                logger.info(
+                    f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                    f"filtered → {prox_reason}"
+                )
+                continue
         is_extended, ext_reason = check_extended_move(signal)
         if is_extended:
             logger.info(
@@ -325,6 +408,13 @@ async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
                     f"Neo Cloud says {neo_trend.upper()} → SKIP"
                 )
                 return {"status": "filtered", "reason": reason}
+        # Neo Cloud strength check
+        is_weak, weak_reason = check_neo_cloud_strength(signal.symbol)
+        if is_weak:
+            logger.info(
+                f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {weak_reason}"
+            )
+            return {"status": "filtered", "reason": weak_reason}
 
     # Reversal Zone filter: skip if price is already in the reversal zone
     # SHORT + price < S1 → shorting into support (likely bounce) → skip
@@ -350,6 +440,13 @@ async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
                     f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {reason}"
                 )
                 return {"status": "filtered", "reason": reason}
+        # Zone proximity check
+        too_close, prox_reason = check_zone_proximity(signal)
+        if too_close:
+            logger.info(
+                f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {prox_reason}"
+            )
+            return {"status": "filtered", "reason": prox_reason}
 
     # Extended move + wick spike filters for non-batch calls (webhook direct)
     # Batch signals are already filtered in flush_batch()
@@ -2396,6 +2493,9 @@ async def push_zones(request: Request):
             neo_lead = neo_lag = None
 
     if neo_lead is not None and neo_lag is not None and neo_lead != 0:
+        # Store lead/lag values for strength check
+        neo_cloud_values[symbol_clean] = (neo_lead, neo_lag)
+
         # Determine current trend from Neo Cloud values
         new_direction = "up" if neo_lead > neo_lag else "down"
 
@@ -2658,6 +2758,8 @@ async def status():
         "dca_trail_cb": config.dca_trail_callback_pct,
         "zones": config.zone_snap_enabled,
         "neo_cloud": config.neo_cloud_filter,
+        "neo_min_gap_pct": config.neo_min_gap_pct,
+        "zone_proximity_pct": config.zone_proximity_pct,
         "extended_move_filter": config.extended_move_filter,
         "extended_move_pct": f"{config.extended_move_pct}/{config.extended_move_pct_high}/{config.extended_move_pct_ultra}%",
         "wick_spike_filter": config.wick_spike_filter,
