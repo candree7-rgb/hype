@@ -106,16 +106,24 @@ def check_zone_proximity(signal) -> tuple[bool, str]:
     LONG near S1 → bounce not confirmed, could dip back into support
     SHORT near R1 → rejection not confirmed, could push into resistance
 
+    Tiered by signal leverage:
+      <75x (volatile alts): 1% min distance
+      75x+ (majors): 0.5% min distance
+
     Returns (too_close, reason).
     """
-    if not config.zone_filter_enabled or config.zone_proximity_pct <= 0:
+    if not config.zone_filter_enabled:
+        return False, ""
+
+    prox_pct = config.get_zone_proximity_pct(signal.signal_leverage)
+    if prox_pct <= 0:
         return False, ""
 
     zones = zone_mgr.get_zones(signal.symbol)
     if not zones or not zones.is_valid:
         return False, ""
 
-    threshold = config.zone_proximity_pct / 100
+    threshold = prox_pct / 100
 
     if signal.side == "long" and zones.s1:
         dist = abs(signal.entry_price - zones.s1) / zones.s1
@@ -123,7 +131,7 @@ def check_zone_proximity(signal) -> tuple[bool, str]:
             return True, (
                 f"Zone proximity: LONG entry {signal.entry_price:.4f} only "
                 f"{dist*100:.2f}% from S1 {zones.s1:.4f} "
-                f"(need >{config.zone_proximity_pct}% - bounce not confirmed)"
+                f"(need >{prox_pct}% @{signal.signal_leverage}x - bounce not confirmed)"
             )
 
     if signal.side == "short" and zones.r1:
@@ -132,7 +140,7 @@ def check_zone_proximity(signal) -> tuple[bool, str]:
             return True, (
                 f"Zone proximity: SHORT entry {signal.entry_price:.4f} only "
                 f"{dist*100:.2f}% from R1 {zones.r1:.4f} "
-                f"(need >{config.zone_proximity_pct}% - rejection not confirmed)"
+                f"(need >{prox_pct}% @{signal.signal_leverage}x - rejection not confirmed)"
             )
 
     return False, ""

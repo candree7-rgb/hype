@@ -55,7 +55,8 @@ class BotConfig:
     #   SHORT + price < S1 → skip (already at/below support, likely to bounce)
     #   LONG  + price > R1 → skip (already at/above resistance, likely to reject)
     zone_filter_enabled: bool = True
-    zone_proximity_pct: float = 1.5     # Skip if price is within X% of reversal boundary
+    zone_proximity_pct: float = 1.0     # Default: skip if price within 1% of reversal zone (<75x)
+    zone_proximity_pct_high: float = 0.5  # 75x+ leverage: tighter zones, 0.5% proximity OK
                                         # LONG near S1 → bounce not confirmed, could dip back
                                         # SHORT near R1 → rejection not confirmed, could push higher
 
@@ -224,6 +225,16 @@ class BotConfig:
             return self.zone_snap_min_pct_high
         return self.zone_snap_min_pct
 
+    def get_zone_proximity_pct(self, signal_leverage: int) -> float:
+        """Get zone proximity threshold based on signal leverage.
+
+        <75x (volatile alts): 1% min distance from reversal zone
+        75x+ (majors): 0.5% min distance (tighter price action)
+        """
+        if signal_leverage >= self.zone_snap_lev_high:
+            return self.zone_proximity_pct_high
+        return self.zone_proximity_pct
+
     def get_extended_move_pct(self, signal_leverage: int) -> float:
         """Get extended move threshold based on signal leverage tier."""
         if signal_leverage >= self.zone_snap_lev_ultra:
@@ -281,7 +292,8 @@ class BotConfig:
         print(f"║  Zone Snap:      {snap_info if self.zone_snap_enabled else 'OFF'}")
         neo_info = f"FILTER ON (min gap {self.neo_min_gap_pct}%)" if self.neo_cloud_filter else "OFF"
         print(f"║  Neo Cloud:      {neo_info}")
-        zone_info = f"ON (in-zone + proximity {self.zone_proximity_pct}%)" if self.zone_filter_enabled else "OFF"
+        zone_info = (f"ON (in-zone + proximity {self.zone_proximity_pct}%/<{self.zone_snap_lev_high}x, "
+                     f"{self.zone_proximity_pct_high}%/{self.zone_snap_lev_high}x+)") if self.zone_filter_enabled else "OFF"
         print(f"║  Zone Filter:    {zone_info}")
         if self.extended_move_filter:
             ext_info = (f"ON ({self.extended_move_pct}%/<{self.zone_snap_lev_high}x, "
