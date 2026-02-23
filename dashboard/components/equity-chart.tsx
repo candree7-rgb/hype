@@ -31,6 +31,9 @@ export default function EquityChart({ timeRange, customDateRange, simSettings, i
           const range = TIME_RANGES.find(r => r.value === timeRange)
           if (range?.days) params.append('days', range.days.toString())
         }
+        if (simSettings.excludeWeekends) {
+          params.append('excludeWeekends', 'true')
+        }
 
         const res = await fetch(`/api/trades?${params.toString()}`)
         if (!res.ok) {
@@ -50,7 +53,7 @@ export default function EquityChart({ timeRange, customDateRange, simSettings, i
     fetchTrades()
     const interval = setInterval(fetchTrades, 60000)
     return () => clearInterval(interval)
-  }, [timeRange, customDateRange])
+  }, [timeRange, customDateRange, simSettings.excludeWeekends])
 
   // Build equity curve from simulation
   const chartData = useMemo(() => {

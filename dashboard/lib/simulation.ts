@@ -4,6 +4,14 @@ export interface SimSettings {
   equity: number
   tradePct: number
   compounding: boolean
+  excludeWeekends: boolean
+}
+
+/** Check if a trade was opened on a weekend (Saturday or Sunday UTC) */
+export function isWeekendTrade(trade: { opened_at: Date | string }): boolean {
+  const d = new Date(trade.opened_at)
+  const dow = d.getUTCDay() // 0 = Sunday, 6 = Saturday
+  return dow === 0 || dow === 6
 }
 
 export interface SimTradeResult {

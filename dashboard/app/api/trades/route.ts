@@ -9,7 +9,8 @@ export async function GET(request: Request) {
     const days = daysParam ? parseInt(daysParam) : undefined
     const from = searchParams.get('from') || undefined
     const to = searchParams.get('to') || undefined
-    const trades = await getTrades(limit, days, from, to)
+    const excludeWeekends = searchParams.get('excludeWeekends') === 'true'
+    const trades = await getTrades(limit, days, from, to, excludeWeekends)
     return NextResponse.json(trades)
   } catch (error) {
     console.error('Failed to fetch trades:', error)

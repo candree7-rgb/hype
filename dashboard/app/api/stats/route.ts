@@ -18,7 +18,8 @@ export async function GET(request: Request) {
     const days = daysParam ? parseInt(daysParam) : undefined
     const from = searchParams.get('from') || undefined
     const to = searchParams.get('to') || undefined
-    const stats = await getStats(days, from, to)
+    const excludeWeekends = searchParams.get('excludeWeekends') === 'true'
+    const stats = await getStats(days, from, to, excludeWeekends)
     return NextResponse.json(stats, { headers: CORS_HEADERS })
   } catch (error) {
     console.error('Failed to fetch stats:', error)

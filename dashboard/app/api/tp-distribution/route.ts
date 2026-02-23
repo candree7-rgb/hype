@@ -8,7 +8,8 @@ export async function GET(request: Request) {
     const days = daysParam ? parseInt(daysParam) : undefined
     const from = searchParams.get('from') || undefined
     const to = searchParams.get('to') || undefined
-    const distribution = await getExitDistribution(days, from, to)
+    const excludeWeekends = searchParams.get('excludeWeekends') === 'true'
+    const distribution = await getExitDistribution(days, from, to, excludeWeekends)
     return NextResponse.json(distribution)
   } catch (error) {
     console.error('Failed to fetch exit distribution:', error)

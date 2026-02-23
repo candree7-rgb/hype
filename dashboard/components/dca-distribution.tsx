@@ -4,13 +4,15 @@ import { useEffect, useState } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import { DCADistribution } from '@/lib/db'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
+import { SimSettings } from '@/lib/simulation'
 
 interface DCADistributionProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
+  simSettings: SimSettings
 }
 
-export default function DCADistributionChart({ timeRange, customDateRange }: DCADistributionProps) {
+export default function DCADistributionChart({ timeRange, customDateRange, simSettings }: DCADistributionProps) {
   const [data, setData] = useState<DCADistribution[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -25,6 +27,9 @@ export default function DCADistributionChart({ timeRange, customDateRange }: DCA
         } else {
           const range = TIME_RANGES.find(r => r.value === timeRange)
           if (range?.days) params.append('days', range.days.toString())
+        }
+        if (simSettings.excludeWeekends) {
+          params.append('excludeWeekends', 'true')
         }
 
         const res = await fetch(`/api/dca-distribution?${params.toString()}`)
@@ -46,7 +51,7 @@ export default function DCADistributionChart({ timeRange, customDateRange }: DCA
     fetchData()
     const interval = setInterval(fetchData, 60000)
     return () => clearInterval(interval)
-  }, [timeRange, customDateRange])
+  }, [timeRange, customDateRange, simSettings.excludeWeekends])
 
   if (loading) {
     return (

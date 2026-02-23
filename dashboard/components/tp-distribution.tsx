@@ -2,10 +2,12 @@
 
 import { useEffect, useState } from 'react'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
+import { SimSettings } from '@/lib/simulation'
 
 interface TPDistributionProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
+  simSettings: SimSettings
 }
 
 interface ExitData {
@@ -14,7 +16,7 @@ interface ExitData {
   percentage: number
 }
 
-export default function TPDistributionChart({ timeRange, customDateRange }: TPDistributionProps) {
+export default function TPDistributionChart({ timeRange, customDateRange, simSettings }: TPDistributionProps) {
   const [data, setData] = useState<ExitData[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -29,6 +31,9 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
         } else {
           const range = TIME_RANGES.find(r => r.value === timeRange)
           if (range?.days) params.append('days', range.days.toString())
+        }
+        if (simSettings.excludeWeekends) {
+          params.append('excludeWeekends', 'true')
         }
 
         const res = await fetch(`/api/tp-distribution?${params.toString()}`)
@@ -50,7 +55,7 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
     fetchData()
     const interval = setInterval(fetchData, 60000)
     return () => clearInterval(interval)
-  }, [timeRange, customDateRange])
+  }, [timeRange, customDateRange, simSettings.excludeWeekends])
 
   if (loading) {
     return (

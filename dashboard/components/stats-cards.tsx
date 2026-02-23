@@ -30,6 +30,9 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
           const range = TIME_RANGES.find(r => r.value === timeRange)
           if (range?.days) params.append('days', range.days.toString())
         }
+        if (simSettings.excludeWeekends) {
+          params.append('excludeWeekends', 'true')
+        }
 
         const tradeParams = new URLSearchParams(params)
         tradeParams.set('limit', '500')
@@ -57,7 +60,7 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
     fetchData()
     const interval = setInterval(fetchData, 30000)
     return () => clearInterval(interval)
-  }, [timeRange, customDateRange])
+  }, [timeRange, customDateRange, simSettings.excludeWeekends])
 
   // Run simulation and compute sim stats
   const simStats = useMemo(() => {
