@@ -5,6 +5,7 @@ export interface SimSettings {
   tradePct: number
   compounding: boolean
   excludeWeekends: boolean
+  singlePerBatch: boolean
 }
 
 /** Check if a trade was opened on a weekend (Saturday or Sunday UTC) */
@@ -12,6 +13,124 @@ export function isWeekendTrade(trade: { opened_at: Date | string }): boolean {
   const d = new Date(trade.opened_at)
   const dow = d.getUTCDay() // 0 = Sunday, 6 = Saturday
   return dow === 0 || dow === 6
+}
+
+/**
+ * Filter trades to keep only 1 per batch.
+ * Batch = trades opened within 60s of each other (signal buffer is 5s,
+ * but limit fills can lag a few seconds).
+ * Keeps the first trade per batch (earliest opened_at).
+ */
+export function filterSinglePerBatch(trades: Trade[]): Trade[] {
+  const real = trades.filter(t => t.side !== 'update')
+  const updates = trades.filter(t => t.side === 'update')
+
+  const sorted = [...real].sort((a, b) =>
+    new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
+  )
+
+  const BATCH_WINDOW_MS = 60_000
+  const result: Trade[] = []
+  let lastBatchTime = 0
+
+  for (const trade of sorted) {
+    const t = new Date(trade.opened_at).getTime()
+    if (result.length === 0 || t - lastBatchTime > BATCH_WINDOW_MS) {
+      result.push(trade)
+      lastBatchTime = t
+    }
+  }
+
+  // Re-add update rows (they don't affect simulation but may be shown in table)
+  return [...result, ...updates]
+}
+
+/** Derive highest TP level from close_reason + tp1_hit (mirrors DB SQL logic) */
+function getTpFills(trade: Trade): number {
+  const reason = (trade.close_reason || '').toLowerCase()
+  if (reason.includes('trail') && trade.tp1_hit) return 4
+  if (reason.includes('tp4')) return 4
+  if (reason.includes('tp3')) return 3
+  if (reason.includes('tp2')) return 2
+  if (trade.tp1_hit) return 1
+  return 0
+}
+
+/** Check if trade exited via stop loss (mirrors DB SQL logic) */
+function isSlExit(trade: Trade): boolean {
+  const r = (trade.close_reason || '').toLowerCase()
+  return (r.includes('sl') || (r.includes('stop') && !r.includes('trail')))
+    && getTpFills(trade) === 0
+    && parseFloat(trade.realized_pnl?.toString() || '0') < 0
+}
+
+/**
+ * Compute structural stats from trades client-side.
+ * Used when singlePerBatch filter is active (can't use DB stats endpoint).
+ * Mirrors the SQL logic in getStats().
+ */
+export function computeClientStats(trades: Trade[]) {
+  const real = trades.filter(t => t.side !== 'update')
+  if (real.length === 0) return null
+
+  const total_trades = real.length
+  const wins = real.filter(t => parseFloat(t.realized_pnl?.toString() || '0') > 0).length
+  const losses = real.filter(t => getTpFills(t) === 0 && parseFloat(t.realized_pnl?.toString() || '0') < 0).length
+  const breakeven = real.filter(t => getTpFills(t) >= 1 && parseFloat(t.realized_pnl?.toString() || '0') <= 0).length
+  const win_rate = total_trades > 0 ? ((wins + breakeven) / total_trades) * 100 : 0
+
+  const sl_exits = real.filter(t => isSlExit(t)).length
+  const sl_rate = total_trades > 0 ? (sl_exits / total_trades) * 100 : 0
+
+  const avg_duration = real.reduce((sum, t) => sum + (parseFloat(t.duration_minutes?.toString() || '0')), 0) / real.length
+
+  return {
+    total_trades,
+    wins,
+    losses,
+    breakeven,
+    win_rate: parseFloat(win_rate.toFixed(1)),
+    sl_rate: parseFloat(sl_rate.toFixed(1)),
+    avg_duration,
+  }
+}
+
+/** Compute TP exit distribution client-side (mirrors getExitDistribution SQL) */
+export function computeTPDistribution(trades: Trade[]): { level: string; count: number; percentage: number }[] {
+  const real = trades.filter(t => t.side !== 'update')
+  const total = real.length
+  if (total === 0) return []
+
+  const tp1 = real.filter(t => getTpFills(t) >= 1).length
+  const tp2 = real.filter(t => getTpFills(t) >= 2).length
+  const tp3 = real.filter(t => getTpFills(t) >= 3).length
+  const tp4 = real.filter(t => getTpFills(t) >= 4).length
+  const sl = real.filter(t => getTpFills(t) === 0 && isSlExit(t)).length
+  const other = real.filter(t => getTpFills(t) === 0 && !isSlExit(t)).length
+
+  return [
+    { level: 'TP1', count: tp1, percentage: (tp1 / total) * 100 },
+    { level: 'TP2', count: tp2, percentage: (tp2 / total) * 100 },
+    { level: 'TP3', count: tp3, percentage: (tp3 / total) * 100 },
+    { level: 'TP4', count: tp4, percentage: (tp4 / total) * 100 },
+    { level: 'Stop Loss', count: sl, percentage: (sl / total) * 100 },
+    { level: 'Other', count: other, percentage: (other / total) * 100 },
+  ].filter(d => d.count > 0)
+}
+
+/** Compute DCA distribution client-side (mirrors getDCADistribution SQL) */
+export function computeDCADistribution(trades: Trade[]): { label: string; count: number; percentage: number }[] {
+  const real = trades.filter(t => t.side !== 'update')
+  const total = real.length
+  if (total === 0) return []
+
+  const noDca = real.filter(t => (parseFloat(t.max_dca_reached?.toString() || '0')) === 0).length
+  const dca = real.filter(t => (parseFloat(t.max_dca_reached?.toString() || '0')) > 0).length
+
+  return [
+    { label: 'DCA', count: dca, percentage: (dca / total) * 100 },
+    { label: 'NO DCA', count: noDca, percentage: (noDca / total) * 100 },
+  ].sort((a, b) => a.label.localeCompare(b.label))
 }
 
 export interface SimTradeResult {

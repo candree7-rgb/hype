@@ -25,6 +25,7 @@ export default function Dashboard() {
     tradePct: Number(process.env.NEXT_PUBLIC_DEFAULT_TRADE_PCT) || 5,
     compounding: true,
     excludeWeekends: true,
+    singlePerBatch: false,
   })
 
   const handleSimChange = useCallback((settings: SimSettings) => {

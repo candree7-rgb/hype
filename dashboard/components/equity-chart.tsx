@@ -6,7 +6,7 @@ import { Trade } from '@/lib/db'
 import { formatCurrency } from '@/lib/utils'
 import { format } from 'date-fns'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
-import { SimSettings, runSimulation } from '@/lib/simulation'
+import { SimSettings, runSimulation, filterSinglePerBatch } from '@/lib/simulation'
 
 interface EquityChartProps {
   timeRange: TimeRange
@@ -57,7 +57,8 @@ export default function EquityChart({ timeRange, customDateRange, simSettings, i
 
   // Build equity curve from simulation
   const chartData = useMemo(() => {
-    const realTrades = trades.filter(t => t.side !== 'update')
+    const filtered = simSettings.singlePerBatch ? filterSinglePerBatch(trades) : trades
+    const realTrades = filtered.filter(t => t.side !== 'update')
     if (realTrades.length === 0) return []
 
     const sim = runSimulation(realTrades, simSettings)

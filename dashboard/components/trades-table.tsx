@@ -4,7 +4,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { Trade } from '@/lib/db'
 import { formatCurrency, formatDate, formatDuration, cn } from '@/lib/utils'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
-import { SimSettings, runSimulation } from '@/lib/simulation'
+import { SimSettings, runSimulation, filterSinglePerBatch } from '@/lib/simulation'
 
 interface TradesTableProps {
   timeRange: TimeRange
@@ -89,11 +89,15 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
 
-  // Run simulation on current trades when simSettings are active
+  // Apply batch filter, then run simulation
+  const filteredTrades = useMemo(() => {
+    return simSettings.singlePerBatch ? filterSinglePerBatch(trades) : trades
+  }, [trades, simSettings.singlePerBatch])
+
   const simResults = useMemo(() => {
-    if (!simSettings || trades.length === 0) return null
-    return runSimulation(trades, simSettings)
-  }, [trades, simSettings])
+    if (!simSettings || filteredTrades.length === 0) return null
+    return runSimulation(filteredTrades, simSettings)
+  }, [filteredTrades, simSettings])
 
   useEffect(() => {
     async function fetchTrades() {
@@ -145,7 +149,7 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
     )
   }
 
-  if (trades.length === 0) {
+  if (filteredTrades.length === 0) {
     return (
       <div className="bg-card border border-border rounded-lg p-6">
         <h2 className="text-xl font-bold mb-4">Trade History</h2>
@@ -160,7 +164,7 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
     <div className="bg-card border border-border rounded-lg overflow-hidden">
       <div className="p-6 pb-4">
         <h2 className="text-xl font-bold">Trade History</h2>
-        <p className="text-sm text-muted-foreground mt-1">Last {trades.filter(t => t.side !== 'update').length} trades</p>
+        <p className="text-sm text-muted-foreground mt-1">Last {filteredTrades.filter(t => t.side !== 'update').length} trades</p>
       </div>
 
       <div className="overflow-x-auto">
@@ -187,7 +191,7 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
             </tr>
           </thead>
           <tbody className="divide-y divide-border/50">
-            {trades.map((trade) => (
+            {filteredTrades.map((trade) => (
               <tr key={trade.trade_id} className={cn(
                 'hover:bg-muted/20 transition-colors',
                 trade.side === 'update' && 'border-l-2 border-l-blue-500 bg-blue-500/5'

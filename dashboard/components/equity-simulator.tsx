@@ -18,6 +18,7 @@ export default function EquitySimulator({ onChange, isSimulated = true }: Equity
   const [tradePct, setTradePct] = useState(DEFAULT_TRADE_PCT)
   const [compounding, setCompounding] = useState(true)
   const [excludeWeekends, setExcludeWeekends] = useState(true) // Default: weekdays only
+  const [singlePerBatch, setSinglePerBatch] = useState(false) // Default: off
   const [loaded, setLoaded] = useState(false)
 
   // Load persisted settings once (only in simulated mode)
@@ -31,6 +32,7 @@ export default function EquitySimulator({ onChange, isSimulated = true }: Equity
           if (s.tradePct > 0) setTradePct(s.tradePct)
           if (typeof s.compounding === 'boolean') setCompounding(s.compounding)
           if (typeof s.excludeWeekends === 'boolean') setExcludeWeekends(s.excludeWeekends)
+          if (typeof s.singlePerBatch === 'boolean') setSinglePerBatch(s.singlePerBatch)
         }
       } catch { /* ignore */ }
     }
@@ -59,10 +61,10 @@ export default function EquitySimulator({ onChange, isSimulated = true }: Equity
   useEffect(() => {
     if (!loaded) return
     if (isSimulated) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ equity, tradePct, compounding, excludeWeekends }))
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ equity, tradePct, compounding, excludeWeekends, singlePerBatch }))
     }
-    onChange({ equity, tradePct, compounding, excludeWeekends })
-  }, [equity, tradePct, compounding, excludeWeekends, loaded, isSimulated])
+    onChange({ equity, tradePct, compounding, excludeWeekends, singlePerBatch })
+  }, [equity, tradePct, compounding, excludeWeekends, singlePerBatch, loaded, isSimulated])
 
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -150,6 +152,24 @@ export default function EquitySimulator({ onChange, isSimulated = true }: Equity
         </div>
         <span className="text-sm text-muted-foreground">
           Weekdays Only
+        </span>
+      </button>
+
+      {/* Single per batch toggle */}
+      <button
+        type="button"
+        onClick={() => setSinglePerBatch(!singlePerBatch)}
+        className="flex items-center gap-2 cursor-pointer"
+      >
+        <div className={`relative w-9 h-5 rounded-full transition-colors ${
+          singlePerBatch ? 'bg-primary' : 'bg-muted-foreground/30'
+        }`}>
+          <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+            singlePerBatch ? 'translate-x-4' : ''
+          }`} />
+        </div>
+        <span className="text-sm text-muted-foreground">
+          1/Batch
         </span>
       </button>
     </div>
