@@ -4,7 +4,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { Stats, Trade } from '@/lib/db'
 import { formatCurrency } from '@/lib/utils'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
-import { SimSettings, runSimulation } from '@/lib/simulation'
+import { SimSettings, runSimulation, filterSinglePerBatch, computeClientStats } from '@/lib/simulation'
 
 interface StatsCardsProps {
   timeRange: TimeRange
@@ -29,6 +29,9 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
         } else {
           const range = TIME_RANGES.find(r => r.value === timeRange)
           if (range?.days) params.append('days', range.days.toString())
+        }
+        if (simSettings.excludeWeekends) {
+          params.append('excludeWeekends', 'true')
         }
 
         const tradeParams = new URLSearchParams(params)
@@ -57,12 +60,25 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
     fetchData()
     const interval = setInterval(fetchData, 30000)
     return () => clearInterval(interval)
-  }, [timeRange, customDateRange])
+  }, [timeRange, customDateRange, simSettings.excludeWeekends])
+
+  // Apply batch filter client-side
+  const filteredTrades = useMemo(() => {
+    return simSettings.singlePerBatch ? filterSinglePerBatch(trades) : trades
+  }, [trades, simSettings.singlePerBatch])
+
+  // When singlePerBatch is on, compute structural stats from filtered trades client-side
+  // (the DB stats endpoint doesn't know about the batch filter)
+  const batchStats = useMemo(() => {
+    if (!simSettings.singlePerBatch) return null
+    return computeClientStats(filteredTrades)
+  }, [filteredTrades, simSettings.singlePerBatch])
 
   // Run simulation and compute sim stats
   const simStats = useMemo(() => {
-    if (trades.length === 0) return null
-    const sim = runSimulation(trades, simSettings)
+    const realTrades = filteredTrades.filter(t => t.side !== 'update')
+    if (realTrades.length === 0) return null
+    const sim = runSimulation(realTrades, simSettings)
     const perTrade = Array.from(sim.per_trade.values())
     const wins = perTrade.filter(t => t.sim_pnl > 0)
     const losses = perTrade.filter(t => t.sim_pnl < 0)
@@ -84,7 +100,7 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
       max_drawdown: sim.max_drawdown,
       max_drawdown_pct: sim.max_drawdown_pct,
     }
-  }, [trades, simSettings])
+  }, [filteredTrades, simSettings])
 
   if (loading) {
     return (
@@ -99,7 +115,9 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
     )
   }
 
-  if (!stats || stats.total_trades === 0) {
+  // Use batch-filtered client stats when active, otherwise DB stats
+  const effectiveStats = batchStats || stats
+  if (!effectiveStats || effectiveStats.total_trades === 0) {
     return (
       <div className="bg-card border border-border rounded-lg p-6 text-center">
         <p className="text-muted-foreground">No trade data available for this period</p>
@@ -109,17 +127,17 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
 
   // In simulated mode: use sim values for monetary stats. In real mode: use DB values directly.
   const s = isSimulated ? simStats : null
-  const totalPnl = s ? s.total_pnl : stats.total_pnl
-  const totalPnlPct = s ? s.total_pnl_pct : stats.total_pnl_pct
-  const avgPnl = s ? s.avg_pnl : stats.avg_pnl
-  const avgPnlPct = s ? s.avg_pnl_pct : stats.avg_pnl_pct
-  const avgWin = s ? s.avg_win : stats.avg_win
-  const avgWinPct = s ? s.avg_win_pct : stats.avg_win_pct
-  const avgLoss = s ? s.avg_loss : stats.avg_loss
-  const avgLossPct = s ? s.avg_loss_pct : stats.avg_loss_pct
-  const bestTrade = s ? s.best_trade : stats.best_trade
-  const worstTrade = s ? s.worst_trade : stats.worst_trade
-  const profitFactor = s ? s.profit_factor : stats.profit_factor
+  const totalPnl = s ? s.total_pnl : stats?.total_pnl ?? 0
+  const totalPnlPct = s ? s.total_pnl_pct : stats?.total_pnl_pct ?? 0
+  const avgPnl = s ? s.avg_pnl : stats?.avg_pnl ?? 0
+  const avgPnlPct = s ? s.avg_pnl_pct : stats?.avg_pnl_pct ?? 0
+  const avgWin = s ? s.avg_win : stats?.avg_win ?? 0
+  const avgWinPct = s ? s.avg_win_pct : stats?.avg_win_pct ?? 0
+  const avgLoss = s ? s.avg_loss : stats?.avg_loss ?? 0
+  const avgLossPct = s ? s.avg_loss_pct : stats?.avg_loss_pct ?? 0
+  const bestTrade = s ? s.best_trade : stats?.best_trade ?? 0
+  const worstTrade = s ? s.worst_trade : stats?.worst_trade ?? 0
+  const profitFactor = s ? s.profit_factor : stats?.profit_factor ?? 0
   const maxDrawdown = s?.max_drawdown ?? 0
   const maxDrawdownPct = s?.max_drawdown_pct ?? 0
 
@@ -127,13 +145,13 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
       <StatCard
         label="Total Trades"
-        value={stats.total_trades.toString()}
-        subValue={`${stats.wins}W / ${stats.breakeven}BE / ${stats.losses}L`}
+        value={effectiveStats.total_trades.toString()}
+        subValue={`${effectiveStats.wins}W / ${effectiveStats.breakeven}BE / ${effectiveStats.losses}L`}
       />
       <StatCard
         label="Win Rate"
-        value={`${(stats.win_rate ?? 0).toFixed(1)}%`}
-        variant={stats.win_rate >= 50 ? 'success' : 'danger'}
+        value={`${(effectiveStats.win_rate ?? 0).toFixed(1)}%`}
+        variant={effectiveStats.win_rate >= 50 ? 'success' : 'danger'}
         subValue="Wins + Breakeven"
       />
       <StatCard
@@ -178,8 +196,8 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
       />
       <StatCard
         label="Stop Loss Rate"
-        value={`${(stats.sl_rate ?? 0).toFixed(1)}%`}
-        valueColor={stats.sl_rate < 50 ? 'text-success' : 'text-danger'}
+        value={`${(effectiveStats.sl_rate ?? 0).toFixed(1)}%`}
+        valueColor={effectiveStats.sl_rate < 50 ? 'text-success' : 'text-danger'}
         subValue="Stop Loss exits"
       />
       <StatCard
@@ -191,7 +209,7 @@ export default function StatsCards({ timeRange, customDateRange, simSettings, is
       />
       <StatCard
         label="Avg Duration"
-        value={(stats.avg_duration ?? 0) > 60 ? `${((stats.avg_duration ?? 0) / 60).toFixed(1)}h` : `${(stats.avg_duration ?? 0).toFixed(0)}m`}
+        value={(effectiveStats.avg_duration ?? 0) > 60 ? `${((effectiveStats.avg_duration ?? 0) / 60).toFixed(1)}h` : `${(effectiveStats.avg_duration ?? 0).toFixed(0)}m`}
         subValue="Per trade"
       />
     </div>

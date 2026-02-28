@@ -182,6 +182,36 @@ def parse_close_signal(message: str) -> dict | None:
     }
 
 
+def parse_tp_hit(message: str) -> dict | None:
+    """Parse a TP hit notification from VIP Club.
+
+    Messages like:
+        "💸 MOODENG/USDT ✅ Target #1 Done Current profit: 50.0%..."
+        "💸 FARTCOIN/USDT ✅ Target #1 Done Current profit: 75.0%..."
+        "💸 BTC/USDT ✅ Target #2 Done Current profit: 120.5%..."
+    """
+    text = message.strip()
+
+    tp_match = re.search(
+        r"(\S+/USDT)\s*✅\s*Target\s*#(\d+)\s*Done",
+        text,
+        re.IGNORECASE
+    )
+    if not tp_match:
+        return None
+
+    symbol_display = tp_match.group(1)
+    symbol = symbol_display.replace("/", "")
+    tp_number = int(tp_match.group(2))
+
+    return {
+        "action": "tp_hit",
+        "symbol": symbol,
+        "symbol_display": symbol_display,
+        "tp_number": tp_number,
+    }
+
+
 # ── Tests ──
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

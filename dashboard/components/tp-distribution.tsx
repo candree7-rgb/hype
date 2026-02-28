@@ -1,11 +1,14 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
+import { Trade } from '@/lib/db'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
+import { SimSettings, filterSinglePerBatch, computeTPDistribution } from '@/lib/simulation'
 
 interface TPDistributionProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
+  simSettings: SimSettings
 }
 
 interface ExitData {
@@ -14,8 +17,9 @@ interface ExitData {
   percentage: number
 }
 
-export default function TPDistributionChart({ timeRange, customDateRange }: TPDistributionProps) {
+export default function TPDistributionChart({ timeRange, customDateRange, simSettings }: TPDistributionProps) {
   const [data, setData] = useState<ExitData[]>([])
+  const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -30,15 +34,32 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
           const range = TIME_RANGES.find(r => r.value === timeRange)
           if (range?.days) params.append('days', range.days.toString())
         }
-
-        const res = await fetch(`/api/tp-distribution?${params.toString()}`)
-        if (!res.ok) {
-          console.error('TP distribution API returned', res.status)
-          setData([])
-          return
+        if (simSettings.excludeWeekends) {
+          params.append('excludeWeekends', 'true')
         }
-        const distribution = await res.json()
-        setData(Array.isArray(distribution) ? distribution : [])
+
+        if (simSettings.singlePerBatch) {
+          // Fetch trades for client-side computation
+          const tradeParams = new URLSearchParams(params)
+          tradeParams.set('limit', '500')
+          const res = await fetch(`/api/trades?${tradeParams.toString()}`)
+          if (res.ok) {
+            const tradeData = await res.json()
+            setTrades(Array.isArray(tradeData) ? tradeData : [])
+          }
+          setData([]) // Will be computed via useMemo
+        } else {
+          // Use server-side computation
+          setTrades([])
+          const res = await fetch(`/api/tp-distribution?${params.toString()}`)
+          if (!res.ok) {
+            console.error('TP distribution API returned', res.status)
+            setData([])
+            return
+          }
+          const distribution = await res.json()
+          setData(Array.isArray(distribution) ? distribution : [])
+        }
       } catch (error) {
         console.error('Failed to fetch exit distribution:', error)
       } finally {
@@ -50,7 +71,16 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
     fetchData()
     const interval = setInterval(fetchData, 60000)
     return () => clearInterval(interval)
-  }, [timeRange, customDateRange])
+  }, [timeRange, customDateRange, simSettings.excludeWeekends, simSettings.singlePerBatch])
+
+  // When singlePerBatch is on, compute distribution from filtered trades client-side
+  const effectiveData = useMemo(() => {
+    if (simSettings.singlePerBatch && trades.length > 0) {
+      const filtered = filterSinglePerBatch(trades)
+      return computeTPDistribution(filtered)
+    }
+    return data
+  }, [data, trades, simSettings.singlePerBatch])
 
   if (loading) {
     return (
@@ -61,7 +91,7 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
     )
   }
 
-  if (data.length === 0) {
+  if (effectiveData.length === 0) {
     return (
       <div className="bg-card border border-border rounded-lg p-6">
         <h2 className="text-xl font-bold mb-4">TP Hit Rate</h2>
@@ -82,7 +112,7 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
   }
 
   // Find max count for scaling bars
-  const maxCount = Math.max(...data.map(d => d.count), 1)
+  const maxCount = Math.max(...effectiveData.map(d => d.count), 1)
 
   return (
     <div className="bg-card border border-border rounded-lg p-6">
@@ -92,7 +122,7 @@ export default function TPDistributionChart({ timeRange, customDateRange }: TPDi
       </p>
 
       <div className="flex flex-col gap-3">
-        {data.map((d) => {
+        {effectiveData.map((d) => {
           const color = colors[d.level] || '#6b7280'
           const barWidth = Math.max((d.count / maxCount) * 100, 2)
 

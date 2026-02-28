@@ -41,10 +41,13 @@ Next.js 14 + React 18 Dashboard mit Recharts. Zeigt Equity-Kurve, Trades-Tabelle
 ## Entry
 
 1. **Signal kommt** via Telegram VIP Club (Side, Entry, 4 TPs, SL)
-2. **Batch Buffer:** 5 Sekunden sammeln, Neo Cloud pre-filtern, alle validen platzieren (bis free_slots), nach 3 Fills Rest canceln
+2. **Batch Buffer:** 5 Sekunden sammeln, Neo Cloud + Zone pre-filtern, alle validen platzieren (bis free_slots), nach 3 Fills Rest canceln
 3. **Neo Cloud Filter:** Signal wird nur ausgeführt wenn Neo Cloud Trend passt (Long = "up", Short = "down")
-4. **E1 Order:** Limit @ Signal-Preis (oder Market), 1/3 des Trade-Budgets
-5. **DCA1 Limit:** Gleichzeitig platziert bei Entry-5% (zone-snapped zu S1/R1 wenn >3% Abstand)
+4. **Reversal Zone Filter:** Signal wird geskippt wenn Preis bereits in der Reversal-Zone ist:
+   - SHORT + Preis < S1 → Skip (in/unter Support, Bounce wahrscheinlich)
+   - LONG + Preis > R1 → Skip (in/über Resistance, Rejection wahrscheinlich)
+5. **E1 Order:** Limit @ Signal-Preis (oder Market), 1/3 des Trade-Budgets
+6. **DCA1 Limit:** Gleichzeitig platziert bei Entry-5% (zone-snapped zu S1/R1 wenn >3% Abstand)
 
 ## Position Sizing
 
@@ -169,7 +172,8 @@ Queried von Bybit `get_closed_pnl` API (inkl. Fees, exakte Fills). Nicht selbst 
 # Wichtige Regeln
 
 1. **Neo Cloud Filter NICHT deaktivieren** - filtert Counter-Trend Trades
-2. **DCA Limit Buffer (0.2%)** ist absichtlich - kompensiert 1-Candle Lag von Zone-Daten
+2. **Reversal Zone Filter NICHT deaktivieren** - verhindert Shorts in Support / Longs in Resistance
+3. **DCA Limit Buffer (0.2%)** ist absichtlich - kompensiert 1-Candle Lag von Zone-Daten
 3. **Safety SL @ Entry-10%** (pre-DCA) ist absichtlich weit - gibt DCA Raum zu füllen
 4. **Scale-In nur wenn kein DCA** - Budget ist entweder für Pyramiding (up) oder DCA (down)
 5. **Quick-Trail** reduziert DCA-Risiko von ~4.7% auf ~1.1% Equity pro Stop-Out

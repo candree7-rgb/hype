@@ -313,6 +313,11 @@ class BybitEngine:
                 break
 
             dca = trade.dca_levels[i]
+
+            # Skip already filled or already placed DCAs
+            if dca.filled or dca.order_id:
+                continue
+
             dca_qty = self.round_qty(dca.qty, qty_step)
             dca_price = self.round_price(dca.price, tick_size)
 
@@ -769,6 +774,20 @@ class BybitEngine:
         except Exception as e:
             logger.error(f"Failed to get klines for {symbol}: {e}")
             return []
+
+    def get_24h_high_low(self, symbol: str, interval: str = "60",
+                         candles: int = 24) -> tuple[float, float] | None:
+        """Get highest high and lowest low over the last N candles.
+
+        Default: 24 x 1h candles = 24h lookback.
+        Returns (high, low) or None on error.
+        """
+        klines = self.get_klines(symbol, interval=interval, limit=candles)
+        if not klines:
+            return None
+        high = max(c["high"] for c in klines)
+        low = min(c["low"] for c in klines)
+        return high, low
 
     def amend_order_price(self, symbol: str, order_id: str, new_price: float) -> bool:
         """Amend an existing order's price (e.g., re-snap DCA to new zone).

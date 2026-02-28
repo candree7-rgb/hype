@@ -24,6 +24,8 @@ export default function Dashboard() {
     equity: Number(process.env.NEXT_PUBLIC_DEFAULT_EQUITY) || 10000,
     tradePct: Number(process.env.NEXT_PUBLIC_DEFAULT_TRADE_PCT) || 5,
     compounding: true,
+    excludeWeekends: true,
+    singlePerBatch: false,
   })
 
   const handleSimChange = useCallback((settings: SimSettings) => {
@@ -106,13 +108,13 @@ export default function Dashboard() {
             <EquityChart timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} isSimulated={isSimulated} />
           </div>
           <div>
-            <TPDistributionChart timeRange={timeRange} customDateRange={customDateRange} />
+            <TPDistributionChart timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
           </div>
         </section>
 
         {/* DCA Distribution */}
         <section>
-          <DCADistributionChart timeRange={timeRange} customDateRange={customDateRange} />
+          <DCADistributionChart timeRange={timeRange} customDateRange={customDateRange} simSettings={simSettings} />
         </section>
 
         {/* Trades Table */}

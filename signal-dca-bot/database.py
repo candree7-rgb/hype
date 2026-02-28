@@ -299,8 +299,14 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
                equity_at_entry: float = 0, equity_at_close: float = 0,
                leverage: int = 20, tps_hit: int = 0,
                trail_pnl_pct: float = 0,
-               equity_pct_per_trade: float = 5.0) -> bool:
-    """Save a closed trade to history."""
+               equity_pct_per_trade: float = 5.0,
+               allow_overwrite: bool = True) -> bool:
+    """Save a closed trade to history.
+
+    Args:
+        allow_overwrite: If False, skip if trade_id already exists (DO NOTHING).
+            Used by Bybit sync to avoid overwriting manually edited trades.
+    """
     conn = get_connection()
     if not conn:
         return False
@@ -316,29 +322,49 @@ def save_trade(trade_id: str, symbol: str, side: str, entry_price: float,
         is_win = realized_pnl > 0.01
 
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO trades
-                (trade_id, symbol, side, entry_price, avg_price, close_price,
-                 total_qty, total_margin, leverage, realized_pnl,
-                 pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
-                 is_win, max_dca_reached, tp1_hit, tps_hit, trail_pnl_pct,
-                 close_reason, signal_leverage, equity_pct_per_trade,
-                 opened_at, closed_at, duration_minutes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (trade_id) DO UPDATE SET
-                realized_pnl=%s, close_price=%s, close_reason=%s, closed_at=%s,
-                pnl_pct_margin=%s, pnl_pct_equity=%s, equity_at_close=%s, is_win=%s,
-                duration_minutes=%s, tps_hit=%s, trail_pnl_pct=%s
-        """, (trade_id, symbol, side, entry_price, avg_price, close_price,
-              total_qty, total_margin, leverage, realized_pnl,
-              pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
-              is_win, max_dca, tp1_hit, tps_hit, trail_pnl_pct,
-              close_reason, signal_leverage, equity_pct_per_trade,
-              opened_dt, closed_dt, duration_min,
-              # ON CONFLICT updates:
-              realized_pnl, close_price, close_reason, closed_dt,
-              pnl_pct_margin, pnl_pct_equity, equity_at_close, is_win,
-              duration_min, tps_hit, trail_pnl_pct))
+
+        if allow_overwrite:
+            cur.execute("""
+                INSERT INTO trades
+                    (trade_id, symbol, side, entry_price, avg_price, close_price,
+                     total_qty, total_margin, leverage, realized_pnl,
+                     pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
+                     is_win, max_dca_reached, tp1_hit, tps_hit, trail_pnl_pct,
+                     close_reason, signal_leverage, equity_pct_per_trade,
+                     opened_at, closed_at, duration_minutes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (trade_id) DO UPDATE SET
+                    realized_pnl=%s, close_price=%s, close_reason=%s, closed_at=%s,
+                    pnl_pct_margin=%s, pnl_pct_equity=%s, equity_at_close=%s, is_win=%s,
+                    duration_minutes=%s, tps_hit=%s, trail_pnl_pct=%s
+            """, (trade_id, symbol, side, entry_price, avg_price, close_price,
+                  total_qty, total_margin, leverage, realized_pnl,
+                  pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
+                  is_win, max_dca, tp1_hit, tps_hit, trail_pnl_pct,
+                  close_reason, signal_leverage, equity_pct_per_trade,
+                  opened_dt, closed_dt, duration_min,
+                  # ON CONFLICT updates:
+                  realized_pnl, close_price, close_reason, closed_dt,
+                  pnl_pct_margin, pnl_pct_equity, equity_at_close, is_win,
+                  duration_min, tps_hit, trail_pnl_pct))
+        else:
+            cur.execute("""
+                INSERT INTO trades
+                    (trade_id, symbol, side, entry_price, avg_price, close_price,
+                     total_qty, total_margin, leverage, realized_pnl,
+                     pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
+                     is_win, max_dca_reached, tp1_hit, tps_hit, trail_pnl_pct,
+                     close_reason, signal_leverage, equity_pct_per_trade,
+                     opened_at, closed_at, duration_minutes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (trade_id) DO NOTHING
+            """, (trade_id, symbol, side, entry_price, avg_price, close_price,
+                  total_qty, total_margin, leverage, realized_pnl,
+                  pnl_pct_margin, pnl_pct_equity, equity_at_entry, equity_at_close,
+                  is_win, max_dca, tp1_hit, tps_hit, trail_pnl_pct,
+                  close_reason, signal_leverage, equity_pct_per_trade,
+                  opened_dt, closed_dt, duration_min))
+
         cur.close()
         return True
     except Exception as e:
@@ -516,6 +542,7 @@ def get_trade_stats() -> dict:
                 MIN(realized_pnl) as worst_trade,
                 COALESCE(AVG(duration_minutes), 0) as avg_duration
             FROM trades
+            WHERE side != 'update'
         """)
         row = cur.fetchone()
         cur.close()

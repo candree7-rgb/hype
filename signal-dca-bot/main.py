@@ -70,6 +70,81 @@ signal_buffer: list[Signal] = []
 buffer_lock = asyncio.Lock()
 _batch_flush_handle: asyncio.TimerHandle | None = None
 
+# Neo Cloud lead/lag values for strength check (updated by /zones/push)
+neo_cloud_values: dict[str, tuple[float, float]] = {}  # symbol → (neo_lead, neo_lag)
+
+
+def check_neo_cloud_strength(symbol: str) -> tuple[bool, str]:
+    """Check if Neo Cloud trend has enough strength (lead/lag gap).
+
+    Returns (is_weak, reason). is_weak=True means trade should be skipped.
+    """
+    if not config.neo_cloud_filter or config.neo_min_gap_pct <= 0:
+        return False, ""
+
+    values = neo_cloud_values.get(symbol)
+    if not values:
+        return False, ""  # No data → don't block
+
+    neo_lead, neo_lag = values
+    if neo_lead == 0:
+        return False, ""
+
+    gap_pct = abs(neo_lead - neo_lag) / abs(neo_lead) * 100
+    if gap_pct < config.neo_min_gap_pct:
+        return True, (
+            f"Neo Cloud too weak: lead/lag gap {gap_pct:.3f}% "
+            f"< min {config.neo_min_gap_pct}% (ranging, not trending)"
+        )
+
+    return False, ""
+
+
+def check_zone_proximity(signal) -> tuple[bool, str]:
+    """Check if price is too close to reversal zone boundary.
+
+    LONG near S1 → bounce not confirmed, could dip back into support
+    SHORT near R1 → rejection not confirmed, could push into resistance
+
+    Tiered by signal leverage:
+      <75x (volatile alts): 1% min distance
+      75x+ (majors): 0.5% min distance
+
+    Returns (too_close, reason).
+    """
+    if not config.zone_filter_enabled:
+        return False, ""
+
+    prox_pct = config.get_zone_proximity_pct(signal.signal_leverage)
+    if prox_pct <= 0:
+        return False, ""
+
+    zones = zone_mgr.get_zones(signal.symbol)
+    if not zones or not zones.is_valid:
+        return False, ""
+
+    threshold = prox_pct / 100
+
+    if signal.side == "long" and zones.s1:
+        dist = abs(signal.entry_price - zones.s1) / zones.s1
+        if dist < threshold:
+            return True, (
+                f"Zone proximity: LONG entry {signal.entry_price:.4f} only "
+                f"{dist*100:.2f}% from S1 {zones.s1:.4f} "
+                f"(need >{prox_pct}% @{signal.signal_leverage}x - bounce not confirmed)"
+            )
+
+    if signal.side == "short" and zones.r1:
+        dist = abs(signal.entry_price - zones.r1) / zones.r1
+        if dist < threshold:
+            return True, (
+                f"Zone proximity: SHORT entry {signal.entry_price:.4f} only "
+                f"{dist*100:.2f}% from R1 {zones.r1:.4f} "
+                f"(need >{prox_pct}% @{signal.signal_leverage}x - rejection not confirmed)"
+            )
+
+    return False, ""
+
 
 async def add_signal_to_batch(signal: Signal) -> dict:
     """Add signal to batch buffer. Processes after BATCH_BUFFER_SECONDS."""
@@ -97,6 +172,123 @@ async def add_signal_to_batch(signal: Signal) -> dict:
     )
 
     return {"status": "buffered", "buffer_size": count}
+
+
+def check_wick_spike(signal: Signal) -> tuple[bool, str]:
+    """Check if the trigger candle has an abnormal wick (fake breakout / stop hunt).
+
+    Fetches recent candles, takes the LAST one as trigger candle (the one that
+    caused the signal), and compares its directional wick against the median
+    range of the preceding candles.
+
+    Short signal → lower wick = min(open,close) - low  (spike down)
+    Long signal  → upper wick = high - max(open,close) (spike up)
+
+    Returns (is_spike, reason). If is_spike=True, signal should be skipped.
+    """
+    if not config.wick_spike_filter:
+        return False, ""
+
+    # Fetch lookback + 1 candles (N context + 1 trigger)
+    total_candles = config.wick_spike_lookback + 1
+    candles = bybit.get_klines(
+        signal.symbol,
+        interval=config.wick_spike_candle_interval,
+        limit=total_candles,
+    )
+    if not candles or len(candles) < total_candles:
+        logger.warning(
+            f"Wick spike: only {len(candles) if candles else 0} candles for "
+            f"{signal.symbol}, need {total_candles}, allowing"
+        )
+        return False, ""
+
+    # Last candle = trigger, preceding = context
+    trigger = candles[-1]
+    context = candles[:-1]
+
+    # Median range of context candles
+    ranges = sorted(c["high"] - c["low"] for c in context)
+    n = len(ranges)
+    if n % 2 == 0:
+        median_range = (ranges[n // 2 - 1] + ranges[n // 2]) / 2
+    else:
+        median_range = ranges[n // 2]
+
+    if median_range <= 0:
+        return False, ""
+
+    # Directional wick of trigger candle
+    body_low = min(trigger["open"], trigger["close"])
+    body_high = max(trigger["open"], trigger["close"])
+
+    if signal.side == "short":
+        wick = body_low - trigger["low"]  # Lower wick (spike down)
+    else:
+        wick = trigger["high"] - body_high  # Upper wick (spike up)
+
+    if wick <= 0:
+        return False, ""
+
+    ratio = wick / median_range
+
+    if ratio >= config.wick_spike_multiplier:
+        wick_pct = wick / trigger["close"] * 100 if trigger["close"] > 0 else 0
+        reason = (
+            f"Wick spike: {signal.side.upper()} trigger candle wick "
+            f"{wick:.4f} ({wick_pct:.2f}%) = {ratio:.1f}x median range "
+            f"{median_range:.4f} (threshold {config.wick_spike_multiplier}x)"
+        )
+        return True, reason
+
+    return False, ""
+
+
+def check_extended_move(signal: Signal) -> tuple[bool, str]:
+    """Check if price has already moved too far in the signal direction (24h).
+
+    SHORT + price >X% below 24h-high → skip (extended down, bounce likely)
+    LONG  + price >X% above 24h-low  → skip (extended up, pullback likely)
+
+    Returns (is_extended, reason). If is_extended=True, signal should be skipped.
+    """
+    if not config.extended_move_filter:
+        return False, ""
+
+    hl = bybit.get_24h_high_low(
+        signal.symbol,
+        interval=config.extended_move_lookback,
+        candles=config.extended_move_candles,
+    )
+    if not hl:
+        logger.warning(f"Extended move: could not fetch 24h H/L for {signal.symbol}, allowing")
+        return False, ""
+
+    high_24h, low_24h = hl
+    threshold = config.get_extended_move_pct(signal.signal_leverage)
+
+    if signal.side == "short":
+        if high_24h > 0:
+            drop_pct = (high_24h - signal.entry_price) / high_24h * 100
+            if drop_pct >= threshold:
+                reason = (
+                    f"Extended move: SHORT but price already {drop_pct:.1f}% below "
+                    f"24h-high {high_24h:.4f} (threshold {threshold}%, "
+                    f"signal lev {signal.signal_leverage}x)"
+                )
+                return True, reason
+    else:  # long
+        if low_24h > 0:
+            pump_pct = (signal.entry_price - low_24h) / low_24h * 100
+            if pump_pct >= threshold:
+                reason = (
+                    f"Extended move: LONG but price already {pump_pct:.1f}% above "
+                    f"24h-low {low_24h:.4f} (threshold {threshold}%, "
+                    f"signal lev {signal.signal_leverage}x)"
+                )
+                return True, reason
+
+    return False, ""
 
 
 async def flush_batch():
@@ -132,6 +324,51 @@ async def flush_batch():
                         f"filtered → Neo Cloud={neo_trend.upper()}"
                     )
                     continue
+            # Neo Cloud strength: skip if lead/lag gap too small (ranging)
+            is_weak, weak_reason = check_neo_cloud_strength(signal.symbol)
+            if is_weak:
+                logger.info(
+                    f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                    f"filtered → {weak_reason}"
+                )
+                continue
+        if config.zone_filter_enabled:
+            zones = zone_mgr.get_zones(signal.symbol)
+            if zones and zones.is_valid:
+                if signal.side == "short" and zones.s1 and signal.entry_price < zones.s1:
+                    logger.info(
+                        f"Batch pre-filter: {signal.symbol_display} SHORT "
+                        f"filtered → price {signal.entry_price:.4f} < S1 {zones.s1:.4f}"
+                    )
+                    continue
+                if signal.side == "long" and zones.r1 and signal.entry_price > zones.r1:
+                    logger.info(
+                        f"Batch pre-filter: {signal.symbol_display} LONG "
+                        f"filtered → price {signal.entry_price:.4f} > R1 {zones.r1:.4f}"
+                    )
+                    continue
+            # Zone proximity: skip if price too close to reversal boundary
+            too_close, prox_reason = check_zone_proximity(signal)
+            if too_close:
+                logger.info(
+                    f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                    f"filtered → {prox_reason}"
+                )
+                continue
+        is_extended, ext_reason = check_extended_move(signal)
+        if is_extended:
+            logger.info(
+                f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                f"filtered → {ext_reason}"
+            )
+            continue
+        is_spike, spike_reason = check_wick_spike(signal)
+        if is_spike:
+            logger.info(
+                f"Batch pre-filter: {signal.symbol_display} {signal.side.upper()} "
+                f"filtered → {spike_reason}"
+            )
+            continue
         valid.append(signal)
 
     if not valid:
@@ -179,6 +416,62 @@ async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
                     f"Neo Cloud says {neo_trend.upper()} → SKIP"
                 )
                 return {"status": "filtered", "reason": reason}
+        # Neo Cloud strength check
+        is_weak, weak_reason = check_neo_cloud_strength(signal.symbol)
+        if is_weak:
+            logger.info(
+                f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {weak_reason}"
+            )
+            return {"status": "filtered", "reason": weak_reason}
+
+    # Reversal Zone filter: skip if price is already in the reversal zone
+    # SHORT + price < S1 → shorting into support (likely bounce) → skip
+    # LONG  + price > R1 → longing into resistance (likely rejection) → skip
+    if config.zone_filter_enabled:
+        zones = zone_mgr.get_zones(signal.symbol)
+        if zones and zones.is_valid:
+            if signal.side == "short" and zones.s1 and signal.entry_price < zones.s1:
+                reason = (
+                    f"Zone filter: SHORT but price {signal.entry_price:.4f} "
+                    f"< S1 {zones.s1:.4f} (in support zone)"
+                )
+                logger.info(
+                    f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {reason}"
+                )
+                return {"status": "filtered", "reason": reason}
+            if signal.side == "long" and zones.r1 and signal.entry_price > zones.r1:
+                reason = (
+                    f"Zone filter: LONG but price {signal.entry_price:.4f} "
+                    f"> R1 {zones.r1:.4f} (in resistance zone)"
+                )
+                logger.info(
+                    f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {reason}"
+                )
+                return {"status": "filtered", "reason": reason}
+        # Zone proximity check
+        too_close, prox_reason = check_zone_proximity(signal)
+        if too_close:
+            logger.info(
+                f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {prox_reason}"
+            )
+            return {"status": "filtered", "reason": prox_reason}
+
+    # Extended move + wick spike filters for non-batch calls (webhook direct)
+    # Batch signals are already filtered in flush_batch()
+    if not batch_id:
+        is_extended, ext_reason = check_extended_move(signal)
+        if is_extended:
+            logger.info(
+                f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {ext_reason}"
+            )
+            return {"status": "filtered", "reason": ext_reason}
+
+        is_spike, spike_reason = check_wick_spike(signal)
+        if is_spike:
+            logger.info(
+                f"Signal FILTERED: {signal.symbol_display} {signal.side.upper()} | {spike_reason}"
+            )
+            return {"status": "filtered", "reason": spike_reason}
 
     equity = bybit.get_equity()
     if equity <= 0:
@@ -210,11 +503,13 @@ async def execute_signal(signal: Signal, batch_id: str = "") -> dict:
                     logger.info(f"Auto-zones calculated for {signal.symbol}")
 
         if zones and zones.is_valid:
+            snap_pct = config.get_zone_snap_min_pct(signal.signal_leverage)
             smart_levels = calc_smart_dca_levels(
                 signal.entry_price, config.dca_spacing_pct, zones, signal.side,
-                snap_min_pct=config.zone_snap_min_pct,
+                snap_min_pct=snap_pct,
                 limit_buffer_pct=config.dca_limit_buffer_pct,
             )
+            logger.info(f"Zone snap min: {snap_pct}% (signal lev {signal.signal_leverage}x)")
             for i, (price, source) in enumerate(smart_levels):
                 if i < len(trade.dca_levels) and source not in ("entry", "fixed", "filled"):
                     old_price = trade.dca_levels[i].price
@@ -562,10 +857,62 @@ async def price_monitor():
                         )
                         break  # One DCA per cycle
 
-                # ── 2b. DCA Quick-Trail: tighten SL once bounce confirms ──
+                # ── 2b. DCA Midpoint SL: tighten SL when price reaches avg ──
                 # After DCA fills, SL is at deepest_fill+3% (~4.7% equity risk).
-                # Once price moves 0.5% in our favor → tighten SL to avg+0.5%
-                # (~1.1% equity risk). Keeps -3% as safety net until bounce confirms.
+                # Once price bounces back to avg → SL = midpoint(deepest_fill, avg).
+                # This halves the loss if bounce fails (~1.7% equity vs ~4.7%).
+                # Triggers BEFORE quick-trail (at avg, not avg+0.5%).
+                if (trade.status == TradeStatus.DCA_ACTIVE
+                        and trade.current_dca > 0
+                        and not trade.midpoint_sl_active
+                        and not trade.quick_trail_active
+                        and trade.tps_hit == 0):
+                    current_price = bybit.get_ticker_price(trade.symbol)
+                    if current_price:
+                        if trade.side == "long":
+                            price_at_avg = current_price >= trade.avg_price
+                        else:
+                            price_at_avg = current_price <= trade.avg_price
+
+                        if price_at_avg:
+                            # Find deepest DCA fill price
+                            deepest_fill = None
+                            for dca in trade.dca_levels[1:]:
+                                if dca.filled and dca.price > 0:
+                                    if trade.side == "long":
+                                        deepest_fill = min(deepest_fill, dca.price) if deepest_fill else dca.price
+                                    else:
+                                        deepest_fill = max(deepest_fill, dca.price) if deepest_fill else dca.price
+
+                            if deepest_fill:
+                                midpoint_sl = (deepest_fill + trade.avg_price) / 2
+                                old_sl = trade.hard_sl_price
+                                sl_ok = bybit.set_trading_stop(
+                                    trade.symbol, trade.side,
+                                    stop_loss=midpoint_sl,
+                                )
+                                trade.hard_sl_price = midpoint_sl
+                                trade.midpoint_sl_active = True
+                                trade_mgr.persist_trade(trade)
+                                if sl_ok:
+                                    loss_pct = abs(midpoint_sl - trade.avg_price) / trade.avg_price * 100
+                                    logger.info(
+                                        f"DCA Midpoint SL: {trade.symbol_display} | "
+                                        f"Price {current_price:.4f} reached avg {trade.avg_price:.4f} | "
+                                        f"SL: {old_sl:.4f} → {midpoint_sl:.4f} "
+                                        f"(midpoint of DCA {deepest_fill:.4f} + avg {trade.avg_price:.4f}) | "
+                                        f"Loss capped at ~{loss_pct:.1f}%"
+                                    )
+                                else:
+                                    logger.critical(
+                                        f"DCA Midpoint SL FAILED: {trade.symbol_display} | "
+                                        f"SL={midpoint_sl:.4f} NOT VERIFIED!"
+                                    )
+
+                # ── 2c. DCA Quick-Trail: tighten SL once bounce confirms ──
+                # After midpoint SL, SL is at midpoint(deepest_fill, avg).
+                # Once price moves 0.5% past avg → tighten SL to avg+0.5%
+                # (~1.1% equity risk). Progressive tightening.
                 if (trade.status == TradeStatus.DCA_ACTIVE
                         and trade.current_dca > 0
                         and not trade.quick_trail_active
@@ -700,8 +1047,18 @@ def _get_bybit_realized_pnl(trade: Trade) -> float | None:
 
     total_pnl = sum(r["closed_pnl"] for r in matching)
     total_qty = sum(r["qty"] for r in matching)
+
+    # Log each fill's actual prices for slippage diagnosis
+    for i, r in enumerate(matching, 1):
+        logger.info(
+            f"Bybit closed PnL [{i}/{len(matching)}]: {trade.symbol_display} | "
+            f"Entry: {r['entry_price']:.6f} → Exit: {r['exit_price']:.6f} | "
+            f"Qty: {r['qty']:.4f} | PnL: ${r['closed_pnl']:+.4f} | "
+            f"Type: {r['order_type']}"
+        )
+
     logger.info(
-        f"Bybit closed PnL: {trade.symbol_display} | "
+        f"Bybit closed PnL total: {trade.symbol_display} | "
         f"{len(matching)} records | Total qty: {total_qty:.4f} | "
         f"PnL: ${total_pnl:+.4f}"
     )
@@ -1024,6 +1381,54 @@ def _set_exchange_stops_after_dca(trade: Trade) -> None:
             )
 
 
+def _neo_switch_dca_tighten_sl(trade: Trade) -> bool:
+    """Neo Cloud flipped but DCA is filled: tighten SL instead of closing.
+
+    Sets SL to deepest_dca_fill ± neo_dca_tight_sl_pct (1.5% default).
+    This is tighter than hard_sl (3%) but gives DCA recovery a fair chance.
+    Worst case ~3% equity loss vs ~5% with full hard SL.
+
+    Returns True if SL was set successfully, False on failure.
+    """
+    tight_pct = config.neo_dca_tight_sl_pct / 100
+
+    # Find deepest DCA fill price (same logic as _update_hard_sl)
+    deepest_fill = None
+    for dca in trade.dca_levels[1:]:
+        if dca.filled and dca.price > 0:
+            if trade.side == "long":
+                deepest_fill = min(deepest_fill, dca.price) if deepest_fill else dca.price
+            else:
+                deepest_fill = max(deepest_fill, dca.price) if deepest_fill else dca.price
+
+    if not deepest_fill:
+        logger.warning(
+            f"Neo+DCA tight SL: no DCA fill price for {trade.symbol_display}, "
+            f"falling back to immediate close"
+        )
+        return False
+
+    if trade.side == "long":
+        sl = deepest_fill * (1 - tight_pct)
+    else:
+        sl = deepest_fill * (1 + tight_pct)
+
+    sl_ok = bybit.set_trading_stop(trade.symbol, trade.side, stop_loss=sl)
+    if sl_ok:
+        logger.info(
+            f"Neo+DCA tight SL: {trade.symbol_display} {trade.side.upper()} | "
+            f"DCA fill={deepest_fill:.4f} | Old SL={trade.hard_sl_price:.4f} | "
+            f"New SL={sl:.4f} ({config.neo_dca_tight_sl_pct}%) | DCA recovery chance"
+        )
+        trade.hard_sl_price = sl
+    else:
+        logger.warning(
+            f"Neo+DCA tight SL FAILED: {trade.symbol_display}, "
+            f"falling back to immediate close"
+        )
+    return sl_ok
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ▌ ZONE REFRESH (auto-calc swing zones for active symbols)
 # ══════════════════════════════════════════════════════════════════════════
@@ -1096,9 +1501,10 @@ async def resnap_active_dcas(symbol: str):
         filled_mask = [dca.filled for dca in trade.dca_levels]
 
         # Re-calculate smart DCA levels with fresh zones + filled status
+        snap_pct = config.get_zone_snap_min_pct(trade.signal_leverage)
         smart_levels = calc_smart_dca_levels(
             trade.signal_entry, config.dca_spacing_pct, zones, trade.side,
-            snap_min_pct=config.zone_snap_min_pct,
+            snap_min_pct=snap_pct,
             filled_levels=filled_mask,
             limit_buffer_pct=config.dca_limit_buffer_pct,
         )
@@ -1139,6 +1545,29 @@ async def resnap_active_dcas(symbol: str):
                     f"DCA{i} re-snapped: {trade.symbol_display} | "
                     f"{old_price:.4f} → {new_price:.4f} ({source}, {pct_change:.1f}% shift)"
                 )
+            else:
+                # Amend failed → order likely gone from Bybit, re-place it
+                logger.warning(
+                    f"DCA{i} amend failed, re-placing: {trade.symbol_display} | "
+                    f"old order_id={dca.order_id}"
+                )
+                bybit.cancel_order(trade.symbol, dca.order_id)  # cleanup attempt
+                dca.order_id = ""
+                dca.price = new_price
+                dca.qty = dca.margin * trade.leverage / new_price
+                bybit.place_dca_for_trade(trade)
+                if dca.order_id:
+                    trade_mgr.persist_trade(trade)
+                    logger.info(
+                        f"DCA{i} re-placed: {trade.symbol_display} | "
+                        f"{old_price:.4f} → {new_price:.4f} ({source}) | "
+                        f"new order_id={dca.order_id}"
+                    )
+                else:
+                    logger.critical(
+                        f"DCA{i} re-place FAILED: {trade.symbol_display} | "
+                        f"price={new_price:.4f}"
+                    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1393,6 +1822,10 @@ async def _recover_and_check_positions():
                             )
 
             # ── Check DCA order fills that happened during downtime ──
+            # ── Also verify unfilled DCA orders still exist on Bybit ──
+            open_orders = bybit.get_open_orders(trade.symbol)
+            open_order_ids = {o["order_id"] for o in open_orders}
+
             for i in range(1, trade.max_dca + 1):
                 if i >= len(trade.dca_levels):
                     break
@@ -1413,6 +1846,26 @@ async def _recover_and_check_positions():
                         f"RECOVERY: DCA{i} was filled during downtime | "
                         f"{trade.symbol_display} @ {dca_fill_price:.4f}"
                     )
+                elif dca.order_id not in open_order_ids:
+                    # Order vanished from Bybit (cancelled during redeploy)
+                    # → Re-place it so resnap and fills keep working
+                    logger.warning(
+                        f"RECOVERY: DCA{i} order missing on Bybit | "
+                        f"{trade.symbol_display} | old order_id={dca.order_id} → re-placing"
+                    )
+                    dca.order_id = ""
+                    bybit.place_dca_for_trade(trade)
+                    if dca.order_id:
+                        logger.info(
+                            f"RECOVERY: DCA{i} re-placed | "
+                            f"{trade.symbol_display} @ {dca.price:.4f} | "
+                            f"new order_id={dca.order_id}"
+                        )
+                    else:
+                        logger.critical(
+                            f"RECOVERY: DCA{i} re-place FAILED | "
+                            f"{trade.symbol_display} @ {dca.price:.4f}"
+                        )
 
             # ── Verify SL is set on exchange ──
             if pos["stop_loss"] == 0 and pos["trailing_stop"] == 0:
@@ -1612,7 +2065,8 @@ async def bybit_trade_sync():
                 if is_tracked:
                     continue
 
-                # Not tracked and not in DB → save it
+                # Not tracked and not in DB → save it (allow_overwrite=False
+                # so manually edited trades are never overwritten by sync)
                 trade_id = f"bybit_{rec['symbol']}_{rec['side']}_{int(rec['created_time'])}"
                 equity = bybit.get_equity() or 0
                 db.save_trade(
@@ -1635,6 +2089,7 @@ async def bybit_trade_sync():
                     equity_at_close=equity,
                     leverage=config.leverage,
                     equity_pct_per_trade=config.equity_pct_per_trade,
+                    allow_overwrite=False,
                 )
                 fill_info = f" ({rec['fill_count']} fills)" if rec.get("fill_count", 1) > 1 else ""
                 logger.info(
@@ -1651,6 +2106,40 @@ async def bybit_trade_sync():
 # ══════════════════════════════════════════════════════════════════════════
 # ▌ FASTAPI APP
 # ══════════════════════════════════════════════════════════════════════════
+
+async def handle_tg_tp_hit(tp_hit: dict):
+    """Cancel unfilled PENDING orders when VIP Club reports TP hit.
+
+    If the channel says "Target #1 Done" for a symbol and we have a PENDING
+    (unfilled) limit order for it, the move already happened without us.
+    No point waiting for a pullback — cancel and free the slot.
+    """
+    symbol = tp_hit["symbol"]
+    tp_number = tp_hit["tp_number"]
+
+    for trade in list(trade_mgr.active_trades):
+        if trade.symbol != symbol:
+            continue
+
+        # Only cancel PENDING (unfilled E1 limit orders)
+        if trade.status != TradeStatus.PENDING:
+            logger.info(
+                f"TP hit cancel: {trade.symbol_display} is {trade.status.value} "
+                f"(not PENDING) — keeping trade"
+            )
+            continue
+
+        # Cancel the E1 limit order on Bybit
+        bybit.cancel_e1(trade)
+        trade_mgr.close_trade(
+            trade, 0, 0,
+            f"TP#{tp_number} already hit (unfilled)"
+        )
+        logger.info(
+            f"TP hit cancel: {trade.symbol_display} PENDING cancelled | "
+            f"VIP Club Target #{tp_number} Done — entry missed"
+        )
+
 
 async def handle_tg_close(close_cmd: dict):
     """Handle a close signal from Telegram."""
@@ -1703,6 +2192,7 @@ async def lifespan(app: FastAPI):
         config,
         on_signal=add_signal_to_batch,
         on_close=handle_tg_close,
+        on_tp_hit=handle_tg_tp_hit,
     )
     await tg_listener.start()
 
@@ -1853,7 +2343,19 @@ async def trend_switch(request: Request):
             )
             continue
 
-        # FILLED trades: close position on exchange
+        # DCA filled? → swing SL instead of immediate close
+        if trade.current_dca > 0 and config.neo_dca_tight_sl_pct > 0:
+            if _neo_switch_dca_tighten_sl(trade):
+                closed.append({
+                    "trade_id": trade.trade_id,
+                    "symbol": trade.symbol_display,
+                    "side": trade.side,
+                    "pnl": "swing SL (DCA recovery)",
+                })
+                continue
+            # Fallthrough: swing SL failed → close immediately
+
+        # FILLED trades (no DCA or swing SL failed): close position on exchange
         # close_full() handles: cancel_all → market close → verify → force-close residual
         price = bybit.get_ticker_price(trade.symbol)
         success = bybit.close_full(trade, f"Neo Cloud {direction}")
@@ -1999,6 +2501,9 @@ async def push_zones(request: Request):
             neo_lead = neo_lag = None
 
     if neo_lead is not None and neo_lag is not None and neo_lead != 0:
+        # Store lead/lag values for strength check
+        neo_cloud_values[symbol_clean] = (neo_lead, neo_lag)
+
         # Determine current trend from Neo Cloud values
         new_direction = "up" if neo_lead > neo_lag else "down"
 
@@ -2036,7 +2541,18 @@ async def push_zones(request: Request):
                     )
                     continue
 
-                # FILLED trades: close position on exchange
+                # DCA filled? → swing SL instead of immediate close
+                if trade.current_dca > 0 and config.neo_dca_tight_sl_pct > 0:
+                    if _neo_switch_dca_tighten_sl(trade):
+                        closed.append({
+                            "trade_id": trade.trade_id,
+                            "side": trade.side,
+                            "pnl": "swing SL (DCA recovery)",
+                        })
+                        continue
+                    # Fallthrough: swing SL failed → close immediately
+
+                # FILLED trades (no DCA or swing SL failed): close position on exchange
                 # close_full() handles: cancel_all → market close → verify → force-close residual
                 price = bybit.get_ticker_price(trade.symbol)
                 success = bybit.close_full(trade, f"Neo Cloud {new_direction}")
@@ -2250,6 +2766,12 @@ async def status():
         "dca_trail_cb": config.dca_trail_callback_pct,
         "zones": config.zone_snap_enabled,
         "neo_cloud": config.neo_cloud_filter,
+        "neo_min_gap_pct": config.neo_min_gap_pct,
+        "zone_proximity_pct": config.zone_proximity_pct,
+        "extended_move_filter": config.extended_move_filter,
+        "extended_move_pct": f"{config.extended_move_pct}/{config.extended_move_pct_high}/{config.extended_move_pct_ultra}%",
+        "wick_spike_filter": config.wick_spike_filter,
+        "wick_spike_multiplier": f"{config.wick_spike_multiplier}x median ({config.wick_spike_lookback} candles)",
         "testnet": config.bybit_testnet,
     }
 

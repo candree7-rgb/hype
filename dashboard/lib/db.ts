@@ -93,7 +93,8 @@ export async function getTrades(
   limit: number = 50,
   days?: number,
   from?: string,
-  to?: string
+  to?: string,
+  excludeWeekends?: boolean
 ): Promise<Trade[]> {
   const client = await pool.connect()
   try {
@@ -102,6 +103,9 @@ export async function getTrades(
       whereClause += ` AND closed_at >= '${from}' AND closed_at <= '${to}'`
     } else if (days) {
       whereClause += ` AND closed_at >= NOW() - INTERVAL '${days} days'`
+    }
+    if (excludeWeekends) {
+      whereClause += ` AND EXTRACT(DOW FROM opened_at) NOT IN (0, 6)`
     }
 
     const result = await client.query(
@@ -154,7 +158,8 @@ export async function getDailyEquity(
 export async function getStats(
   days?: number,
   from?: string,
-  to?: string
+  to?: string,
+  excludeWeekends?: boolean
 ): Promise<Stats> {
   const client = await pool.connect()
   try {
@@ -163,6 +168,9 @@ export async function getStats(
       dateFilter = ` AND closed_at >= '${from}' AND closed_at <= '${to}'`
     } else if (days) {
       dateFilter = ` AND closed_at >= NOW() - INTERVAL '${days} days'`
+    }
+    if (excludeWeekends) {
+      dateFilter += ` AND EXTRACT(DOW FROM opened_at) NOT IN (0, 6)`
     }
 
     const query = `
@@ -177,7 +185,7 @@ export async function getStats(
             ELSE 0
           END as tp_fills
         FROM trades
-        WHERE closed_at IS NOT NULL${dateFilter}
+        WHERE closed_at IS NOT NULL AND side != 'update'${dateFilter}
       )
       SELECT
         COUNT(*) as total_trades,
@@ -273,7 +281,8 @@ export async function getStats(
 export async function getExitDistribution(
   days?: number,
   from?: string,
-  to?: string
+  to?: string,
+  excludeWeekends?: boolean
 ): Promise<ExitDistribution[]> {
   const client = await pool.connect()
   try {
@@ -282,6 +291,9 @@ export async function getExitDistribution(
       dateFilter = ` AND closed_at >= '${from}' AND closed_at <= '${to}'`
     } else if (days) {
       dateFilter = ` AND closed_at >= NOW() - INTERVAL '${days} days'`
+    }
+    if (excludeWeekends) {
+      dateFilter += ` AND EXTRACT(DOW FROM opened_at) NOT IN (0, 6)`
     }
 
     // Cumulative TP counting: a trade that hit TP3 also hit TP1 and TP2
@@ -302,7 +314,7 @@ export async function getExitDistribution(
             ELSE false
           END as is_sl
         FROM trades
-        WHERE closed_at IS NOT NULL${dateFilter}
+        WHERE closed_at IS NOT NULL AND side != 'update'${dateFilter}
       ),
       total AS (SELECT COUNT(*) as cnt FROM trade_data)
       SELECT level, count FROM (
@@ -322,7 +334,7 @@ export async function getExitDistribution(
     `)
 
     const totalTrades = await client.query(`
-      SELECT COUNT(*) as cnt FROM trades WHERE closed_at IS NOT NULL${dateFilter}
+      SELECT COUNT(*) as cnt FROM trades WHERE closed_at IS NOT NULL AND side != 'update'${dateFilter}
     `)
     const total = parseInt(totalTrades.rows[0]?.cnt || '0')
 
@@ -341,7 +353,8 @@ export async function getExitDistribution(
 export async function getDCADistribution(
   days?: number,
   from?: string,
-  to?: string
+  to?: string,
+  excludeWeekends?: boolean
 ): Promise<DCADistribution[]> {
   const client = await pool.connect()
   try {
@@ -351,13 +364,16 @@ export async function getDCADistribution(
     } else if (days) {
       dateFilter = ` AND closed_at >= NOW() - INTERVAL '${days} days'`
     }
+    if (excludeWeekends) {
+      dateFilter += ` AND EXTRACT(DOW FROM opened_at) NOT IN (0, 6)`
+    }
 
     const result = await client.query(`
       SELECT
         CASE WHEN max_dca_reached = 0 THEN 'NO DCA' ELSE 'DCA' END as label,
         COUNT(*) as count
       FROM trades
-      WHERE closed_at IS NOT NULL${dateFilter}
+      WHERE closed_at IS NOT NULL AND side != 'update'${dateFilter}
       GROUP BY CASE WHEN max_dca_reached = 0 THEN 'NO DCA' ELSE 'DCA' END
       ORDER BY label
     `)

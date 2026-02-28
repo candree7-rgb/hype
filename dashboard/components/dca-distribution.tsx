@@ -1,17 +1,20 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts'
-import { DCADistribution } from '@/lib/db'
+import { DCADistribution, Trade } from '@/lib/db'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
+import { SimSettings, filterSinglePerBatch, computeDCADistribution } from '@/lib/simulation'
 
 interface DCADistributionProps {
   timeRange: TimeRange
   customDateRange?: { from: string; to: string } | null
+  simSettings: SimSettings
 }
 
-export default function DCADistributionChart({ timeRange, customDateRange }: DCADistributionProps) {
+export default function DCADistributionChart({ timeRange, customDateRange, simSettings }: DCADistributionProps) {
   const [data, setData] = useState<DCADistribution[]>([])
+  const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -26,15 +29,31 @@ export default function DCADistributionChart({ timeRange, customDateRange }: DCA
           const range = TIME_RANGES.find(r => r.value === timeRange)
           if (range?.days) params.append('days', range.days.toString())
         }
-
-        const res = await fetch(`/api/dca-distribution?${params.toString()}`)
-        if (!res.ok) {
-          console.error('DCA distribution API returned', res.status)
-          setData([])
-          return
+        if (simSettings.excludeWeekends) {
+          params.append('excludeWeekends', 'true')
         }
-        const distribution = await res.json()
-        setData(Array.isArray(distribution) ? distribution : [])
+
+        if (simSettings.singlePerBatch) {
+          // Fetch trades for client-side computation
+          const tradeParams = new URLSearchParams(params)
+          tradeParams.set('limit', '500')
+          const res = await fetch(`/api/trades?${tradeParams.toString()}`)
+          if (res.ok) {
+            const tradeData = await res.json()
+            setTrades(Array.isArray(tradeData) ? tradeData : [])
+          }
+          setData([])
+        } else {
+          setTrades([])
+          const res = await fetch(`/api/dca-distribution?${params.toString()}`)
+          if (!res.ok) {
+            console.error('DCA distribution API returned', res.status)
+            setData([])
+            return
+          }
+          const distribution = await res.json()
+          setData(Array.isArray(distribution) ? distribution : [])
+        }
       } catch (error) {
         console.error('Failed to fetch DCA distribution:', error)
       } finally {
@@ -46,7 +65,16 @@ export default function DCADistributionChart({ timeRange, customDateRange }: DCA
     fetchData()
     const interval = setInterval(fetchData, 60000)
     return () => clearInterval(interval)
-  }, [timeRange, customDateRange])
+  }, [timeRange, customDateRange, simSettings.excludeWeekends, simSettings.singlePerBatch])
+
+  // When singlePerBatch is on, compute distribution from filtered trades client-side
+  const effectiveData = useMemo(() => {
+    if (simSettings.singlePerBatch && trades.length > 0) {
+      const filtered = filterSinglePerBatch(trades)
+      return computeDCADistribution(filtered)
+    }
+    return data
+  }, [data, trades, simSettings.singlePerBatch])
 
   if (loading) {
     return (
@@ -57,7 +85,7 @@ export default function DCADistributionChart({ timeRange, customDateRange }: DCA
     )
   }
 
-  if (data.length === 0) {
+  if (effectiveData.length === 0) {
     return (
       <div className="bg-card border border-border rounded-lg p-6">
         <h2 className="text-xl font-bold mb-4">DCA Distribution</h2>
@@ -71,7 +99,7 @@ export default function DCADistributionChart({ timeRange, customDateRange }: DCA
     'DCA': '#f97316',
   }
 
-  const chartData = data.map(d => ({
+  const chartData = effectiveData.map(d => ({
     ...d,
     fill: colors[d.label] || '#6b7280',
   }))

@@ -4,7 +4,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { Trade } from '@/lib/db'
 import { formatCurrency, formatDate, formatDuration, cn } from '@/lib/utils'
 import { TimeRange, TIME_RANGES } from './time-range-selector'
-import { SimSettings, runSimulation } from '@/lib/simulation'
+import { SimSettings, runSimulation, filterSinglePerBatch } from '@/lib/simulation'
 
 interface TradesTableProps {
   timeRange: TimeRange
@@ -13,11 +13,18 @@ interface TradesTableProps {
   isSimulated?: boolean
 }
 
-type BadgeVariant = 'tp' | 'trail' | 'be' | 'sl' | 'neutral'
+type BadgeVariant = 'tp' | 'trail' | 'be' | 'sl' | 'neutral' | 'update'
 
 function getExitBadges(trade: Trade): { label: string; variant: BadgeVariant }[] {
   const reason = (trade.close_reason || '').toLowerCase()
   const badges: { label: string; variant: BadgeVariant }[] = []
+
+  // UPDATE trades: show close_reason as info badge
+  if (trade.side === 'update') {
+    const label = trade.close_reason?.trim() || 'CORRECTED'
+    badges.push({ label: label.length > 20 ? label.slice(0, 20) + '…' : label, variant: 'update' })
+    return badges
+  }
 
   // Parse highest TP level from close_reason
   const tpMatch = reason.match(/tp(\d)/)
@@ -75,17 +82,22 @@ const badgeColors: Record<BadgeVariant, string> = {
   be: 'bg-warning/20 text-warning',
   sl: 'bg-danger/20 text-danger',
   neutral: 'bg-muted text-muted-foreground',
+  update: 'bg-blue-500/20 text-blue-400 italic',
 }
 
 export default function TradesTable({ timeRange, customDateRange, simSettings, isSimulated = true }: TradesTableProps) {
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
 
-  // Run simulation on current trades when simSettings are active
+  // Apply batch filter, then run simulation
+  const filteredTrades = useMemo(() => {
+    return simSettings.singlePerBatch ? filterSinglePerBatch(trades) : trades
+  }, [trades, simSettings.singlePerBatch])
+
   const simResults = useMemo(() => {
-    if (!simSettings || trades.length === 0) return null
-    return runSimulation(trades, simSettings)
-  }, [trades, simSettings])
+    if (!simSettings || filteredTrades.length === 0) return null
+    return runSimulation(filteredTrades, simSettings)
+  }, [filteredTrades, simSettings])
 
   useEffect(() => {
     async function fetchTrades() {
@@ -98,6 +110,9 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
         } else {
           const range = TIME_RANGES.find(r => r.value === timeRange)
           if (range?.days) params.append('days', range.days.toString())
+        }
+        if (simSettings.excludeWeekends) {
+          params.append('excludeWeekends', 'true')
         }
 
         const res = await fetch(`/api/trades?${params.toString()}`)
@@ -119,7 +134,7 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
     fetchTrades()
     const interval = setInterval(fetchTrades, 30000)
     return () => clearInterval(interval)
-  }, [timeRange, customDateRange])
+  }, [timeRange, customDateRange, simSettings.excludeWeekends])
 
   if (loading) {
     return (
@@ -134,7 +149,7 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
     )
   }
 
-  if (trades.length === 0) {
+  if (filteredTrades.length === 0) {
     return (
       <div className="bg-card border border-border rounded-lg p-6">
         <h2 className="text-xl font-bold mb-4">Trade History</h2>
@@ -149,7 +164,7 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
     <div className="bg-card border border-border rounded-lg overflow-hidden">
       <div className="p-6 pb-4">
         <h2 className="text-xl font-bold">Trade History</h2>
-        <p className="text-sm text-muted-foreground mt-1">Last {trades.length} trades</p>
+        <p className="text-sm text-muted-foreground mt-1">Last {filteredTrades.filter(t => t.side !== 'update').length} trades</p>
       </div>
 
       <div className="overflow-x-auto">
@@ -176,17 +191,25 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
             </tr>
           </thead>
           <tbody className="divide-y divide-border/50">
-            {trades.map((trade) => (
-              <tr key={trade.trade_id} className="hover:bg-muted/20 transition-colors">
+            {filteredTrades.map((trade) => (
+              <tr key={trade.trade_id} className={cn(
+                'hover:bg-muted/20 transition-colors',
+                trade.side === 'update' && 'border-l-2 border-l-blue-500 bg-blue-500/5'
+              )}>
                 {/* Symbol */}
                 <td className="px-4 py-4">
                   <div className="flex items-center gap-2">
-                    <span className="font-mono font-semibold">
+                    <span className={cn(
+                      'font-mono font-semibold',
+                      trade.side === 'update' && 'text-blue-400 italic'
+                    )}>
                       {trade.symbol.replace('USDT', '')}
                     </span>
-                    <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-muted/80 text-muted-foreground">
-                      {trade.leverage}x
-                    </span>
+                    {trade.side !== 'update' && (
+                      <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-muted/80 text-muted-foreground">
+                        {trade.leverage}x
+                      </span>
+                    )}
                   </div>
                 </td>
 
@@ -201,98 +224,111 @@ export default function TradesTable({ timeRange, customDateRange, simSettings, i
                     'px-2 py-1 rounded text-xs font-semibold',
                     trade.side === 'long'
                       ? 'bg-success/20 text-success'
-                      : 'bg-danger/20 text-danger'
+                      : trade.side === 'update'
+                        ? 'bg-blue-500/20 text-blue-400'
+                        : 'bg-danger/20 text-danger'
                   )}>
                     {trade.side.toUpperCase()}
                   </span>
                 </td>
 
-                {/* Entry */}
-                <td className="px-4 py-4 font-mono text-sm">
-                  ${parseFloat(trade.entry_price?.toString() || '0').toFixed(4)}
-                </td>
-
-                {/* Duration */}
-                <td className="px-4 py-4 text-sm text-muted-foreground">
-                  {formatDuration(trade.duration_minutes)}
-                </td>
-
-                {/* P&L $: simulated mode shows sim P&L, real mode shows account P&L */}
-                {isSimulated ? (
-                  <>
-                    {simResults && (() => {
-                      const sim = simResults.per_trade.get(trade.trade_id)
-                      return (
-                        <td className="px-4 py-4">
-                          {sim ? (
-                            <span className={cn(
-                              'font-semibold',
-                              sim.sim_pnl >= 0 ? 'text-success' : 'text-danger'
-                            )}>
-                              {sim.sim_pnl >= 0 ? '+' : ''}{formatCurrency(sim.sim_pnl)}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">-</span>
-                          )}
-                        </td>
-                      )
-                    })()}
-                  </>
-                ) : (
-                  <td className="px-4 py-4">
-                    <span className={cn(
-                      'font-semibold',
-                      (trade.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger'
-                    )}>
-                      {(trade.realized_pnl || 0) >= 0 ? '+' : ''}
-                      {formatCurrency(parseFloat(trade.realized_pnl?.toString() || '0'))}
+                {trade.side === 'update' ? (
+                  /* UPDATE row: span from Entry through DCA with note text */
+                  <td colSpan={6} className="px-4 py-4">
+                    <span className="text-sm text-muted-foreground italic">
+                      {trade.close_reason?.trim() || 'Strategy update'}
                     </span>
                   </td>
+                ) : (
+                  <>
+                    {/* Entry */}
+                    <td className="px-4 py-4 font-mono text-sm">
+                      ${parseFloat(trade.entry_price?.toString() || '0').toFixed(4)}
+                    </td>
+
+                    {/* Duration */}
+                    <td className="px-4 py-4 text-sm text-muted-foreground">
+                      {formatDuration(trade.duration_minutes)}
+                    </td>
+
+                    {/* P&L $: simulated mode shows sim P&L, real mode shows account P&L */}
+                    {isSimulated ? (
+                      <>
+                        {simResults && (() => {
+                          const sim = simResults.per_trade.get(trade.trade_id)
+                          return (
+                            <td className="px-4 py-4">
+                              {sim ? (
+                                <span className={cn(
+                                  'font-semibold',
+                                  sim.sim_pnl >= 0 ? 'text-success' : 'text-danger'
+                                )}>
+                                  {sim.sim_pnl >= 0 ? '+' : ''}{formatCurrency(sim.sim_pnl)}
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">-</span>
+                              )}
+                            </td>
+                          )
+                        })()}
+                      </>
+                    ) : (
+                      <td className="px-4 py-4">
+                        <span className={cn(
+                          'font-semibold',
+                          (trade.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger'
+                        )}>
+                          {(trade.realized_pnl || 0) >= 0 ? '+' : ''}
+                          {formatCurrency(parseFloat(trade.realized_pnl?.toString() || '0'))}
+                        </span>
+                      </td>
+                    )}
+
+                    {/* P&L % - simulated mode uses scaled %, real mode uses raw DB value */}
+                    <td className="px-4 py-4">
+                      {(() => {
+                        const sim = isSimulated && simResults ? simResults.per_trade.get(trade.trade_id) : null
+                        const pct = sim ? sim.sim_pnl_pct : parseFloat(trade.pnl_pct_equity?.toString() || '0')
+                        return (
+                          <span className={cn(
+                            'font-semibold text-sm',
+                            pct >= 0 ? 'text-success' : 'text-danger'
+                          )}>
+                            {pct >= 0 ? '+' : ''}{pct.toFixed(2)}%
+                          </span>
+                        )
+                      })()}
+                    </td>
+
+                    {/* Exit badges */}
+                    <td className="px-4 py-4">
+                      <div className="flex flex-wrap gap-1">
+                        {getExitBadges(trade).map((badge, idx) => (
+                          <span
+                            key={idx}
+                            className={cn(
+                              'px-2 py-0.5 rounded text-xs font-semibold',
+                              badgeColors[badge.variant]
+                            )}
+                          >
+                            {badge.label}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+
+                    {/* DCA badge */}
+                    <td className="px-4 py-4">
+                      {trade.max_dca_reached > 0 ? (
+                        <span className="px-2 py-0.5 rounded text-xs font-semibold bg-orange-500/20 text-orange-400">
+                          DCA
+                        </span>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">-</span>
+                      )}
+                    </td>
+                  </>
                 )}
-
-                {/* P&L % - simulated mode uses scaled %, real mode uses raw DB value */}
-                <td className="px-4 py-4">
-                  {(() => {
-                    const sim = isSimulated && simResults ? simResults.per_trade.get(trade.trade_id) : null
-                    const pct = sim ? sim.sim_pnl_pct : parseFloat(trade.pnl_pct_equity?.toString() || '0')
-                    return (
-                      <span className={cn(
-                        'font-semibold text-sm',
-                        pct >= 0 ? 'text-success' : 'text-danger'
-                      )}>
-                        {pct >= 0 ? '+' : ''}{pct.toFixed(2)}%
-                      </span>
-                    )
-                  })()}
-                </td>
-
-                {/* Exit badges */}
-                <td className="px-4 py-4">
-                  <div className="flex flex-wrap gap-1">
-                    {getExitBadges(trade).map((badge, idx) => (
-                      <span
-                        key={idx}
-                        className={cn(
-                          'px-2 py-0.5 rounded text-xs font-semibold',
-                          badgeColors[badge.variant]
-                        )}
-                      >
-                        {badge.label}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-
-                {/* DCA badge */}
-                <td className="px-4 py-4">
-                  {trade.max_dca_reached > 0 ? (
-                    <span className="px-2 py-0.5 rounded text-xs font-semibold bg-orange-500/20 text-orange-400">
-                      DCA
-                    </span>
-                  ) : (
-                    <span className="text-sm text-muted-foreground">-</span>
-                  )}
-                </td>
               </tr>
             ))}
           </tbody>

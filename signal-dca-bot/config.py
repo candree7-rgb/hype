@@ -46,6 +46,19 @@ class BotConfig:
 
     # ── Neo Cloud Trend Filter ──
     neo_cloud_filter: bool = True       # Only take trades matching Neo Cloud trend
+    neo_min_gap_pct: float = 0.2        # Min gap between neo_lead and neo_lag (% of lead)
+                                        # Below this → ranging/thin trend, skip trade
+                                        # 0.13% gap = ice floor, 0.2%+ = confirmed direction
+
+    # ── Reversal Zone Filter ──
+    # Skip signals where price is already in the reversal zone:
+    #   SHORT + price < S1 → skip (already at/below support, likely to bounce)
+    #   LONG  + price > R1 → skip (already at/above resistance, likely to reject)
+    zone_filter_enabled: bool = True
+    zone_proximity_pct: float = 1.0     # Default: skip if price within 1% of reversal zone (<75x)
+    zone_proximity_pct_high: float = 0.5  # 75x+ leverage: tighter zones, 0.5% proximity OK
+                                        # LONG near S1 → bounce not confirmed, could dip back
+                                        # SHORT near R1 → rejection not confirmed, could push higher
 
     # ── DCA Configuration ──
     # 1 DCA: E1 + DCA1 with sizing [1, 2] = sum 3
@@ -105,10 +118,45 @@ class BotConfig:
 
     # ── Zone Snapping ──
     zone_snap_enabled: bool = True
-    zone_snap_min_pct: float = 3.0        # Min distance for zone snap (S1/R1 only if >3%)
+    zone_snap_min_pct: float = 3.0        # Min distance for zone snap (default, signal lev <75x)
+    zone_snap_min_pct_high: float = 2.0   # Zone snap min for signal lev 75x+ (tighter moves)
+    zone_snap_min_pct_ultra: float = 1.5  # Zone snap min for signal lev 100x+ (BTC/majors)
+    zone_snap_lev_high: int = 75          # Signal leverage threshold for "high" tier
+    zone_snap_lev_ultra: int = 100        # Signal leverage threshold for "ultra" tier
     zone_refresh_minutes: int = 15        # Refresh zones every 15min
     zone_candle_count: int = 100          # Candles to analyze for swing H/L
     zone_candle_interval: str = "15"      # 15min candles
+
+    # ── Neo Cloud + DCA interaction ──
+    # When Neo Cloud flips AFTER DCA filled: don't close immediately.
+    # Instead, tighten hard SL from 3% to 1.5% (from deepest DCA fill).
+    # This gives DCA recovery a fair chance while capping loss at ~3% equity.
+    # Set to 0 to disable (= always close immediately on Neo flip).
+    neo_dca_tight_sl_pct: float = 1.5  # Tightened SL after Neo flip + DCA
+
+    # ── Wick Spike Filter ──
+    # Skip signals triggered by a single abnormal wick (fake breakout / stop hunt).
+    # Compares the directional wick of the trigger candle (the candle right before
+    # the signal) against the median range of the preceding candles.
+    # Short signal → check lower wick (= min(open,close) - low)
+    # Long signal  → check upper wick (= high - max(open,close))
+    # If wick > multiplier * median_range → skip (spike, not real move).
+    wick_spike_filter: bool = True
+    wick_spike_multiplier: float = 1.5     # Wick must be >1.5x median range to skip
+    wick_spike_lookback: int = 6           # Candles to compute median range (excl. trigger)
+    wick_spike_candle_interval: str = "15" # Candle timeframe (match signal source)
+
+    # ── Extended Move Filter ──
+    # Skip signals where price has already moved too far in the signal direction.
+    # SHORT + price >X% below 24h-high → skip (extended down, bounce likely)
+    # LONG  + price >X% above 24h-low  → skip (extended up, pullback likely)
+    # Leverage-tiered: majors (100x+) need less % to be "extended".
+    extended_move_filter: bool = True
+    extended_move_pct: float = 8.0          # Default threshold (<75x signal leverage)
+    extended_move_pct_high: float = 6.0     # For signal leverage 75x+
+    extended_move_pct_ultra: float = 4.0    # For signal leverage 100x+
+    extended_move_lookback: str = "60"      # Kline interval ("60" = 1h candles)
+    extended_move_candles: int = 24         # 24 x 1h = 24h lookback
 
     # ── Filters ──
     min_leverage_signal: int = 0    # Skip signals below this leverage
@@ -165,6 +213,36 @@ class BotConfig:
         else:
             return entry_price * (1 + pct) * (1 + buf)
 
+    def get_zone_snap_min_pct(self, signal_leverage: int) -> float:
+        """Get zone snap minimum % based on signal leverage tier.
+
+        High-leverage signals (ETH, BTC) have tighter moves, so zone snap
+        minimum is reduced to allow snapping at closer support/resistance.
+        """
+        if signal_leverage >= self.zone_snap_lev_ultra:
+            return self.zone_snap_min_pct_ultra
+        if signal_leverage >= self.zone_snap_lev_high:
+            return self.zone_snap_min_pct_high
+        return self.zone_snap_min_pct
+
+    def get_zone_proximity_pct(self, signal_leverage: int) -> float:
+        """Get zone proximity threshold based on signal leverage.
+
+        <75x (volatile alts): 1% min distance from reversal zone
+        75x+ (majors): 0.5% min distance (tighter price action)
+        """
+        if signal_leverage >= self.zone_snap_lev_high:
+            return self.zone_proximity_pct_high
+        return self.zone_proximity_pct
+
+    def get_extended_move_pct(self, signal_leverage: int) -> float:
+        """Get extended move threshold based on signal leverage tier."""
+        if signal_leverage >= self.zone_snap_lev_ultra:
+            return self.extended_move_pct_ultra
+        if signal_leverage >= self.zone_snap_lev_high:
+            return self.extended_move_pct_high
+        return self.extended_move_pct
+
     def print_summary(self, equity: float = 2400):
         """Print configuration summary with example equity."""
         sm = self.sum_multipliers
@@ -208,8 +286,27 @@ class BotConfig:
         print(f"║  Safety SL:      Entry - {self.safety_sl_pct}% (pre-DCA)")
         print(f"║  Hard SL:        Avg - {self.hard_sl_pct}% (post-DCA)")
         print(f"║  Quick Trail:    +{self.dca_quick_trail_trigger_pct}% → SL=avg+{self.dca_quick_trail_buffer_pct}%")
-        print(f"║  Zone Snap:      {'ON (hybrid, min ' + str(self.zone_snap_min_pct) + '%)' if self.zone_snap_enabled else 'OFF'}")
-        print(f"║  Neo Cloud:      {'FILTER ON' if self.neo_cloud_filter else 'OFF'}")
+        snap_info = (f"ON ({self.zone_snap_min_pct}%/<{self.zone_snap_lev_high}x, "
+                     f"{self.zone_snap_min_pct_high}%/{self.zone_snap_lev_high}x+, "
+                     f"{self.zone_snap_min_pct_ultra}%/{self.zone_snap_lev_ultra}x+)")
+        print(f"║  Zone Snap:      {snap_info if self.zone_snap_enabled else 'OFF'}")
+        neo_info = f"FILTER ON (min gap {self.neo_min_gap_pct}%)" if self.neo_cloud_filter else "OFF"
+        print(f"║  Neo Cloud:      {neo_info}")
+        zone_info = (f"ON (in-zone + proximity {self.zone_proximity_pct}%/<{self.zone_snap_lev_high}x, "
+                     f"{self.zone_proximity_pct_high}%/{self.zone_snap_lev_high}x+)") if self.zone_filter_enabled else "OFF"
+        print(f"║  Zone Filter:    {zone_info}")
+        if self.extended_move_filter:
+            ext_info = (f"ON ({self.extended_move_pct}%/<{self.zone_snap_lev_high}x, "
+                        f"{self.extended_move_pct_high}%/{self.zone_snap_lev_high}x+, "
+                        f"{self.extended_move_pct_ultra}%/{self.zone_snap_lev_ultra}x+)")
+        else:
+            ext_info = "OFF"
+        print(f"║  Extended Move:  {ext_info}")
+        if self.wick_spike_filter:
+            wick_info = f"ON ({self.wick_spike_multiplier}x median, {self.wick_spike_lookback} candles, {self.wick_spike_candle_interval}m)"
+        else:
+            wick_info = "OFF"
+        print(f"║  Wick Spike:     {wick_info}")
         print(f"║  Testnet:        {'YES' if self.bybit_testnet else 'NO ⚠️  LIVE!'}")
         print(f"║")
         print(f"║  Levels (Long @ $100):")
@@ -241,6 +338,8 @@ def load_config() -> BotConfig:
         port=int(os.getenv("PORT", "8000")),
         telegram_notify_chat_id=os.getenv("TELEGRAM_NOTIFY_CHAT_ID", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        blocked_coins=[c.strip().upper().replace("USDT", "") for c in os.getenv("BLOCKED_COINS", "").split(",") if c.strip()],
+        allowed_coins=[c.strip().upper().replace("USDT", "") for c in os.getenv("ALLOWED_COINS", "").split(",") if c.strip()],
     )
     return config
 
