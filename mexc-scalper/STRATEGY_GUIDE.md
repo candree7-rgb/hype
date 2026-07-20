@@ -55,6 +55,15 @@ cheaper per-R but slower. Report `breakeven_wr` vs `wr` from the metrics.
 - No lookahead violations; positive in ≥ 60% of symbols; profit factor > 1.1 OOS
 - Stability: does not depend on one lucky day/coin (check per_symbol)
 
+## Performance tips
+
+- Vectorize `generate_signals` with pandas/numpy (boolean masks + `np.where`),
+  avoid per-row `.iloc` loops — 43k rows × 18 symbols adds up.
+- While iterating on params, test on a 5-6 symbol subset (`--symbols`); run all
+  18 only for the final numbers.
+- Don't emit a signal every minute — space entries (e.g. cooldown after each
+  signal) or your backtest drowns in overlapping trades.
+
 ## Honesty rules
 
 - Never tune on the OOS window. Tune on in-sample, report OOS untouched.
