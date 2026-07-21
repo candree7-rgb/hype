@@ -40,8 +40,40 @@ Nach **≥300 Fills** (~3–4 Wochen erwartet):
 
 Bestanden → Phase 2: Mikro-Live ($1–2k, 2% Risiko) mit dem
 `hyperliquid-python-sdk` (ALO/Post-Only-Entries, native Trigger-Stops,
-reduceOnly-Exits). Live-Order-Routing wird erst dann implementiert und gegen
-die Paper-Ergebnisse abgenommen — bewusst nicht vorher.
+reduceOnly-Exits). Das Live-Routing ist in `live.py` implementiert (gegen
+Mocks + Testnet verifiziert), wird aber erst nach bestandener Paper-Phase
+mit echtem Geld gefahren.
+
+## Live-Modus (`live.py`)
+
+```bash
+PAPER=false \
+HL_PRIVATE_KEY=0x...              # API-Wallet-Key (nie loggen, nie committen)
+HL_ACCOUNT_ADDRESS=0x...          # nur bei API/Agent-Wallet: Master-Adresse
+HL_TESTNET=true                   # erst Testnet! (routet REST+WS auf testnet)
+LIVE_ADOPT=close                  # untracked Venue-Positionen: close|adopt
+python3 main.py
+```
+
+Ausführung: Entry = ALO(post-only)-Limit mit deterministischer cloid aus
+(coin, signal_t) — idempotent über Restarts; TTL-Cancel über Candle-Close-Ticks
+(gleiche Uhr wie Paper). Bei Fill sofort TP (reduce-only GTC Limit) + SL
+(Trigger-Stop-Market, reduceOnly) in einem Batch; OCO wird selbst verwaltet.
+Partial Fills: Exits werden auf die tatsächlich gefüllte Größe umgesetzt.
+Time-Stop nach `max_hold_min` via `market_close` (IOC reduce-only). Sizing:
+equity×risk/sl_dist, szDecimals-gefloort, Preis 5 sig figs, min $10 Notional,
+isolierter Hebel min(20, Venue-Max) pro Coin beim Start.
+
+State-Quelle: WS `userFills`/`orderUpdates` (gleiche Verbindung wie Candles),
+plus REST-Reconciliation alle 60s (verpasste Fills per `userFillsByTime`,
+fehlende Exit-Legs werden nachplatziert, Venue-Flat ⇒ Trade finalisiert).
+Restart: Zustand in `state/live_state.json`, Boot-Reconcile adoptiert eigene
+Positionen; fremde Positionen werden je nach `LIVE_ADOPT` geschlossen.
+Overlay C2 + Kill-Switches wie Paper, zusätzlich Slippage-Kill: Ø gemessene
+SL-Slippage (ab 10 Stops) > 2× Modell (0.03%) ⇒ Halt. Jeder SL-Fill loggt
+`sl_slippage` (Trigger- vs. Fill-Preis) — DIE Zahl, auf die die Validierung
+wartet. Tests: `python3 -m pytest tests/ -q` (Mock-SDK mit
+signatur-identischen Methoden, 30 Tests).
 
 ## Risiko-Fahrplan (aus der Validierung)
 
