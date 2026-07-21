@@ -7,6 +7,12 @@ rolling quantile, shifted one bar). Rationale: vol begets cascades; HL fee
 drag is fatal exactly in quiet tape.
 
 24h realized vol proxy: rolling mean of |1m log return| over 1440 bars.
+
+NEGATIVE RESULT (2026-07-21): 4 IS variants (vol_q 0.5/0.667 x atr_min
+0/0.001). With the static gate the vol gate raises IS avg_r (+0.157 at
+q=0.5) but halves n (821 vs 1564) and loses ~90R of IS total — the atr_min
+gate already carries the regime information. Rejected on total_r before the
+holdout; kept as reference.
 """
 import sys
 from pathlib import Path

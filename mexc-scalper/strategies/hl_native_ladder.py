@@ -10,6 +10,12 @@ size-correct aggregation. Both rungs derive from the same shock and share the
 per-symbol cooldown by construction.
 
 Includes the frozen atr_min=0.001 quality gate from shock_hl_variant.
+
+NEGATIVE RESULT (2026-07-21): 10 IS variants (rung pairs 2.0-5.0, cooldown
+10/15/20, shock_atr 3.5/4.0). Best (2.5+4.5 cd=15) IS avg_r +0.1585 at
+eff_n 1461 — but a plain single rung at offset 2.5 matches/beats it at
+higher n (the ladder's far rung fills too rarely to earn its half of the
+size). Never advanced to the holdout; superseded by hl_native_shock_freq.
 """
 import sys
 from pathlib import Path

@@ -32,6 +32,33 @@ evidence; venue-native confirmation requires live/paper data collection.
 executor measuring real fills/slippage/frequency, then evidence-based capital
 split.
 
+## HL-native design search (2026-07-21) — new winner `hl_native_shock_freq`
+
+Systematic search for a Hyperliquid-designed variant (55 IS variants, 4
+families, IS = Jul25–Jan26 Binance 12mo @ HL base fees via engine_hl,
+holdout Feb–Jun26 opened once for 2 pre-selected finalists):
+
+- **Asymmetric TP (tp_over_sl 1.2/1.3/1.5): dead** — monotone worse; the
+  snapback amplitude is bounded, wider TPs just miss (1.5 goes negative).
+- **Two-rung ladders (2.0–5.0 ATR): no edge over best single rung** — the far
+  rung fills too rarely to earn its half of the size.
+- **5m shock detection, 1m execution: too rare on Binance paths** (best IS
+  +0.113 at n=216/7mo); untestable venue-native (3.5d HL data). Shelved.
+- **Vol-regime gate (24h RV top tercile): redundant with the atr_min gate** —
+  raises avg_r, halves n, loses on total R.
+- **Winner: frequency, not depth.** Per-trade edge is flat in offset (2.5–4.5
+  ATR, cliff below 2.5) and shock threshold — so at HL fees the right design
+  maximizes gated fills. `hl_native_shock_freq` = incumbent + shock_atr 3.5,
+  offset_atr 2.5, cooldown 15 (gate atr_min=0.001 kept, 1:1, sl=3 ATR).
+  **Holdout: n=2115, WR 62.6% (breakeven 56.3%), avg_r +0.133, +281R, PF
+  1.29, 5/5 months and 18/18 symbols positive, top coin 14.7% of R.** Vs
+  incumbent shock_hl_variant (+0.139, n=1233, +171R): equal per-trade edge
+  (Welch t=−0.16), 1.72x trades, +64% total R. Stress (holdout): 1.5x slip
+  +0.120/+254R; 2x slip +0.107/+227R; HL fee tier 1 +0.148/+313R. Lookahead
+  0. Caveat: shallower limits may see worse real-world adverse selection
+  than strict-trade-through modeling; incumbent avg_r ceiling (~0.14/trade)
+  was NOT beaten — the gain is throughput.
+
 ## Trade-level floor filter (verified, the single biggest improvement)
 
 Skip any signal where 3×ATR60/close < 0.30% (i.e. where the sl_floor would
@@ -66,6 +93,8 @@ floored at 0.3%). Adversarially verified on 12mo Binance:
   call: contract.mexc.com/api/v1/contract/detail (fees change — refresh live).
 
 
+
+## Original 30d research run (2026-07-20, MEXC data)
 
 Multi-agent research run: 20 ideas from 5 research personas → 9 implemented
 and backtested → adversarially verified → 1 confirmed winner, hardened.

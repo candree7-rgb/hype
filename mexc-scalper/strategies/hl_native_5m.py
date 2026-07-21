@@ -16,10 +16,13 @@ entry from the 5m ATR. Entries/exits are simulated on 1m for fill precision.
 The signal at 1m row i uses only rows <= i (the completed bucket ends at i);
 verified by the engine's truncation check.
 
-FROZEN CONFIG (2026-07-21): tuned on IS Jul-2025..Jan-2026 only (28 IS
-variants across shock_atr {3,3.5,4}, offset_atr {1.5,2,2.5,3}, atr_n {12,36},
-ttl {10,25}, sl_atr_mult {2,3}, atr_min5 {0,0.002}, cooldown {60,100}).
-Holdout Feb-Jun-2026 evaluated once at the end; see RESULTS notes.
+NEGATIVE RESULT (2026-07-21): 15 IS variants (Jul-2025..Jan-2026, Binance
+12mo, HL fees) across shock_atr {3,3.5,4} x offset_atr {2..3.5} x atr_n
+{12,36}. Best: sa=4.0 off=3.0 atr_n=12 -> IS avg_r +0.113 but only n=216
+over 7 months; frequency collapses long before the edge does (atr_n=36 adds
+n but kills avg_r). Never advanced to the holdout. The 5m aggregation idea
+may still matter on venue-native HL data (where 1m ATR compression bites),
+but it cannot be validated on Binance paths — kept as reference only.
 """
 import sys
 from pathlib import Path
