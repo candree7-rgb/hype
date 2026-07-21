@@ -11,6 +11,27 @@
 > Hyperliquid (thin positive), Bybit (~breakeven). This also explains why the
 > edge persists: API bots cannot profitably harvest it on MEXC.
 
+## Venue-native validation (2026-07-21)
+
+**Lighter (13 months of its own 1m candles, public API):** tradable universe is
+tiny — post-TGE alt books are ghost towns (PEPE median 1-min volume $0, XRP
+$84, ZEC $350; dead books are strongly NEGATIVE to trade, as on MEXC/ACE).
+Full-size tradable: BTC ($231k/min median), ETH ($76k); reduced: SOL, HYPE.
+On BTC+ETH the edge is venue-native REAL: **+0.106R, WR 62.1%, n=636 over 13
+months, 8/13 months positive** (config shock_lighter_v1, stop-limit exec,
+base slippage). Caveats: only ~49 trades/month, 2-coin concentration, stop
+recovery rate 58% venue-native vs 91% modeled on Binance paths.
+
+**Hyperliquid (3.5 days of own candles — API caps 1m history at ~5000):**
+ATR-gate config produced n=23 (statistically void); ungated −0.02R at HL base
+fees. The 12mo Binance holdout (+0.139R with gate) remains the best available
+evidence; venue-native confirmation requires live/paper data collection.
+
+**Conclusion:** Lighter = proven but small (BTC/ETH base income); Hyperliquid
+= larger potential, unproven venue-native. Next step is a dual-venue paper
+executor measuring real fills/slippage/frequency, then evidence-based capital
+split.
+
 ## Trade-level floor filter (verified, the single biggest improvement)
 
 Skip any signal where 3×ATR60/close < 0.30% (i.e. where the sl_floor would
