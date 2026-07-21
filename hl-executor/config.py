@@ -46,7 +46,14 @@ class Config:
     kill_min_fills: int = 200            # evaluate after this many fills
     kill_wr_threshold: float = 0.56      # stop if realized WR below breakeven
     kill_slippage_mult: float = 2.0      # stop if measured slippage > 2x model
-    kill_daily_loss_r: float = 20.0      # halt new entries after -20R day
+    kill_daily_loss_r: float = 20.0      # outer safety: halt after -20R day
+
+    # --- DD overlay C2 (adopted 2026-07-21, see RESULTS.md):
+    #     validated on 12mo: year DD 68->32R, holdout total +17% ---
+    breaker_r24: float = 6.0             # no new entries while trailing-24h realized PnL <= -6R
+    streak_k: int = 6                    # after 6 consecutive losses ...
+    streak_window_h: float = 6.0         # ... whose exits fall within 6h ...
+    streak_pause_h: float = 2.0          # ... pause new entries 2h
 
     # --- Universe: validated coins that exist on HL (HL naming) ---
     coins: tuple = (

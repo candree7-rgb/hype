@@ -59,6 +59,29 @@ holdout Feb–Jun26 opened once for 2 pre-selected finalists):
   than strict-trade-through modeling; incumbent avg_r ceiling (~0.14/trade)
   was NOT beaten — the gain is throughput.
 
+## DD overlay C2 (adopted 2026-07-21) — drawdown halved, returns up
+
+Forensics: the 68R max DD was a 17-day squeeze-rally window (Nov 17 – Dec 4,
+2025) — market-wide up-shocks got faded as "cascades" but were real trend
+(Nov 24: 30 of 34 trades short across coins while BTC rallied). Overlay study
+(dd_study_*.py; rules designed on IS which contains the event, holdout
+Feb–Jun26 evaluated once):
+
+- **REJECTED, counter-intuitively: BTC 4h trend veto.** Makes IS DD *worse* —
+  the same rallying regime also produces the strategy's snapback winners; the
+  Nov failure was not ex-ante separable by market momentum.
+- **ADOPTED C2:** (1) rolling-24h circuit breaker — no new entries (cancel
+  resting limits) while trailing-24h realized PnL ≤ −6R; (2) streak brake —
+  6 consecutive losses within 6h → pause entries 2h.
+- Effect (12mo, HL tier-0): **year max DD 68.3R → ~31R (−53%)**, total
+  +651R → ~+770R, WR 62.3% → 64.3%, holdout total **+17% better** (the loss-
+  clustering mechanism exists year-round, so skips are net-negative trades in
+  8/12 months). Nov window: −64.5R → ~−13R. Parameter plateau confirmed
+  (X∈4–8, K∈5–8 all strong). Residual ~31R DD is the price of the strategy.
+- Risk table with overlay (HL frequency, compounding): 1% risk → maxDD ~27%,
+  worst month −13%; 2% → ~48%, worst month −26%.
+- Implemented in hl-executor (breaker cancels resting limits when tripped).
+
 ## Trade-level floor filter (verified, the single biggest improvement)
 
 Skip any signal where 3×ATR60/close < 0.30% (i.e. where the sl_floor would

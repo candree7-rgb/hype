@@ -49,14 +49,36 @@ class PaperBroker:
     day_r: float = 0.0
     day_key: str = ""
     halted: str = ""     # non-empty = kill-switch reason
+    closed_r: list = field(default_factory=list)   # (exit_ts, r) for overlay rules
+    streak_pause_until: int = 0
 
     def __post_init__(self) -> None:
         Path(CFG.state_file).parent.mkdir(parents=True, exist_ok=True)
         self.log_path = Path(CFG.state_file).parent / "paper_trades.jsonl"
 
+    # ---------- DD overlay C2 (validated: year DD 68R -> 32R) ----------
+    def _overlay_blocked(self, now: int) -> str:
+        r24 = sum(r for ts, r in self.closed_r if now - ts <= 86400)
+        if r24 <= -CFG.breaker_r24:
+            return f"breaker_24h ({r24:.1f}R)"
+        if now < self.streak_pause_until:
+            return "streak_pause"
+        return ""
+
+    def _update_streak(self, exit_ts: int) -> None:
+        last = self.closed_r[-CFG.streak_k:]
+        if len(last) == CFG.streak_k and all(r <= 0 for _, r in last) \
+                and exit_ts - last[0][0] <= CFG.streak_window_h * 3600:
+            self.streak_pause_until = exit_ts + int(CFG.streak_pause_h * 3600)
+            self._log("streak_brake", pause_until=self.streak_pause_until)
+
     # ---------- lifecycle ----------
     def place(self, sig: EntrySignal, notional: float) -> None:
         if self.halted:
+            return
+        blocked = self._overlay_blocked(sig.signal_t)
+        if blocked:
+            self._log("skip_overlay", coin=sig.coin, reason=blocked)
             return
         if len(self.positions) + len(self.pending) >= CFG.max_concurrent:
             self._log("skip_concurrency", coin=sig.coin)
@@ -71,6 +93,12 @@ class PaperBroker:
 
     def on_closed_candle(self, coin: str, c: Candle) -> None:
         self._roll_day(c.t)
+        # overlay tripped -> cancel resting entry limits (study caveat: skipping
+        # their fills is exactly what was modeled)
+        if self.pending and self._overlay_blocked(c.t):
+            for o in self.pending:
+                self._log("entry_cancelled_overlay", coin=o.coin)
+            self.pending = []
         # 1) resolve open position on this coin
         pos = self.positions.get(coin)
         if pos is not None:
@@ -132,6 +160,9 @@ class PaperBroker:
         self.day_r += r
         if r > 0:
             self.wins += 1
+        self.closed_r.append((t, r))
+        self.closed_r = [(ts, x) for ts, x in self.closed_r if t - ts <= 2 * 86400]
+        self._update_streak(t)
         del self.positions[pos.coin]
         self._log("closed", coin=pos.coin, side=pos.side, outcome=outcome,
                   entry=pos.entry, exit=px, r=round(r, 4), pnl=round(pnl, 4),
