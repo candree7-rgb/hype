@@ -73,11 +73,28 @@ Overlay C2 + Kill-Switches wie Paper, zusätzlich Slippage-Kill: Ø gemessene
 SL-Slippage (ab 10 Stops) > 2× Modell (0.03%) ⇒ Halt. Jeder SL-Fill loggt
 `sl_slippage` (Trigger- vs. Fill-Preis) — DIE Zahl, auf die die Validierung
 wartet. Tests: `python3 -m pytest tests/ -q` (Mock-SDK mit
-signatur-identischen Methoden, 30 Tests).
+signatur-identischen Methoden; `tests/test_risk.py` prüft Sizing/Rounding/
+Margin gegen einen Mainnet-Meta-Snapshot, 49 Tests + 2 dokumentierte xfails).
 
-## Risiko-Fahrplan (aus der Validierung)
+## Risiko-Fahrplan (aus der Validierung, MIT DD-Overlay C2)
 
-- 2% Risiko/Trade bis ~$20k Equity (erwarteter Max-DD ~57%, schlechtester
-  Backtest-Monat −28%)
-- ab $20k auf 1% schalten (Max-DD ~34%)
+Zahlen aus RESULTS.md nach Adoption des DD-Overlays (24h-Breaker −6R +
+Streak-Brake), 12mo HL-Frequenz, compounding:
+
+| Risiko/Trade | erwarteter Max-DD | schlechtester Monat |
+|---|---|---|
+| 2% | ~48% | ~−26% |
+| 1% | ~27% | ~−13% |
+
+- 2% Risiko/Trade in der Mikro-Live-Phase, ab ~$20k auf 1% schalten
 - Fee-Tiers verbessern sich automatisch: Tier 1 ab ~$4k, Tier 2 ab ~$15–20k
+
+**Margin-Realität (Mainnet-Meta, 2026-07-21):** 13 der 18 Coins haben
+Venue-Max **10x** (HYPE, ZEC, kPEPE, AVAX, DOGE, SUI, NEAR, WLD, PUMP, LTC,
+BNB, ADA, LINK), **TAO nur 5x**; nur BTC/ETH/SOL/XRP erlauben ≥20x. Bei 2%
+Risiko und typischem SL 0.35% ist die Notional ~5.7× Equity ⇒ isolierte
+Margin pro Position ~57% Equity (10x-Coin) bzw. ~114% (TAO ⇒ nicht
+platzierbar). Effektiv passen bei engen Stops nur 1–2 gleichzeitige
+Positionen ins 0.8-Margin-Budget — unabhängig von der Kontogröße. Der
+Margin-Check in `main._size` rechnet derzeit flach mit `leverage_cap=20`
+und unterschätzt das (siehe `tests/test_risk.py`, xfail F1).
