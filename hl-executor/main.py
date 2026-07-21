@@ -1,11 +1,15 @@
-"""Hyperliquid executor — paper mode.
+"""Hyperliquid executor — paper (default) or live.
 
 Subscribes to 1m candles for the validated universe over the public
 Hyperliquid websocket, runs the frozen hl_native_shock_freq signal engine,
-simulates fills with backtest-identical rules (paper broker), records every
-closed candle to build venue-native history, and serves a /status endpoint.
+records every closed candle to build venue-native history, and serves a
+/status endpoint.
 
-Run: python3 main.py   (PAPER=true is the default; no keys needed)
+Paper (default): simulates fills with backtest-identical rules. No keys.
+    python3 main.py
+Live: routes real orders via the hyperliquid-python-sdk (see live.py).
+    PAPER=false HL_PRIVATE_KEY=0x... [HL_ACCOUNT_ADDRESS=0x...] \
+    [HL_TESTNET=true] python3 main.py
 """
 from __future__ import annotations
 
@@ -39,7 +43,11 @@ class Recorder:
 class Executor:
     def __init__(self) -> None:
         self.engine = SignalEngine()
-        self.broker = PaperBroker()
+        if CFG.paper:
+            self.broker = PaperBroker()
+        else:
+            from live import LiveBroker   # lazy: SDK only needed for live
+            self.broker = LiveBroker()
         self.recorder = Recorder()
         self.current: dict[str, Candle] = {}   # forming candle per coin
         self.started = time.time()
@@ -73,8 +81,11 @@ class Executor:
             return 0.0
         return notional
 
-    # ---------- persistence ----------
+    # ---------- persistence (paper only; LiveBroker persists itself) ----------
     def _save_state(self) -> None:
+        if not CFG.paper:
+            self.broker.save_state()
+            return
         p = Path(CFG.state_file)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"equity": self.broker.equity,
@@ -83,6 +94,8 @@ class Executor:
                                  "halted": self.broker.halted}))
 
     def _load_state(self) -> None:
+        if not CFG.paper:
+            return
         p = Path(CFG.state_file)
         if p.exists():
             s = json.loads(p.read_text())
@@ -101,11 +114,22 @@ class Executor:
                             "method": "subscribe",
                             "subscription": {"type": "candle", "coin": coin,
                                              "interval": "1m"}}))
+                    if not CFG.paper:
+                        for sub_type in ("userFills", "orderUpdates"):
+                            await ws.send(json.dumps({
+                                "method": "subscribe",
+                                "subscription": {"type": sub_type,
+                                                 "user": self.broker.address}}))
                     print(f"subscribed to {len(CFG.coins)} coins", flush=True)
                     async for raw in ws:
                         msg = json.loads(raw)
-                        if msg.get("channel") == "candle":
+                        ch = msg.get("channel")
+                        if ch == "candle":
                             self.on_candle_update(msg["data"])
+                        elif ch == "userFills" and not CFG.paper:
+                            self.broker.on_user_fills(msg["data"])
+                        elif ch == "orderUpdates" and not CFG.paper:
+                            self.broker.on_order_updates(msg["data"])
             except Exception as e:
                 print(f"ws error: {e!r}; reconnecting in 5s", flush=True)
                 await asyncio.sleep(5)
@@ -113,6 +137,11 @@ class Executor:
     async def housekeeping_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
+            if not CFG.paper:
+                try:   # REST reconciliation fallback (blocking SDK -> thread)
+                    await asyncio.to_thread(self.broker.reconcile)
+                except Exception as e:
+                    print(f"reconcile error: {e!r}", flush=True)
             self._save_state()
             snap = self.broker.snapshot()
             print(f"[{time.strftime('%H:%M')}] eq={snap['equity']} fills={snap['fills']} "
@@ -136,11 +165,9 @@ class Executor:
 
 
 async def main() -> None:
-    if not CFG.paper:
-        raise SystemExit("Live mode not enabled in this build — run PAPER=true. "
-                         "Live order routing ships after the paper phase validates "
-                         "fill rates and slippage (see README).")
     ex = Executor()
+    print(f"mode={'paper' if CFG.paper else 'LIVE'}"
+          f"{' (testnet)' if CFG.hl_testnet else ''}", flush=True)
     await asyncio.gather(ex.ws_loop(), ex.housekeeping_loop(), ex.status_server())
 
 

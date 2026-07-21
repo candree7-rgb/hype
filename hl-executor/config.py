@@ -18,6 +18,11 @@ class Config:
     # --- Mode ---
     paper: bool = field(default_factory=lambda: _flag("PAPER", "true"))
     # Live trading additionally requires HL_PRIVATE_KEY + PAPER=false.
+    # (The key itself is read ONLY inside live.LiveBroker._make_clients.)
+    hl_testnet: bool = field(default_factory=lambda: _flag("HL_TESTNET", "false"))
+    hl_account_address: str = os.getenv("HL_ACCOUNT_ADDRESS", "")  # master addr when key is an API/agent wallet
+    live_adopt: str = os.getenv("LIVE_ADOPT", "close")  # untracked venue positions on reconcile: "close" | "adopt"
+    min_notional: float = 10.0          # HL minimum order value (USD)
 
     # --- Strategy (frozen: hl_native_shock_freq) ---
     shock_atr: float = 3.5      # candle range must exceed this multiple of ATR60
@@ -61,9 +66,13 @@ class Config:
         "DOGE", "SUI", "NEAR", "WLD", "PUMP", "LTC", "BNB", "ADA", "LINK",
     )
 
-    # --- Infra ---
-    ws_url: str = "wss://api.hyperliquid.xyz/ws"
-    info_url: str = "https://api.hyperliquid.xyz/info"
+    # --- Infra (testnet routing when HL_TESTNET=true) ---
+    ws_url: str = field(default_factory=lambda: (
+        "wss://api.hyperliquid-testnet.xyz/ws"
+        if _flag("HL_TESTNET", "false") else "wss://api.hyperliquid.xyz/ws"))
+    info_url: str = field(default_factory=lambda: (
+        "https://api.hyperliquid-testnet.xyz/info"
+        if _flag("HL_TESTNET", "false") else "https://api.hyperliquid.xyz/info"))
     state_file: str = os.getenv("STATE_FILE", "state/executor_state.json")
     record_dir: str = os.getenv("RECORD_DIR", "state/candles")
     port: int = int(os.getenv("PORT", "8000"))
