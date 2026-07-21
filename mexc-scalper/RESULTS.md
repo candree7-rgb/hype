@@ -31,6 +31,24 @@ slippage may exceed the 2× model; at 3× the edge thins to ~+0.08R but stays
 positive. Recommendation: deploy small with a kill-switch (stop if realized WR
 after ~100 fills < breakeven).
 
+## 12-month cross-venue validation (Binance data, MEXC cost model)
+
+Same strategy, unchanged params, 12 months of Binance USDT-M Min1 data
+(Jul 2025 – Jun 2026, same 18 coins, `download_binance.py` + `validate_binance.py`):
+
+- **5,421 trades, WR 58.1%** vs breakeven 53.3%, avg +0.103R, PF 1.22
+- **Positive in 10 of 12 months**; the two others ~flat (Sep-25 +3R, May-26 −4R),
+  never a blow-up month; monthly WR range 53.5–60.5%
+- 17/18 symbols positive over the year. The exception is **BTC (−72R,
+  WR 48.7%)** — mechanically plausible: Binance BTC is the deepest book in
+  crypto, overshoots get absorbed before they reach a 3-ATR limit. The edge
+  lives on thin books. (On MEXC's 30d, BTC was positive — MEXC's BTC book is
+  thinner; monitor it live rather than excluding it a priori.)
+- Note: viability depends on 0% maker. With Binance's own fees (0.02% maker /
+  0.05% taker) the per-trade edge of ~+0.10R would shrink by ~0.11–0.19R —
+  i.e. the strategy is NOT profitable on Binance itself. That asymmetry is
+  plausibly why the inefficiency persists.
+
 ## Rejected in adversarial review (passed numerically, failed scrutiny)
 
 - `breadth_flush_catch` — cross-symbol breadth-gated deep fades; verifier rejected
