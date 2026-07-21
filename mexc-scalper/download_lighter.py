@@ -56,34 +56,23 @@ def download(mid: int, name: str) -> pd.DataFrame:
         end = min(cursor + step, now)
         d = get(f"{BASE}/candles?market_id={mid}&resolution=1m"
                 f"&start_timestamp={cursor}&end_timestamp={end}&count_back=500")
-        c = d.get("candlesticks") or d.get("candles") or []
+        c = d.get("c") or []  # candle array lives under key "c"; t is ms
         if c:
             frames.append(pd.DataFrame(c))
-            last_t = int(c[-1]["timestamp"] if "timestamp" in c[-1] else c[-1]["t"])
-            last_s = last_t // 1000 if last_t > 10**12 else last_t
-            cursor = max(last_s + 60, cursor + step)
+            cursor = max(int(c[-1]["t"]) // 1000 + 60, cursor + step)
         else:
             cursor = end
         time.sleep(0.12)
     if not frames:
         return pd.DataFrame()
     df = pd.concat(frames)
-    tcol = "timestamp" if "timestamp" in df.columns else "t"
-    ts = df[tcol].astype("int64")
-    ts = (ts // 1000).where(ts > 10**12, ts)
-    ren = {"open": "open", "high": "high", "low": "low", "close": "close"}
-    for a, b in (("o", "open"), ("h", "high"), ("l", "low"), ("c", "close")):
-        if a in df.columns:
-            ren[a] = b
-    out = pd.DataFrame({"time": ts.astype("int64")})
-    for src, dst in ren.items():
-        if src in df.columns:
-            out[dst] = df[src].astype(float)
-    vol = df["v"] if "v" in df.columns else df.get("base_volume", df.get("volume"))
-    quote = df["V"] if "V" in df.columns else df.get("quote_volume")
-    out["vol"] = pd.to_numeric(vol, errors="coerce")
-    out["amount"] = (pd.to_numeric(quote, errors="coerce")
-                     if quote is not None else out["vol"] * out["close"])
+    out = pd.DataFrame({
+        "time": (df["t"].astype("int64") // 1000),
+        "open": df["o"].astype(float), "high": df["h"].astype(float),
+        "low": df["l"].astype(float), "close": df["c"].astype(float),
+        "vol": pd.to_numeric(df["v"], errors="coerce"),
+        "amount": pd.to_numeric(df["V"], errors="coerce"),  # V = quote (USD) volume
+    })
     out = out.drop_duplicates("time").sort_values("time").reset_index(drop=True)
     out["dt"] = pd.to_datetime(out["time"], unit="s", utc=True)
     return out
