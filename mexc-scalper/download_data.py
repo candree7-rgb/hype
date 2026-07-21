@@ -76,10 +76,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--interval", default="Min1")
+    ap.add_argument("--symbols", default=None, help="comma-separated override")
     args = ap.parse_args()
+    global SYMBOLS
+    if args.symbols:
+        SYMBOLS = args.symbols.split(",")
 
     DATA_DIR.mkdir(exist_ok=True)
-    meta = {}
+    meta_file = DATA_DIR / "contracts.json"
+    meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
     for sym in SYMBOLS:
         out = DATA_DIR / f"{sym}_{args.interval}.parquet"
         detail = contract_detail(sym)
@@ -96,7 +101,7 @@ def main():
               f"({df['dt'].iloc[0]} .. {df['dt'].iloc[-1]}) "
               f"maker={detail['makerFeeRate']} taker={detail['takerFeeRate']} "
               f"maxLev={detail['maxLeverage']}", flush=True)
-    (DATA_DIR / "contracts.json").write_text(json.dumps(meta, indent=2))
+    meta_file.write_text(json.dumps(meta, indent=2))
     print("done")
 
 
