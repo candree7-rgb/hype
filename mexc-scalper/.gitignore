@@ -3,3 +3,5 @@ data_binance/
 __pycache__/
 results/
 data_binance/
+data_lighter/
+data_hl/
