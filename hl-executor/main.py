@@ -14,7 +14,9 @@ Live: routes real orders via the hyperliquid-python-sdk (see live.py).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -68,18 +70,23 @@ class Executor:
         self.broker.on_closed_candle(coin, c)
         sig = self.engine.on_closed_candle(coin, c)
         if sig is not None:
-            notional = self._size(sig.sl_dist)
+            notional = self._size(coin, sig.sl_dist)
             if notional > 0:
                 self.broker.place(sig, notional)
 
-    def _size(self, sl_dist: float) -> float:
-        eq = self.broker.equity
-        notional = eq * CFG.risk_per_trade / sl_dist
-        # margin budget check (leverage_cap; venue max per coin is >= 10 for universe)
-        used = sum(p.notional for p in self.broker.positions.values()) / CFG.leverage_cap
-        if used + notional / CFG.leverage_cap > CFG.margin_budget * eq:
-            return 0.0
-        return notional
+    def _size(self, coin: str, sl_dist: float) -> float:
+        # LiveBroker's positions/equity are also mutated by the reconcile
+        # thread — read them under its lock. PaperBroker has no lock (no-op).
+        lock = getattr(self.broker, "_lock", None) or contextlib.nullcontext()
+        with lock:
+            eq = self.broker.equity
+            notional = eq * CFG.risk_per_trade / sl_dist
+            # margin budget with PER-COIN venue leverage (13/18 coins cap at
+            # 10x, TAO at 5x) and resting entry limits counted (F1/F4)
+            used = self.broker.margin_used()
+            if used + notional / self.broker.eff_leverage(coin) > CFG.margin_budget * eq:
+                return 0.0
+            return notional
 
     # ---------- persistence (paper only; LiveBroker persists itself) ----------
     def _save_state(self) -> None:
@@ -88,21 +95,36 @@ class Executor:
             return
         p = Path(CFG.state_file)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"equity": self.broker.equity,
-                                 "fills": self.broker.fills,
-                                 "wins": self.broker.wins,
-                                 "halted": self.broker.halted}))
+        # F2: persist overlay/kill state so redeploys don't reset the 24h
+        # breaker, streak pause, or daily loss counter. Atomic replace.
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"equity": self.broker.equity,
+                                   "fills": self.broker.fills,
+                                   "wins": self.broker.wins,
+                                   "halted": self.broker.halted,
+                                   "closed_r": self.broker.closed_r,
+                                   "streak_pause_until": self.broker.streak_pause_until,
+                                   "day_r": self.broker.day_r,
+                                   "day_key": self.broker.day_key}))
+        os.replace(tmp, p)
 
     def _load_state(self) -> None:
         if not CFG.paper:
             return
         p = Path(CFG.state_file)
         if p.exists():
-            s = json.loads(p.read_text())
+            try:
+                s = json.loads(p.read_text())
+            except ValueError:
+                return
             self.broker.equity = s.get("equity", self.broker.equity)
             self.broker.fills = s.get("fills", 0)
             self.broker.wins = s.get("wins", 0)
             self.broker.halted = s.get("halted", "")
+            self.broker.closed_r = [tuple(x) for x in s.get("closed_r", [])]
+            self.broker.streak_pause_until = s.get("streak_pause_until", 0)
+            self.broker.day_r = s.get("day_r", 0.0)
+            self.broker.day_key = s.get("day_key", "")
 
     # ---------- loops ----------
     async def ws_loop(self) -> None:

@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -121,8 +122,11 @@ class LiveBroker:
         self.equity: float = 0.0
         self.entries: dict[str, LiveEntry] = {}       # cloid -> entry
         self.positions: dict[str, LivePosition] = {}  # coin -> position
+
         self.oid_role: dict[int, tuple[str, str, str]] = {}  # oid -> (role, coin, cloid)
-        self.seen_tids: set[int] = set()
+        # insertion-ordered so trimming keeps the MOST RECENT tids (a set's
+        # arbitrary order could evict just-seen tids -> reconcile re-ingests)
+        self.seen_tids: dict[int, None] = {}
         self.fill_watermark_ms: int = int(time.time() * 1000) - 60_000
         self.fills = 0
         self.wins = 0
@@ -140,6 +144,19 @@ class LiveBroker:
             self.reconcile()              # restart recovery
         except Exception as e:
             self._log("boot_reconcile_error", error=repr(e))
+
+    # -------------------------------------------------- margin model (F1/F4)
+    def eff_leverage(self, coin: str) -> int:
+        return min(CFG.leverage_cap, self.max_leverage.get(coin, CFG.leverage_cap))
+
+    def margin_used(self) -> float:
+        """Isolated margin committed: open positions + resting entry limits.
+        Caller must hold self._lock."""
+        used = sum(p.notional / self.eff_leverage(p.coin)
+                   for p in self.positions.values())
+        used += sum(e.notional / self.eff_leverage(e.coin)
+                    for e in self.entries.values() if e.status == "resting")
+        return used
 
     # ------------------------------------------------------------ clients
     @staticmethod
@@ -235,9 +252,15 @@ class LiveBroker:
             self._log("skip_min_notional", coin=sig.coin, notional=round(sz * px, 2))
             return
         cloid = make_cloid(sig.coin, sig.signal_t, "entry")
-        resp = self.exchange.order(
-            sig.coin, sig.side == "long", sz, px, ALO,
-            reduce_only=False, cloid=self._cloid(cloid))
+        try:
+            resp = self.exchange.order(
+                sig.coin, sig.side == "long", sz, px, ALO,
+                reduce_only=False, cloid=self._cloid(cloid))
+        except Exception as ex:
+            # Timeout may still have placed the order on the venue; the
+            # reconcile untracked-order sweep cancels it within 60s.
+            self._log("entry_error", coin=sig.coin, error=repr(ex))
+            return
         status, err = self._first_status(resp)
         if err or status is None:
             self._log("entry_error", coin=sig.coin, error=err or "no status")
@@ -287,13 +310,15 @@ class LiveBroker:
         except Exception as ex:
             self._log("cancel_error", coin=e.coin, oid=e.oid, error=repr(ex))
         e.status = "cancelled"
-        if e.filled_sz <= 0:
-            self.entries.pop(e.cloid, None)   # keep partially-filled for audit
+        # Keep the record: a fill can race the cancel (filled on venue, event
+        # in flight) and must still open a MANAGED position with exits.
+        # Stale cancelled records are pruned by reconcile after a grace window.
         self._log(reason, coin=e.coin, oid=e.oid, filled_sz=e.filled_sz)
 
     def _time_stop(self, pos: LivePosition) -> None:
         pos.closing = True
         self._cancel_exits(pos)
+        pos.exit_seq += 1               # unique cloid per close attempt
         cloid = make_cloid(pos.coin, pos.signal_t, "time", pos.exit_seq)
         try:
             resp = self.exchange.market_close(pos.coin, cloid=self._cloid(cloid))
@@ -309,6 +334,12 @@ class LiveBroker:
             oid = status["resting"]["oid"]
         if oid is not None:
             self.oid_role[oid] = ("time", pos.coin, cloid)
+        else:
+            # IOC rejected / no response / venue already flat. Exits are
+            # already cancelled — a stuck closing=True would leave the
+            # position unprotected forever (candle ticks AND reconcile skip
+            # closing positions). Clear the flag so both paths retry.
+            pos.closing = False
         self._log("time_stop_sent", coin=pos.coin, oid=oid,
                   error=(err or (status or {}).get("error")))
 
@@ -325,9 +356,9 @@ class LiveBroker:
         if tid is not None:
             if tid in self.seen_tids:
                 return
-            self.seen_tids.add(tid)
-            if len(self.seen_tids) > 20000:
-                self.seen_tids = set(list(self.seen_tids)[-5000:])
+            self.seen_tids[tid] = None
+            if len(self.seen_tids) > 20000:   # keep newest by insertion order
+                self.seen_tids = dict.fromkeys(list(self.seen_tids)[-5000:])
         self.fill_watermark_ms = max(self.fill_watermark_ms, int(f.get("time", 0)))
         role = self.oid_role.get(f["oid"])
         if role is None:
@@ -356,9 +387,7 @@ class LiveBroker:
                 if kind == "entry" and st in ("canceled", "marginCanceled", "rejected"):
                     e = self.entries.get(cloid)
                     if e is not None and e.status == "resting":
-                        e.status = "cancelled"
-                        if e.filled_sz <= 0:
-                            self.entries.pop(cloid, None)
+                        e.status = "cancelled"   # record kept for fill races
                         self._log("entry_cancelled_venue", coin=coin, status=st)
 
     # ------------------------------------------------------------ fills
@@ -545,12 +574,12 @@ class LiveBroker:
                          for p in st.get("assetPositions", [])
                          if float(p["position"]["szi"]) != 0}
             # 2) tracked resting entries that vanished without a fill
+            #    (record kept: the "vanished" order may in fact have filled
+            #    between the fills fetch and the open-orders fetch)
             for e in list(self.entries.values()):
                 if e.status == "resting" and e.oid is not None \
                         and e.oid not in open_oids:
                     e.status = "cancelled"
-                    if e.filled_sz <= 0:
-                        self.entries.pop(e.cloid, None)
                     self._log("entry_gone_on_venue", coin=e.coin, oid=e.oid)
             # 3) tracked positions
             for coin, pos in list(self.positions.items()):
@@ -560,7 +589,14 @@ class LiveBroker:
                     self._log("reconcile_force_close", coin=coin,
                               realized=pos.realized_pnl)
                     self._finalize(pos, int(time.time()))
-                elif not pos.closing:
+                elif pos.closing:
+                    # close in flight but venue still shows the position
+                    # (partial IOC fill or lost close): re-fire the
+                    # reduce-only close — idempotent, caps at position size.
+                    self._log("reconcile_reclose", coin=coin,
+                              szi=venue_pos[coin])
+                    self._time_stop(pos)
+                else:
                     # ensure both exit legs still rest
                     tp_ok = pos.tp_oid in open_oids
                     sl_ok = pos.sl_oid in open_oids
@@ -589,6 +625,12 @@ class LiveBroker:
                             self.exchange.cancel(o["coin"], o["oid"])
                         except Exception as e:
                             self._log("untracked_cancel_error", oid=o["oid"], error=repr(e))
+            # 6) prune entry records kept for the cancel/fill race grace
+            now = int(time.time())
+            for cl, e in list(self.entries.items()):
+                if e.status == "cancelled" and e.filled_sz <= 0 \
+                        and now > e.expires_t + 900:
+                    self.entries.pop(cl, None)
             self.save_state()
 
     # ------------------------------------------------------------ persistence
@@ -605,7 +647,11 @@ class LiveBroker:
             "fill_watermark_ms": self.fill_watermark_ms,
             "seen_tids": list(self.seen_tids)[-5000:],
         }
-        self.state_path.write_text(json.dumps(s))
+        # atomic: a crash mid-write must never corrupt the state file
+        # (corrupt state => positions look untracked on restart => closed)
+        tmp = self.state_path.with_name(self.state_path.name + ".tmp")
+        tmp.write_text(json.dumps(s))
+        os.replace(tmp, self.state_path)
 
     def _load_state(self) -> None:
         if not self.state_path.exists():
@@ -627,7 +673,7 @@ class LiveBroker:
         self.streak_pause_until = s.get("streak_pause_until", 0)
         self.sl_slips = s.get("sl_slips", [])
         self.fill_watermark_ms = s.get("fill_watermark_ms", self.fill_watermark_ms)
-        self.seen_tids = set(s.get("seen_tids", []))
+        self.seen_tids = dict.fromkeys(s.get("seen_tids", []))
 
     # ------------------------------------------------------------ helpers/io
     @staticmethod

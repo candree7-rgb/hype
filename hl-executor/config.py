@@ -70,9 +70,8 @@ class Config:
     ws_url: str = field(default_factory=lambda: (
         "wss://api.hyperliquid-testnet.xyz/ws"
         if _flag("HL_TESTNET", "false") else "wss://api.hyperliquid.xyz/ws"))
-    info_url: str = field(default_factory=lambda: (
-        "https://api.hyperliquid-testnet.xyz/info"
-        if _flag("HL_TESTNET", "false") else "https://api.hyperliquid.xyz/info"))
+    # (REST base URL comes from the SDK constants in live._make_clients —
+    #  no separate info_url here so testnet routing can't half-switch.)
     state_file: str = os.getenv("STATE_FILE", "state/executor_state.json")
     record_dir: str = os.getenv("RECORD_DIR", "state/candles")
     port: int = int(os.getenv("PORT", "8000"))

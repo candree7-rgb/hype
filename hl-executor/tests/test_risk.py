@@ -214,11 +214,8 @@ def test_real_concurrency_limit_is_below_max_concurrent():
         assert fit < CFG.max_concurrent
 
 
-@pytest.mark.xfail(reason="F1: main._size uses CFG.leverage_cap flat; it "
-                          "approves positions whose true isolated margin on "
-                          "10x/5x coins exceeds the budget (venue will reject "
-                          "them live; paper takes them)", strict=True)
 def test_size_margin_check_respects_venue_leverage(tmp_path, monkeypatch):
+    """F1 fixed: per-coin venue leverage in the margin model."""
     monkeypatch.setattr(CFG, "state_file", str(tmp_path / "state.json"))
     monkeypatch.setattr(CFG, "record_dir", str(tmp_path / "candles"))
     monkeypatch.setattr(CFG, "paper", True)
@@ -226,15 +223,18 @@ def test_size_margin_check_respects_venue_leverage(tmp_path, monkeypatch):
     ex = Executor()
     ex.broker.equity = 1000.0
     # sl=0.35% -> notional 5714; on a 10x coin the true margin is 571 (57% of
-    # equity). A correct check would leave room for at most one such position
-    # inside the 0.8 budget; the flat model books 286 and allows a second.
-    n1 = ex._size(0.0035)
+    # equity). A leverage-aware check leaves room for at most one such
+    # position inside the 0.8 budget.
+    n1 = ex._size("HYPE", 0.0035)
     assert n1 > 0
     from types import SimpleNamespace
-    ex.broker.positions["HYPE"] = SimpleNamespace(notional=n1)
-    n2 = ex._size(0.0035)
-    # True margin for two = 1.14x equity -> a leverage-aware check must refuse.
+    ex.broker.positions["HYPE"] = SimpleNamespace(notional=n1, coin="HYPE")
+    n2 = ex._size("DOGE", 0.0035)
+    # True margin for two = 1.14x equity -> refused.
     assert n2 == 0.0
+    # TAO (5x): a single 2%-risk position at tight stops exceeds the budget alone
+    ex.broker.positions.clear()
+    assert ex._size("TAO", 0.0035) == 0.0
 
 
 def test_update_leverage_never_exceeds_venue_max(tmp_path, monkeypatch):
@@ -395,11 +395,8 @@ def test_live_overlay_and_halt_state_survive_restart(tmp_path, monkeypatch):
     assert b2._overlay_blocked(T0 + 120).startswith("breaker_24h")
 
 
-@pytest.mark.xfail(reason="F2: main._save_state/_load_state (paper mode) drop "
-                          "closed_r, streak_pause_until and day_r — a restart "
-                          "clears the 24h breaker, streak pause and daily -20R "
-                          "counter in the paper phase", strict=True)
 def test_paper_overlay_state_survives_restart(tmp_path, monkeypatch):
+    """F2 fixed: paper save/load persists overlay + daily-loss state."""
     monkeypatch.setattr(CFG, "state_file", str(tmp_path / "state.json"))
     monkeypatch.setattr(CFG, "record_dir", str(tmp_path / "candles"))
     monkeypatch.setattr(CFG, "paper", True)

@@ -13,6 +13,15 @@ from pathlib import Path
 from config import CFG
 from strategy import Candle, EntrySignal
 
+# Mainnet maxLeverage snapshot (2026-07-21) so paper enforces the same margin
+# reality as live (F1): 13/18 coins cap at 10x, TAO at 5x.
+MAX_LEVERAGE = {
+    "BTC": 40, "ETH": 25, "SOL": 20, "XRP": 20, "TAO": 5,
+    "HYPE": 10, "ZEC": 10, "kPEPE": 10, "AVAX": 10, "DOGE": 10, "SUI": 10,
+    "NEAR": 10, "WLD": 10, "PUMP": 10, "LTC": 10, "BNB": 10, "ADA": 10,
+    "LINK": 10,
+}
+
 
 @dataclass
 class PendingOrder:
@@ -55,6 +64,15 @@ class PaperBroker:
     def __post_init__(self) -> None:
         Path(CFG.state_file).parent.mkdir(parents=True, exist_ok=True)
         self.log_path = Path(CFG.state_file).parent / "paper_trades.jsonl"
+
+    # ---------- margin model (F1/F4: per-coin venue leverage, resting orders count) ----------
+    def eff_leverage(self, coin: str) -> int:
+        return min(CFG.leverage_cap, MAX_LEVERAGE.get(coin, CFG.leverage_cap))
+
+    def margin_used(self) -> float:
+        used = sum(p.notional / self.eff_leverage(p.coin) for p in self.positions.values())
+        used += sum(o.notional / self.eff_leverage(o.coin) for o in self.pending)
+        return used
 
     # ---------- DD overlay C2 (validated: year DD 68R -> 32R) ----------
     def _overlay_blocked(self, now: int) -> str:

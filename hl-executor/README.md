@@ -74,7 +74,7 @@ SL-Slippage (ab 10 Stops) > 2× Modell (0.03%) ⇒ Halt. Jeder SL-Fill loggt
 `sl_slippage` (Trigger- vs. Fill-Preis) — DIE Zahl, auf die die Validierung
 wartet. Tests: `python3 -m pytest tests/ -q` (Mock-SDK mit
 signatur-identischen Methoden; `tests/test_risk.py` prüft Sizing/Rounding/
-Margin gegen einen Mainnet-Meta-Snapshot, 49 Tests + 2 dokumentierte xfails).
+Margin gegen einen Mainnet-Meta-Snapshot; 62 Tests, alle grün).
 
 ## Risiko-Fahrplan (aus der Validierung, MIT DD-Overlay C2)
 
@@ -96,5 +96,9 @@ Risiko und typischem SL 0.35% ist die Notional ~5.7× Equity ⇒ isolierte
 Margin pro Position ~57% Equity (10x-Coin) bzw. ~114% (TAO ⇒ nicht
 platzierbar). Effektiv passen bei engen Stops nur 1–2 gleichzeitige
 Positionen ins 0.8-Margin-Budget — unabhängig von der Kontogröße. Der
-Margin-Check in `main._size` rechnet derzeit flach mit `leverage_cap=20`
-und unterschätzt das (siehe `tests/test_risk.py`, xfail F1).
+Margin-Check rechnet seit dem F1-Fix per-Coin mit dem echten Venue-Hebel
+(in Paper UND Live identisch), zählt auch ruhende Entry-Limits mit, und
+skippt TAO bei 2% Risiko automatisch. Konsequenz für die Paper-Phase: Sie
+misst auch, wie viele Signale am Margin-Limit abprallen — fällt die
+Frequenz dadurch deutlich unter die Erwartung, ist der Wechsel auf 1–1.5%
+Risiko (mehr Slots) eine Datenentscheidung.
