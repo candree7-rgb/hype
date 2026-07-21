@@ -1,4 +1,50 @@
-# Strategy Research Results — 2026-07-20
+# Strategy Research Results — 2026-07-20/21
+
+> **VENUE UPDATE (2026-07-21):** MEXC's 0% maker fee does NOT apply to API
+> orders. Since the API-futures launch (Mar 31, 2026) API trading has a
+> separate fee schedule — maker 0.04% / taker 0.06% since Jun 1, 2026 — which
+> "takes precedence over any rates or promotional offers displayed on the
+> website and app". At those fees the strategy's breakeven WR is ~63% vs our
+> 58–61% achieved: **not deployable on MEXC via API.** The research below
+> (strategy, floor filter, liquidity rules) is venue-agnostic and remains
+> valid; candidate venues by fee model: zero-fee perp DEXs (full edge),
+> Hyperliquid (thin positive), Bybit (~breakeven). This also explains why the
+> edge persists: API bots cannot profitably harvest it on MEXC.
+
+## Trade-level floor filter (verified, the single biggest improvement)
+
+Skip any signal where 3×ATR60/close < 0.30% (i.e. where the sl_floor would
+bind: the entry offset degenerates to noise-level ~0.1% while the stop stays
+floored at 0.3%). Adversarially verified on 12mo Binance:
+
+- Floor-bound trades: **−0.015R** (n=2624, WR 50.9%) — no edge
+- Non-floor trades: **+0.213R** (n=2797, WR 62.7%), Welch t = 8.1
+- Filtered portfolio: **+0.213R/trade, +597R/yr, 11/12 months positive** —
+  more total R than unfiltered (+557R) from HALF the trades
+- Near-monotone gradient in ATR deciles; holds at 0.25%/0.35% thresholds;
+  works within mid-caps, not just as a BTC proxy. BTC self-filters (94% of
+  its signals are floor-bound) — no hardcoded exclusion needed.
+- Caveats: discovered on the same 12mo set (mechanism + t≈8 argue it's real);
+  MEXC 30d pointed mildly the other way (+0.124 floor vs +0.105 non-floor,
+  t=−0.31, noise) — plausibly venue-dependent (thin books). Deploy as
+  monitored A/B or deep-book-conditional, not as a blind hard skip.
+
+## Coin policy (verified)
+
+- **Liquidity floor:** median 1-min dollar volume ≥ $27k for full size
+  (~2700 USDT orders ≤10% of the median minute), reduced size down to ~$2.6k,
+  exclude below (dead books produce fake backtest edges — ACE: $37/min,
+  −0.37R, WR 36%). 24h volume alone is misleading; always check candle medians.
+- **Dynamic trailing-performance selector:** walk-forward validated (+0.142R
+  top-6, 10/10 months positive, beats trade-everything t=2.9) BUT largely
+  redundant once the floor filter is in (floor-filter-only: +0.209R, +512R
+  vs selector's +309R). Keep as monitoring/kill-switch layer, not primary.
+- **Leverage rule:** per-coin min(50, maxLeverage); even 20x coins are safe
+  (liq ~4.5% vs max SL 0.97%).
+- The full 0-maker universe (808 MEXC perps at the time) is queryable in one
+  call: contract.mexc.com/api/v1/contract/detail (fees change — refresh live).
+
+
 
 Multi-agent research run: 20 ideas from 5 research personas → 9 implemented
 and backtested → adversarially verified → 1 confirmed winner, hardened.
