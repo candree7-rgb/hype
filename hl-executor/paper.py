@@ -1,0 +1,172 @@
+"""Paper broker: simulates resting orders against the live candle stream with
+the SAME conservative rules as the backtest engine (strict trade-through
+fills, TP+SL-in-same-candle counts as loss, taker fee + assumed slippage on
+stops). Every event is appended to a JSONL trade log for later analysis.
+"""
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+
+from config import CFG
+from strategy import Candle, EntrySignal
+
+
+@dataclass
+class PendingOrder:
+    coin: str
+    side: str
+    limit_price: float
+    tp_dist: float
+    sl_dist: float
+    expires_t: int
+    signal_t: int
+    notional: float
+
+
+@dataclass
+class Position:
+    coin: str
+    side: str
+    entry: float
+    tp: float
+    sl: float
+    notional: float
+    risk_usd: float
+    entry_t: int
+    max_hold_until: int
+
+
+@dataclass
+class PaperBroker:
+    equity: float = CFG.equity_start_paper
+    pending: list[PendingOrder] = field(default_factory=list)
+    positions: dict[str, Position] = field(default_factory=dict)  # one per coin
+    fills: int = 0
+    wins: int = 0
+    day_r: float = 0.0
+    day_key: str = ""
+    halted: str = ""     # non-empty = kill-switch reason
+
+    def __post_init__(self) -> None:
+        Path(CFG.state_file).parent.mkdir(parents=True, exist_ok=True)
+        self.log_path = Path(CFG.state_file).parent / "paper_trades.jsonl"
+
+    # ---------- lifecycle ----------
+    def place(self, sig: EntrySignal, notional: float) -> None:
+        if self.halted:
+            return
+        if len(self.positions) + len(self.pending) >= CFG.max_concurrent:
+            self._log("skip_concurrency", coin=sig.coin)
+            return
+        self.pending.append(PendingOrder(
+            coin=sig.coin, side=sig.side, limit_price=sig.limit_price,
+            tp_dist=sig.tp_dist, sl_dist=sig.sl_dist,
+            expires_t=sig.signal_t + sig.ttl_min * 60,
+            signal_t=sig.signal_t, notional=notional))
+        self._log("entry_placed", coin=sig.coin, side=sig.side,
+                  limit=sig.limit_price, tp_dist=sig.tp_dist, atr=sig.atr)
+
+    def on_closed_candle(self, coin: str, c: Candle) -> None:
+        self._roll_day(c.t)
+        # 1) resolve open position on this coin
+        pos = self.positions.get(coin)
+        if pos is not None:
+            self._resolve_position(pos, c)
+        # 2) entry fills / expiries (skip if position just opened on this candle:
+        #    conservative — do not double-enter the same coin intrabar)
+        still = []
+        for o in self.pending:
+            if o.coin != coin:
+                still.append(o)
+                continue
+            if c.t >= o.expires_t:
+                self._log("entry_expired", coin=o.coin)
+                continue
+            if coin in self.positions:
+                still.append(o)
+                continue
+            filled = (c.low < o.limit_price) if o.side == "long" else (c.high > o.limit_price)
+            if not filled:
+                still.append(o)
+                continue
+            e = o.limit_price
+            tp = e * (1 + o.tp_dist) if o.side == "long" else e * (1 - o.tp_dist)
+            sl = e * (1 - o.sl_dist) if o.side == "long" else e * (1 + o.sl_dist)
+            pos = Position(coin=o.coin, side=o.side, entry=e, tp=tp, sl=sl,
+                           notional=o.notional, risk_usd=o.notional * o.sl_dist,
+                           entry_t=c.t, max_hold_until=c.t + CFG.max_hold_min * 60)
+            self.positions[o.coin] = pos
+            self._log("entry_filled", coin=o.coin, side=o.side, entry=e, tp=tp, sl=sl,
+                      notional=o.notional)
+            # same-candle resolution, conservative (SL first on ambiguity)
+            self._resolve_position(pos, c)
+        self.pending = still
+
+    def _resolve_position(self, pos: Position, c: Candle) -> None:
+        long = pos.side == "long"
+        hit_tp = c.high > pos.tp if long else c.low < pos.tp
+        hit_sl = c.low <= pos.sl if long else c.high >= pos.sl
+        if hit_sl:  # includes ambiguous -> loss, same as backtest
+            slip = CFG.assumed_sl_slippage
+            px = pos.sl * (1 - slip) if long else pos.sl * (1 + slip)
+            self._close(pos, px, "sl_ambiguous" if hit_tp else "sl",
+                        exit_fee=CFG.taker_fee, t=c.t)
+        elif hit_tp:
+            self._close(pos, pos.tp, "tp", exit_fee=CFG.maker_fee, t=c.t)
+        elif c.t >= pos.max_hold_until:
+            px = c.close * (1 - CFG.assumed_sl_slippage / 2) if long \
+                else c.close * (1 + CFG.assumed_sl_slippage / 2)
+            self._close(pos, px, "time", exit_fee=CFG.taker_fee, t=c.t)
+
+    def _close(self, pos: Position, px: float, outcome: str, exit_fee: float, t: int) -> None:
+        long = pos.side == "long"
+        gross = (px - pos.entry) / pos.entry if long else (pos.entry - px) / pos.entry
+        net_frac = gross - CFG.maker_fee - exit_fee
+        pnl = pos.notional * net_frac
+        r = pnl / pos.risk_usd if pos.risk_usd else 0.0
+        self.equity += pnl
+        self.fills += 1
+        self.day_r += r
+        if r > 0:
+            self.wins += 1
+        del self.positions[pos.coin]
+        self._log("closed", coin=pos.coin, side=pos.side, outcome=outcome,
+                  entry=pos.entry, exit=px, r=round(r, 4), pnl=round(pnl, 4),
+                  equity=round(self.equity, 2), hold_min=(t - pos.entry_t) // 60)
+        self._check_kill()
+
+    # ---------- kill-switches ----------
+    def _check_kill(self) -> None:
+        if self.fills >= CFG.kill_min_fills:
+            wr = self.wins / self.fills
+            if wr < CFG.kill_wr_threshold:
+                self.halted = f"WR {wr:.3f} < {CFG.kill_wr_threshold} after {self.fills} fills"
+        if self.day_r <= -CFG.kill_daily_loss_r:
+            self.halted = f"daily loss {self.day_r:.1f}R"
+        if self.halted:
+            self._log("KILL_SWITCH", reason=self.halted)
+
+    def _roll_day(self, t: int) -> None:
+        key = time.strftime("%Y-%m-%d", time.gmtime(t))
+        if key != self.day_key:
+            self.day_key = key
+            self.day_r = 0.0
+            if self.halted.startswith("daily loss"):
+                self.halted = ""          # daily halt resets next day
+                self._log("halt_reset")
+
+    # ---------- io ----------
+    def _log(self, event: str, **kw) -> None:
+        rec = {"ts": int(time.time()), "event": event, **kw}
+        with self.log_path.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    def snapshot(self) -> dict:
+        return {"equity": round(self.equity, 2), "fills": self.fills,
+                "wins": self.wins,
+                "wr": round(self.wins / self.fills, 4) if self.fills else None,
+                "open_positions": {k: asdict(v) for k, v in self.positions.items()},
+                "pending": len(self.pending), "halted": self.halted}
