@@ -223,6 +223,8 @@ class LiveBroker:
             self.equity = eq
         except Exception as e:
             self._log("equity_error", error=repr(e))
+            if "429" in repr(e):
+                self._rest_backoff_until = time.time() + 120
 
     # ------------------------------------------------------------ overlay C2
     # (identical semantics to paper.py — the validated ruleset)
@@ -570,7 +572,11 @@ class LiveBroker:
     # ------------------------------------------------------------ reconciliation
     def reconcile(self) -> None:
         """REST fallback: refresh equity, ingest missed fills, verify orders
-        and positions against the venue. Called every 60s and once at boot."""
+        and positions against the venue. Called every 60s and once at boot.
+        On HTTP 429 (shared-IP rate limit) it backs off for 2 minutes — the
+        websocket keeps delivering candles and fills throughout."""
+        if time.time() < getattr(self, "_rest_backoff_until", 0):
+            return
         with self._lock:
             self._refresh_equity()
             # 1) missed fills since watermark (dedup by tid)
@@ -581,11 +587,15 @@ class LiveBroker:
                     self._ingest_fill(f)
             except Exception as e:
                 self._log("reconcile_fills_error", error=repr(e))
+                if "429" in repr(e):
+                    self._rest_backoff_until = time.time() + 120
             try:
                 open_orders = self.info.open_orders(self.address)
                 st = self.info.user_state(self.address)
             except Exception as e:
                 self._log("reconcile_state_error", error=repr(e))
+                if "429" in repr(e):
+                    self._rest_backoff_until = time.time() + 120
                 return
             open_oids = {o["oid"] for o in open_orders}
             venue_pos = {p["position"]["coin"]: float(p["position"]["szi"])
