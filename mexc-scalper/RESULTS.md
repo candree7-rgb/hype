@@ -1,4 +1,25 @@
-# Strategy Research Results — 2026-07-20/21
+# Strategy Research Results — 2026-07-20/22
+
+> ✅ **FINAL VERDICT (2026-07-22, round 2 complete + adversarial verification):**
+> **TSMOM (trend following) is the validated cornerstone** — reproduced to the
+> digit, funding-adjusted (−1%/yr drag), execution/data integrity clean
+> (10/10 candle spot-checks at 0.00bp), 0 lookahead violations. CORRECTION:
+> F1's k=84 lookback was parameter luck (k±6 halves the Sharpe); the honest
+> spec is the lookback-ensemble [63,84,105] + Donchian blend: **holdout
+> Sharpe ~1.07, +1.69%/mo @20% vol, maxDD −13.9%**. The momentum sleeve
+> (tick-verified) adds a regime-dependent overlay (corr ~0 to TSMOM, but
+> both fail together in momentum crashes — Apr26).
+> **THE HONEST ANSWER for $1k–$10k capital:** at **$10k**: base
+> **$250–450/mo**, upside ~$700/mo in trending regimes, DD budget −25%;
+> standing expectation **~2.5–4.5%/mo**. At **$1k**: TSMOM is NOT
+> implementable (30 positions × $7.6 median < HL's $10 order minimum) —
+> sleeve only, ~$25–50/mo. TSMOM capacity is effectively unlimited, so the
+> book scales linearly with capital ($100k → ~$2.5–4.5k/mo).
+> Round-2 rejections (honest, artifact-free): funding/carry (carry harvest
+> loses −26%/yr; funding momentum dormant in bears), cross-sectional
+> momentum (factor died with regime despite IS Sharpe 1.56), momentum-sleeve
+> expansion (expansion coins 0.00R OOS). Files: verify_tsmom.py,
+> portfolio_final.py.
 
 > **MOMENTUM-SLEEVE EXPANSION ATTEMPT (2026-07-22): FAILED HONESTLY — keep the
 > frozen baseline, expect regime-dependence.** 43 IS variants (exits, breadth
