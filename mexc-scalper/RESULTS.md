@@ -82,6 +82,34 @@ Feb–Jun26 evaluated once):
   worst month −13%; 2% → ~48%, worst month −26%.
 - Implemented in hl-executor (breaker cancels resting limits when tripped).
 
+## CAPACITY CEILING — this is a small-capital strategy (2026-07-22)
+
+Measured HL shock-minute $ volumes (the minute we actually fill in) → max
+equity where a 2%-risk order stays ≤10% of that volume:
+
+| equity | @2% risk: coins / R retained | @1% risk |
+|---|---|---|
+| $1k | 8 / 35% | 12 / 49% |
+| $5k | 6 / 28% | 6 / 28% |
+| **$10k** | **4 / 12%** | 6 / 28% |
+| $25k | 3 / 10% | 4 / 12% |
+| $100k | 2 / 7% | 3 / 10% |
+
+The edge lives on shocky mid-cap alts, and those exact coins have the
+THINNEST HL books (max order $100–500 at 2% risk). Above ~$5–10k equity the
+diversified strategy collapses to HYPE + majors — and only **HYPE (~$81k
+capacity @2%)** is a robust deep vehicle; BTC/ETH barely generate signals
+(BTC ~74 trades/yr). **Adding coins raises frequency at small size but adds
+ZERO capacity headroom.** Levers that actually scale: (1) 1% risk ~doubles
+every ceiling, (2) HYPE-concentration for deep capital, (3) **multi-venue**
+(same signals on HL + Lighter + … multiplies book depth). Single-venue
+diversified realistic ceiling: ~$5–10k. Data caveat: HL 1m history is only
+~3.5 days, so deep-coin capacity is extrapolated (flagged in hl_capacity.py).
+
+Universe expansion (edge-validated 12mo Binance @ HL fees, added to executor):
+ENA XMR APT JUP PENGU pass (avg_r +0.10–0.16, 8–11/12 months); WIF/FET have
+ghost HL books (hold); TON not on HL. Blended 23-coin avg_r +0.129 (vs +0.132).
+
 ## Trade-level floor filter (verified, the single biggest improvement)
 
 Skip any signal where 3×ATR60/close < 0.30% (i.e. where the sl_floor would

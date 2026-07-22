@@ -19,7 +19,7 @@ MAX_LEVERAGE = {
     "BTC": 40, "ETH": 25, "SOL": 20, "XRP": 20, "TAO": 5,
     "HYPE": 10, "ZEC": 10, "kPEPE": 10, "AVAX": 10, "DOGE": 10, "SUI": 10,
     "NEAR": 10, "WLD": 10, "PUMP": 10, "LTC": 10, "BNB": 10, "ADA": 10,
-    "LINK": 10,
+    "LINK": 10, "ENA": 10, "XMR": 5, "APT": 10, "JUP": 10, "PENGU": 5,
 }
 
 

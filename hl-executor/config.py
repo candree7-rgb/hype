@@ -67,6 +67,10 @@ class Config:
     coins: tuple = (
         "BTC", "ETH", "SOL", "XRP", "HYPE", "ZEC", "kPEPE", "AVAX", "TAO",
         "DOGE", "SUI", "NEAR", "WLD", "PUMP", "LTC", "BNB", "ADA", "LINK",
+        # +5 edge-validated (12mo Binance, measured non-dead HL books):
+        # frequency +36%, avg_r immaterial change. Capacity is unaffected —
+        # these are thin books, useful for small-book income only.
+        "ENA", "XMR", "APT", "JUP", "PENGU",
     )
 
     # --- Infra (testnet routing when HL_TESTNET=true) ---

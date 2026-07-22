@@ -136,48 +136,73 @@ def main():
     weights = edge_weights()
     coins = UNIVERSE + EXTRA
     rows = {}
-    print("=== HL SHOCK-MINUTE LIQUIDITY (venue-native, ~3.5d of HL 1m) ===")
-    print(f"{'coin':7}{'HLname':8}{'maxLev':>7}{'nShock':>7}{'medShk$':>12}"
-          f"{'p25Shk$':>12}{'medSL':>8}{'maxEq2%':>12}{'maxEq1%':>12}")
+    MIN_SHOCK = 5  # need >=5 shock minutes to trust a shock-median
+    # Pass 1: pull candles + shock stats
     for sym in coins:
         hln = HL_NAME.get(sym, sym)
         df = hl_candles(hln)
         if df is None or len(df) < 300:
-            print(f"{sym:7}{hln:8}  NO HL CANDLES")
+            print(f"[skip] {sym} ({hln}): NO HL CANDLES")
             continue
         s = shock_stats(df)
-        if s is None:
-            print(f"{sym:7}{hln:8} no shock minutes in window")
-            continue
-        me2 = max_equity(s["med_vol"], s["med_sl"], 0.02)
-        me1 = max_equity(s["med_vol"], s["med_sl"], 0.01)
-        # conservative: p25 shock vol
-        me2_p25 = max_equity(s["p25_vol"], s["med_sl"], 0.02)
-        s.update(maxlev=lev.get(hln), maxeq2=me2, maxeq1=me1, maxeq2_p25=me2_p25,
-                 hlname=hln)
+        s.update(hlname=hln, maxlev=lev.get(hln),
+                 bn_n=weights.get(sym, {}).get("n", 0),
+                 bn_r=weights.get(sym, {}).get("total_r", 0.0))
         rows[sym] = s
-        print(f"{sym:7}{hln:8}{str(lev.get(hln)):>7}{s['n_shock']:>7}"
-              f"{s['med_vol']:>12,.0f}{s['p25_vol']:>12,.0f}{s['med_sl']:>8.4f}"
-              f"{me2:>12,.0f}{me1:>12,.0f}")
 
-    # Aggregate: effective coins & retained R vs equity
-    tot_n = sum(weights.get(c, {}).get("n", 0) for c in rows)
-    tot_r = sum(weights.get(c, {}).get("total_r", 0) for c in rows)
-    print(f"\ntotal 12mo trades across analyzed coins: {tot_n}, total_r {tot_r:.0f}")
-    for risk in RISK_LEVELS:
-        key = "maxeq2" if risk == 0.02 else "maxeq1"
-        print(f"\n=== SCALE @ {int(risk*100)}% risk (order<=10% shock-min $vol, "
-              f"median) ===")
-        print(f"{'equity':>10}{'effCoins':>10}{'trades/yr%':>12}{'totR%':>10}"
-              f"  dropped")
-        for eq in EQUITIES:
-            ok = [c for c in rows if rows[c][key] >= eq]
-            n_ret = sum(weights.get(c, {}).get("n", 0) for c in ok)
-            r_ret = sum(weights.get(c, {}).get("total_r", 0) for c in ok)
-            dropped = [c for c in rows if c not in ok]
-            print(f"{eq:>10,}{len(ok):>10}{100*n_ret/tot_n:>11.0f}%"
-                  f"{100*r_ret/tot_r if tot_r else 0:>9.0f}%  "
-                  f"{','.join(sorted(dropped, key=lambda c: -rows[c][key]))[:80]}")
+    # cross-coin shock/all-minute vol ratio (from well-sampled coins) to
+    # ESTIMATE shock-minute vol where the 3.5d window gave <5 shocks
+    ratios = [r["med_vol"] / r["med_min_vol"] for r in rows.values()
+              if r["n_shock"] >= 10 and r["med_vol"] and r["med_min_vol"] > 0]
+    R = float(np.median(ratios)) if ratios else 40.0
+    print(f"cross-coin shock/all-min $vol ratio: median={R:.0f} "
+          f"(n={len(ratios)} coins, range {min(ratios):.0f}-{max(ratios):.0f})")
+
+    # two capacity bases:
+    #  floor  = all-minute median $vol         (assumes we fill in a typical minute)
+    #  shock  = measured shock-median (n>=5) OR all-min*R (estimated, flagged)
+    for r in rows.values():
+        r["floor_vol"] = r["med_min_vol"]
+        if r["n_shock"] >= MIN_SHOCK and r["med_vol"]:
+            r["shock_vol"], r["shk_est"] = r["med_vol"], False
+        else:
+            r["shock_vol"], r["shk_est"] = r["med_min_vol"] * R, True
+        for basis in ("floor", "shock"):
+            v = r[f"{basis}_vol"]
+            r[f"{basis}_eq2"] = max_equity(v, r["med_sl"], 0.02)
+            r[f"{basis}_eq1"] = max_equity(v, r["med_sl"], 0.01)
+
+    print("\n=== PER-COIN HL LIQUIDITY & CAPACITY (venue-native, ~3.5d HL 1m) ===")
+    print("floorVol=all-minute median $vol (robust n~5000); shockVol=shock-min "
+          "median (n>=5) or all-min*ratio (est,*); maxEq at 2% risk, order<=10% vol")
+    print(f"{'coin':7}{'lev':>4}{'nShk':>5}{'bnTrd':>6}{'bnR':>6}"
+          f"{'floorVol$':>11}{'shockVol$':>12}{'medSL':>8}"
+          f"{'floorEq2%':>11}{'shockEq2%':>11}")
+    for sym in sorted(rows, key=lambda c: -rows[c]["shock_eq2"]):
+        r = rows[sym]
+        sv = f"{r['shock_vol']:,.0f}" + ("*" if r["shk_est"] else " ")
+        print(f"{sym:7}{str(r['maxlev']):>4}{r['n_shock']:>5}{r['bn_n']:>6}"
+              f"{r['bn_r']:>6.0f}{r['med_min_vol']:>11,.0f}{sv:>12}"
+              f"{r['med_sl']:>8.4f}{r['floor_eq2']:>11,.0f}{r['shock_eq2']:>11,.0f}")
+
+    tot_n = sum(r["bn_n"] for r in rows.values())
+    tot_r = sum(r["bn_r"] for r in rows.values())
+    print(f"\ntotal 12mo across {len(rows)} coins: trades={tot_n}, total_r={tot_r:.0f}")
+    for basis, label in (("shock", "REALISTIC: fills on shock minute"),
+                         ("floor", "CONSERVATIVE: fills on a typical minute")):
+        for risk in RISK_LEVELS:
+            key = f"{basis}_eq{2 if risk == 0.02 else 1}"
+            print(f"\n=== SCALE [{label}] @ {int(risk*100)}% risk ===")
+            print(f"{'equity':>9}{'effCoins':>9}{'trd%':>6}{'R%':>6}  droppedTopR")
+            for eq in EQUITIES:
+                ok = [c for c in rows if rows[c][key] >= eq]
+                n_ret = sum(rows[c]["bn_n"] for c in ok)
+                r_ret = sum(rows[c]["bn_r"] for c in ok)
+                drop = sorted([c for c in rows if c not in ok],
+                              key=lambda c: -rows[c]["bn_r"])
+                print(f"{eq:>9,}{len(ok):>9}{100*n_ret/tot_n:>5.0f}%"
+                      f"{100*r_ret/tot_r if tot_r else 0:>5.0f}%  "
+                      f"{','.join(drop[:8])}")
 
     # save for report
     outp = Path("/tmp/claude-0/-home-user-hype/"
