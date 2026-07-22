@@ -1,5 +1,20 @@
 # Strategy Research Results — 2026-07-20/21
 
+> ⚠️ **CRITICAL INVALIDATION (2026-07-22): entry-candle TP artifact.**
+> All engines credited a TP whenever the ENTRY candle's high exceeded TP — but
+> in cascade minutes the high occurs BEFORE our late-in-candle fill. Tick
+> replay on 321 real trades (Binance aggTrades): only 6–8% of those same-candle
+> TP credits were real (+0.05R actual vs +0.94R credited). Those phantom wins
+> were 31% of trades and ~51% of gross profit. With the corrected engines
+> (entry-candle TP requires CLOSE confirmation — patched in engine.py,
+> engine_hl.py, engine_lighter.py) the flagship `hl_native_shock_freq`
+> re-scores to **−0.155R/12mo, holdout −0.140R, 0/5 months positive** at HL
+> fees (independently reproduced). **Every R/WR/$ figure below that predates
+> this banner is inflated and must not be used for decisions.** Re-scoring of
+> Lighter/HYPE/capacity/momentum results is in progress; the momentum sleeve
+> (no fixed TP, multi-hour holds) is structurally least affected. The
+> adversarial process caught this with $86 live — not $10k.
+
 > **VENUE UPDATE (2026-07-21):** MEXC's 0% maker fee does NOT apply to API
 > orders. Since the API-futures launch (Mar 31, 2026) API trading has a
 > separate fee schedule — maker 0.04% / taker 0.06% since Jun 1, 2026 — which

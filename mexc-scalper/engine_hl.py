@@ -107,6 +107,14 @@ def simulate(df: pd.DataFrame, signals: pd.DataFrame, symbol: str,
         outcome, exit_price, exit_idx = None, None, None
         for j in range(entry_idx, min(entry_idx + max_hold, n)):
             hit_tp = high[j] > tp if long else low[j] < tp
+            if j == entry_idx and hit_tp:
+                # ENTRY-CANDLE TP requires CLOSE confirmation: the candle's
+                # high usually happens BEFORE our late-in-candle fill (the
+                # cascade opens high, dives through our limit). Tick replay
+                # (321 real trades) showed only 6-8% of high-based same-candle
+                # TP credits were real. close beyond TP provably occurs after
+                # the fill -> only then count it.
+                hit_tp = close[j] > tp if long else close[j] < tp
             hit_sl = low[j] <= sl if long else high[j] >= sl
             if hit_tp and hit_sl:
                 outcome, exit_idx = "ambiguous_sl", j
