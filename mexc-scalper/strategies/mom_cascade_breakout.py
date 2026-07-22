@@ -36,12 +36,22 @@ DEFAULT_PARAMS = {
     "window": 60,          # breadth lookback (minutes)
     "breadth_n": 5,        # distinct coins with up-shock in window
     "lookback": 1440,      # breakout lookback (minutes, prior high)
-    "sl_pct": 0.02,
-    "trail_pct": 0.025,
-    "arm_pct": 0.012,
-    "max_hold": 2880,
+    "entry_mode": "maker_retest",  # "taker" (market next open) | "maker_retest"
+    "ttl": 240,            # maker_retest: fill window (minutes)
+    "sl_pct": 0.03,
+    "trail_pct": float("nan"),   # no trail: plain time exit captures the drift
+    "arm_pct": 0.0,
+    "max_hold": 2160,      # 36h time exit
     "warmup": 1500,
 }
+
+# FROZEN 2026-07-22 after IS-only search (Jul25-Jan26), 40 engine variants
+# across 3 families (squeeze-breadth immediate entry: negative; trend-day ORB:
+# negative; cascade-confirmed breakout: broad positive plateau N 4-6,
+# sl 2.5-3.5%, hold 24-48h, entry taker or maker-retest). This config is the
+# plateau CENTER, not the best IS cell. IS: n=229, WR 45.4%, avg_r +0.217,
+# +49.7R/7mo, PF 1.51, maxDD 27.2R, 5/7 months positive, Nov17-Dec4 +4.6R
+# (the fade's -64.5R window). Lookahead check: 0 violations.
 
 SIG_COLS = ["idx", "side", "entry_type", "limit_price", "ttl", "sl_dist",
             "tp_dist", "trail_dist", "trail_arm", "max_hold"]
@@ -93,10 +103,21 @@ def generate_signals_multi(dfs: dict, params: dict) -> dict:
         trig = np.flatnonzero(cond & ~np.concatenate(([False], cond[:-1])))
         if trig.size == 0:
             continue
-        out[coin] = pd.DataFrame({
-            "idx": trig, "side": "long", "entry_type": "taker",
-            "limit_price": np.nan, "ttl": 1, "sl_dist": p["sl_pct"],
-            "tp_dist": np.nan, "trail_dist": p["trail_pct"],
-            "trail_arm": p["arm_pct"], "max_hold": int(p["max_hold"]),
-        })[SIG_COLS]
+        if p["entry_mode"] == "maker_retest":
+            # rest a limit at the broken 24h-high level (below current close
+            # -> passive); fills only on the retest of the breakout level
+            out[coin] = pd.DataFrame({
+                "idx": trig, "side": "long", "entry_type": "maker",
+                "limit_price": prevhi[trig], "ttl": int(p["ttl"]),
+                "sl_dist": p["sl_pct"], "tp_dist": np.nan,
+                "trail_dist": p["trail_pct"], "trail_arm": p["arm_pct"],
+                "max_hold": int(p["max_hold"]),
+            })[SIG_COLS]
+        else:
+            out[coin] = pd.DataFrame({
+                "idx": trig, "side": "long", "entry_type": "taker",
+                "limit_price": np.nan, "ttl": 1, "sl_dist": p["sl_pct"],
+                "tp_dist": np.nan, "trail_dist": p["trail_pct"],
+                "trail_arm": p["arm_pct"], "max_hold": int(p["max_hold"]),
+            })[SIG_COLS]
     return out

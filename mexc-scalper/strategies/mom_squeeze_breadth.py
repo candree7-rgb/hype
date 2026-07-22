@@ -1,5 +1,13 @@
 """MOMENTUM: cross-coin cascade breadth -> squeeze/trend continuation on majors.
 
+VERDICT (2026-07-22, IS Jul25-Jan26): FAILED — kept as a negative result.
+Entering majors immediately on a breadth trigger (any mode: taker now, maker
+retracement; any side) is -0.04..-0.08 avg_r across 6 variants; even the
+Nov 17 - Dec 4 squeeze window loses (-12R). Hourly breadth >= 5 is true on
+~10% of ALL minutes — far too common to be a trade signal by itself. The
+breadth works only as a CONFIRMATION of a price breakout, not as an entry:
+see mom_cascade_breakout.py (the adopted strategy).
+
 The cascade-fade's poison as food: when many coins print same-direction shock
 candles (the fade's own detector: range > 3.5*ATR60, ATR gate) within one
 hour, that is a market-wide squeeze/cascade — exactly the regime where fading

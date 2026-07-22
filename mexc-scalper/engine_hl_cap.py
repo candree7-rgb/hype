@@ -45,6 +45,79 @@ HL_MAX_LEV = {"BTC_USDT": 40, "ETH_USDT": 25, "SOL_USDT": 20, "XRP_USDT": 20,
 _df_cache: dict[str, pd.DataFrame] = {}
 
 
+def simulate_strict(df: pd.DataFrame, signals: pd.DataFrame, symbol: str,
+                    max_hold: int = 240) -> "eh.Result":
+    """Like engine_hl.simulate but with a stricter ENTRY-CANDLE rule.
+
+    engine_hl credits a TP in the fill candle whenever high>tp (long) even
+    though the intra-candle ordering is unknown — the high may have printed
+    BEFORE the low that filled us. Here, in the entry candle only:
+      - SL first: low<=sl (long) counts as loss (price passed p on the way,
+        ordering is consistent) — same as engine_hl's ambiguous handling;
+      - TP counts ONLY if the candle CLOSES beyond tp — the close comes
+        after the low by definition, proving the recovery happened after
+        the fill. Otherwise the position simply stays open into the next
+        candle. Later candles are handled exactly as engine_hl.
+    """
+    high = df["high"].to_numpy()
+    low = df["low"].to_numpy()
+    close = df["close"].to_numpy()
+    n = len(df)
+    res = eh.Result()
+    for sig in signals.itertuples(index=False):
+        i = int(sig.idx)
+        p = float(sig.limit_price)
+        ttl = int(sig.ttl)
+        long = sig.side == "long"
+        if long and not (p < close[i]):
+            continue
+        if not long and not (p > close[i]):
+            continue
+        entry_idx = -1
+        for j in range(i + 1, min(i + 1 + ttl, n)):
+            if (long and low[j] < p) or (not long and high[j] > p):
+                entry_idx = j
+                break
+        if entry_idx < 0:
+            continue
+        tp = p * (1 + sig.tp_dist) if long else p * (1 - sig.tp_dist)
+        sl = p * (1 - sig.sl_dist) if long else p * (1 + sig.sl_dist)
+        risk = sig.sl_dist
+        outcome, exit_price, exit_idx = None, None, None
+        for j in range(entry_idx, min(entry_idx + max_hold, n)):
+            if j == entry_idx:
+                hit_tp = close[j] > tp if long else close[j] < tp
+                hit_sl = low[j] <= sl if long else high[j] >= sl
+            else:
+                hit_tp = high[j] > tp if long else low[j] < tp
+                hit_sl = low[j] <= sl if long else high[j] >= sl
+            if hit_tp and hit_sl:
+                outcome, exit_idx = "ambiguous_sl", j
+                exit_price = sl * (1 - eh.SLIPPAGE) if long else sl * (1 + eh.SLIPPAGE)
+                break
+            if hit_sl:
+                outcome, exit_idx = "sl", j
+                exit_price = sl * (1 - eh.SLIPPAGE) if long else sl * (1 + eh.SLIPPAGE)
+                break
+            if hit_tp:
+                outcome, exit_idx = "tp", j
+                exit_price = tp
+                break
+        if outcome is None:
+            exit_idx = min(entry_idx + max_hold, n) - 1
+            outcome = "time"
+            c = close[exit_idx]
+            exit_price = c * (1 - eh.SLIPPAGE / 2) if long else c * (1 + eh.SLIPPAGE / 2)
+        gross = (exit_price - p) / p if long else (p - exit_price) / p
+        net = gross - eh.MAKER_FEE - (eh.MAKER_FEE if outcome == "tp" else eh.TAKER_FEE)
+        res.trades.append(eh.Trade(
+            symbol=symbol, side=sig.side, signal_idx=i, entry_idx=entry_idx,
+            exit_idx=exit_idx, entry=p, exit=float(exit_price),
+            tp_dist=float(sig.tp_dist), sl_dist=float(sig.sl_dist),
+            outcome=outcome, r=float(net / risk), net_frac=float(net)))
+    return res
+
+
 def load(sym: str) -> pd.DataFrame:
     if sym not in _df_cache:
         df = pd.read_parquet(eh.DATA_DIR / f"{sym}_Min1.parquet").reset_index(drop=True)
@@ -56,7 +129,8 @@ def load(sym: str) -> pd.DataFrame:
 def run_window(strategy_path: str, params: dict | None = None,
                symbols: list[str] | None = None,
                start: str = IS_START, end: str = IS_END,
-               max_hold: int = 240, check_lookahead: bool = False) -> pd.DataFrame:
+               max_hold: int = 240, check_lookahead: bool = False,
+               strict: bool = False) -> pd.DataFrame:
     """Run one strategy over a date window. Data is truncated at `end` (no
     future rows exist during the run); trades filtered to entry dt >= start.
     Returns pooled trades df with dt / month / fill-minute vol ratio."""
@@ -72,7 +146,8 @@ def run_window(strategy_path: str, params: dict | None = None,
         sig = strat.generate_signals(dfw, params)
         if sig.empty:
             continue
-        res = eh.simulate(dfw, sig, sym, max_hold=max_hold)
+        sim = simulate_strict if strict else eh.simulate
+        res = sim(dfw, sig, sym, max_hold=max_hold)
         if not res.trades:
             continue
         t = res.df()
