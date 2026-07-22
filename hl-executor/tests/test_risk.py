@@ -180,9 +180,10 @@ def test_universe_effective_leverage_snapshot():
     main._size ('venue max per coin is >= 10 for universe') is wrong for TAO."""
     lev = {c: m[1] for c, m in META.items()}
     assert set(META) == set(CFG.coins)
-    assert lev["TAO"] == 5 < 10
+    assert lev["TAO"] == 5 < 10          # 5x coins: TAO, XMR, PENGU
+    assert lev["XMR"] == 5 and lev["PENGU"] == 5
     ten_x = [c for c, v in lev.items() if v == 10]
-    assert len(ten_x) == 13
+    assert len(ten_x) == 16              # 13 original + ENA, APT, JUP
     assert all(lev[c] >= CFG.leverage_cap for c in ("BTC", "ETH", "SOL", "XRP"))
 
 
