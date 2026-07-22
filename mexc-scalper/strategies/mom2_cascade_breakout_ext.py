@@ -13,6 +13,29 @@ exit features enabled). Extensions, all controlled by params:
   frozen 18-coin fade universe unless `breadth_universe` overrides it.
 
 Nothing here modifies the frozen strategy file.
+
+VERDICT (2026-07-22, 43 IS variants, holdout opened once for 2 finalists):
+- Exits: NOTHING beats the frozen 36h time exit on IS. Trails (pct or ATR)
+  cut avg_r by 2-4x (they amputate the drift the sleeve lives on); partial
+  TPs (next-bar-earliest maker, honest) give up more upside than they lock;
+  BE-move at +3% is roughly total-R-neutral with ~12% lower maxDD (IS-only
+  evidence, optional). Time-exit sweep: 36h is the IS optimum (24h close).
+- Down-side symmetric (short 24h-low breakdown + down-shock breadth): ~zero
+  to negative on IS. Long-only is measured, confirmed.
+- FINALIST 1 universe expansion (frozen config, 23 coins): IS +0.21/trade,
+  +218R — HOLDOUT +0.012, PF 1.02, Apr26 -67R. The 18 expansion coins score
+  -0.00 OOS (flat, not negative); only the 5 majors kept edge (+0.066).
+- FINALIST 2 7d-lookback (23 coins): IS +0.42 — HOLDOUT -0.18. Dead. The
+  IS gain was the Jul25-Jan26 alt-runs regime, not signal.
+- 3y reconstruction (exact code, real 1m data Jul23-Jun25, 16-coin breadth
+  universe): +12R over 2 YEARS (PF 1.05), and what little there is sits in
+  Nov24+Jan25 bull impulses. breadth>=4 sensitivity: Y2 +35R, still impulse-
+  concentrated, Y1 negative. The mechanism did NOT exist as a steady edge
+  before Jul 2025 — this sleeve is a long-momentum REGIME harvester.
+- 12mo baseline composition: HYPE +30.9R of +62.6R (49%), ETH +15.8,
+  SOL +15.0, XRP +2.6, BTC -1.6.
+=> DEPLOYABLE SLEEVE remains the FROZEN mom_cascade_breakout (majors5),
+   unchanged. Everything tested here failed to improve it out-of-sample.
 """
 import json
 import sys

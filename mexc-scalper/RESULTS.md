@@ -1,5 +1,31 @@
 # Strategy Research Results — 2026-07-20/21
 
+> **MOMENTUM-SLEEVE EXPANSION ATTEMPT (2026-07-22): FAILED HONESTLY — keep the
+> frozen baseline, expect regime-dependence.** 43 IS variants (exits, breadth
+> 4-7, 48h/7d lookbacks, short side, ATR stops, 23-coin universes) on
+> `mom_cascade_breakout`'s entry via new additive `engine_mom2.py` +
+> `strategies/mom2_cascade_breakout_ext.py` (byte-identical to frozen at
+> defaults, verified trade-for-trade). Findings:
+> (1) **No exit beats the 36h time exit.** Trails cut avg_r 2-4x, partial TPs
+> (honest next-bar-earliest maker fills) lose upside, BE@+3% is total-R-
+> neutral with ~-12% maxDD (IS-only, optional). (2) **Down-side symmetric is
+> dead** (~0 IS). (3) Holdout opened ONCE for 2 finalists: **23-coin universe
+> expansion** IS +0.21 → holdout **+0.012** (expansion coins exactly 0.00 OOS;
+> only majors5 kept +0.066); **7d-lookback** IS +0.42 → holdout **−0.18**.
+> Both IS gains were the Jul25−Jan26 alt-run regime. (4) **3y check with the
+> EXACT strategy on real 1m Binance data Jul23−Jun25** (4h reconstruction
+> failed its positive control and was discarded): **+12R in 2 years, PF 1.05**,
+> concentrated in Nov24/Jan25 bull impulses — the mechanism did NOT exist as a
+> steady pre-2025 edge; this sleeve is a **long-momentum regime harvester**.
+> (5) Composition warning: **HYPE is +30.9R of the 12mo +62.6R (49%)**;
+> holdout avg_r +0.066 has t=0.80. (6) Tick spot-check (10 random trades,
+> Binance aggTrades): 10/10 maker retest fills real (deep trade-through in
+> the modeled minute, 0 missed-fill violations in live pre-fill minutes),
+> 4/4 SL exits real. Execution model is honest; the edge is real-but-modest
+> and regime-bound. Sizing at $10k, HL fees, fixed-risk: 1% → ~$520/mo avg,
+> maxDD ~17%; 2% → ~$1,040/mo, maxDD ~24% — with flat-to-negative months
+> whenever majors don't trend (Nov−Dec25, Apr26, and most of Jul23−Jun25).
+
 > ⚠️ **CRITICAL INVALIDATION (2026-07-22): entry-candle TP artifact.**
 > All engines credited a TP whenever the ENTRY candle's high exceeded TP — but
 > in cascade minutes the high occurs BEFORE our late-in-candle fill. Tick
