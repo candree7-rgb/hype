@@ -15,6 +15,27 @@
 > (no fixed TP, multi-hour holds) is structurally least affected. The
 > adversarial process caught this with $86 live — not $10k.
 >
+> **INDEPENDENT VERIFICATION (2026-07-22, second agent): CONFIRMED.** The tick
+> methodology was re-audited (fill = strict trade-through is the guaranteed
+> maker fill — queue position cannot help; touch-fill / touch-TP sensitivity
+> variants change nothing) and re-measured on a fresh RANDOM sample of 60
+> contested trades (60 distinct symbol-days, 30 symbols, all 12 months —
+> vs the original study's cluster-day sampling): real same-candle TP rate
+> **7/60 = 11.7% (95% CI 5.8–22.2%)**, tick-corrected avg_r **+0.083 vs
+> +0.937 credited**; tick min/max matched candle low/high in 60/60 minutes.
+> The random sample shows slightly LESS damage than the cluster-day study
+> (~88% phantom vs 92–94%) but the conclusion is identical: contested trades
+> are ~breakeven, not winners. SALVAGE SEARCH (strict engine_hl, IS
+> Jul25–Jan26 only, 27 variants): wider TPs (tp/sl 1.25–3.0), timed exits
+> (close of entry+K, K=1–5, no TP), deeper offsets (3.5–5 ATR), and
+> offset×timed combos — **every variant is deeply negative on IS
+> (best −0.13 avg_r, 0–1/7 months positive)**. No finalist met the bar, so
+> the Feb–Jun26 holdout was NOT opened. Tick evidence agrees: holding a
+> contested fill past the fill minute averages −0.03R — the snapback recovers
+> toward the level, not through entry+TP. **The cascade-overshoot mechanism
+> is dead under honest accounting.** (Scripts: scratchpad verify_A_*.py,
+> salvage_is.py; outputs verifyA_replay.csv, salvage_is_results.csv.)
+>
 > **RE-SCORE COMPLETE (2026-07-22, strict engines, frozen configs, same
 > trades):** The entire cascade-fade family is DEAD at the mechanism level —
 > zero-fee gross is −0.025R/12mo, i.e. the snapback edge never existed; it
