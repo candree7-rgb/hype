@@ -121,11 +121,13 @@ def make_weights(scores: pd.Series, k: int, mode: str, weighting: str,
 # ---------------------------------------------------------------- backtest
 def run_backtest(C, O, V, aux, score_fn, params, k=5, mode="mn",
                  weighting="ew", formation_days=None, start=None, end=None,
-                 lookahead_check=False):
-    """Returns dict with daily return series, weights history, turnover."""
+                 lookahead_check=False, reb_dow=0):
+    """Returns dict with daily return series, weights history, turnover.
+    reb_dow: weekday of the weekly rebalance (0=Mon .. 6=Sun) — used for
+    rebalance-day robustness checks."""
     dates = C.index
-    # weekly rebalance on Mondays; signal = previous available close
-    reb_mask = pd.Series(dates.dayofweek == 0, index=dates)
+    # weekly rebalance (default Mondays); signal = previous available close
+    reb_mask = pd.Series(dates.dayofweek == reb_dow, index=dates)
     if formation_days is None:
         formation_days = params.get("formation_days", 28)
 
