@@ -22,6 +22,9 @@ class Config:
     hl_testnet: bool = field(default_factory=lambda: _flag("HL_TESTNET", "false"))
     hl_account_address: str = os.getenv("HL_ACCOUNT_ADDRESS", "")  # master addr when key is an API/agent wallet
     live_adopt: str = os.getenv("LIVE_ADOPT", "close")  # untracked venue positions on reconcile: "close" | "adopt"
+    hl_unified: bool = field(default_factory=lambda: _flag("HL_UNIFIED", "true"))
+    # unified account mode (HL default for new accounts): free USDC lives in
+    # the spot clearinghouse and collateralizes perps; equity sums both.
     min_notional: float = 10.0          # HL minimum order value (USD)
 
     # --- Strategy (frozen: hl_native_shock_freq) ---

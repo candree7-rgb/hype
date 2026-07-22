@@ -200,27 +200,25 @@ class LiveBroker:
                 self._log("leverage_error", coin=coin, error=repr(e))
 
     def _refresh_equity(self) -> None:
+        """Equity = perps accountValue (+ spot USDC in unified account mode).
+
+        Per HL docs (account-abstraction-modes): in unified mode there is one
+        balance per asset and 'unified account ... show all balances and
+        holds in the spot clearinghouse state' — free USDC collateral sits in
+        spotClearinghouseState while clearinghouseState carries only the
+        margin bound in positions. Summing both covers unified accounts;
+        HL_UNIFIED=false restricts to the perps clearinghouse (standard
+        mode, where spot money is genuinely separate)."""
         try:
             st = self.info.user_state(self.address)
-            self.equity = float(st["marginSummary"]["accountValue"])
+            eq = float(st["marginSummary"]["accountValue"])
+            if CFG.hl_unified:
+                spot = self.info.spot_user_state(self.address)
+                eq += next((float(b["total"]) for b in spot.get("balances", [])
+                            if b.get("coin") == "USDC"), 0.0)
+            self.equity = eq
         except Exception as e:
             self._log("equity_error", error=repr(e))
-            return
-        # USDC parked in the SPOT balance is invisible to perps trading
-        # (deposits/sends can land there; the unified-account UI hides the
-        # split but the clearinghouses stay separate). Sweep it to perps.
-        if self.equity < 5.0:
-            try:
-                spot = self.info.spot_user_state(self.address)
-                usdc = next((float(b["total"]) for b in spot.get("balances", [])
-                             if b.get("coin") == "USDC"), 0.0)
-                if usdc >= 5.0:
-                    self.exchange.usd_class_transfer(usdc, to_perp=True)
-                    self._log("spot_to_perp_sweep", amount=usdc)
-                    st = self.info.user_state(self.address)
-                    self.equity = float(st["marginSummary"]["accountValue"])
-            except Exception as e:
-                self._log("spot_sweep_error", error=repr(e))
 
     # ------------------------------------------------------------ overlay C2
     # (identical semantics to paper.py — the validated ruleset)

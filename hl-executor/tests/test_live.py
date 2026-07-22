@@ -106,6 +106,13 @@ class MockInfo:
                 "marginSummary": {"accountValue": str(self.account_value)},
                 "withdrawable": str(self.account_value)}
 
+    def spot_user_state(self, address):
+        # unified-mode free collateral; tests keep it 0 so account_value
+        # remains the single source of truth in existing scenarios
+        return {"balances": [{"coin": "USDC", "token": 0,
+                              "total": str(getattr(self, "spot_usdc", 0.0)),
+                              "hold": "0.0"}]}
+
     def open_orders(self, address, dex=""):
         return self.orders
 
