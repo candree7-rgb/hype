@@ -205,6 +205,22 @@ class LiveBroker:
             self.equity = float(st["marginSummary"]["accountValue"])
         except Exception as e:
             self._log("equity_error", error=repr(e))
+            return
+        # USDC parked in the SPOT balance is invisible to perps trading
+        # (deposits/sends can land there; the unified-account UI hides the
+        # split but the clearinghouses stay separate). Sweep it to perps.
+        if self.equity < 5.0:
+            try:
+                spot = self.info.spot_user_state(self.address)
+                usdc = next((float(b["total"]) for b in spot.get("balances", [])
+                             if b.get("coin") == "USDC"), 0.0)
+                if usdc >= 5.0:
+                    self.exchange.usd_class_transfer(usdc, to_perp=True)
+                    self._log("spot_to_perp_sweep", amount=usdc)
+                    st = self.info.user_state(self.address)
+                    self.equity = float(st["marginSummary"]["accountValue"])
+            except Exception as e:
+                self._log("spot_sweep_error", error=repr(e))
 
     # ------------------------------------------------------------ overlay C2
     # (identical semantics to paper.py — the validated ruleset)
