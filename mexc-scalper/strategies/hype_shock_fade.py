@@ -16,7 +16,12 @@ sl 3 ATR / 0.3% floor, 1:1, atr_min 0.001). IS plateau is broad: shock
 + 23 (stage B refinement) + 24 (second-family search, all rejected) = 95.
 
 IS (Jul25-Jan26):    n=182, WR 68.7%, avg_r +0.274, +49.8R, PF 1.74
-Holdout (Feb-Jun26): evaluated once — see RESULTS/report for the numbers.
+Holdout (Feb-Jun26): n=92, WR 59.8%, avg_r +0.085, +7.8R, PF 1.18 — beats the
+universal config on the same window (+0.049, +5.2R, n=106) on total R and DD
+(7.8R vs 8.2R window DD; full-year DD 7.8R vs 14.1R), but the IS avg_r did
+NOT survive: expect ~+0.08..0.15/trade forward, not +0.27. May-Jun26 were
+negative in BOTH configs (HYPE edge regime-dependent / possibly decaying).
+Stress holdout: 1.5x slip +0.072, 2x slip +0.060. Lookahead 0.
 """
 import sys
 from pathlib import Path
