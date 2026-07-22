@@ -52,8 +52,40 @@ class Executor:
             self.broker = LiveBroker()
         self.recorder = Recorder()
         self.current: dict[str, Candle] = {}   # forming candle per coin
+        self.backfilled_t: dict[str, int] = {}  # last historical candle per coin
         self.started = time.time()
         self._load_state()
+
+    def _backfill(self) -> None:
+        """Load recent 1m history so the 150-candle warmup is satisfied at
+        boot instead of ~2.5h after every (re)deploy. Signals returned from
+        historical candles are discarded — only cooldown/ATR state matters."""
+        import urllib.request
+        base = ("https://api.hyperliquid-testnet.xyz"
+                if CFG.hl_testnet else "https://api.hyperliquid.xyz")
+        now_ms = int(time.time() * 1000)
+        for coin in CFG.coins:
+            try:
+                body = json.dumps({"type": "candleSnapshot", "req": {
+                    "coin": coin, "interval": "1m",
+                    "startTime": now_ms - 230 * 60_000, "endTime": now_ms}}).encode()
+                req = urllib.request.Request(f"{base}/info", data=body,
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    candles = json.load(r)
+                fed = 0
+                for d in candles:
+                    if int(d["T"]) > now_ms:      # still-forming candle
+                        continue
+                    c = Candle(t=int(d["t"]) // 1000, open=float(d["o"]),
+                               high=float(d["h"]), low=float(d["l"]),
+                               close=float(d["c"]), vol=float(d["v"]))
+                    self.engine.on_closed_candle(coin, c)   # signal discarded
+                    self.backfilled_t[coin] = c.t
+                    fed += 1
+                print(f"backfill {coin}: {fed} candles", flush=True)
+            except Exception as e:
+                print(f"backfill {coin} failed: {e!r} (warmup runs live)", flush=True)
 
     # ---------- candle stream ----------
     def on_candle_update(self, d: dict) -> None:
@@ -66,6 +98,8 @@ class Executor:
         self.current[coin] = c
 
     def _on_closed(self, coin: str, c: Candle) -> None:
+        if c.t <= self.backfilled_t.get(coin, 0):
+            return                     # already fed via historical backfill
         self.recorder.record(coin, c)
         self.broker.on_closed_candle(coin, c)
         sig = self.engine.on_closed_candle(coin, c)
@@ -128,6 +162,7 @@ class Executor:
 
     # ---------- loops ----------
     async def ws_loop(self) -> None:
+        await asyncio.to_thread(self._backfill)   # warm ATR/cooldown state once
         while True:
             try:
                 async with websockets.connect(CFG.ws_url, ping_interval=20) as ws:
