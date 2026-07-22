@@ -14,6 +14,20 @@
 > Lighter/HYPE/capacity/momentum results is in progress; the momentum sleeve
 > (no fixed TP, multi-hour holds) is structurally least affected. The
 > adversarial process caught this with $86 live — not $10k.
+>
+> **RE-SCORE COMPLETE (2026-07-22, strict engines, frozen configs, same
+> trades):** The entire cascade-fade family is DEAD at the mechanism level —
+> zero-fee gross is −0.025R/12mo, i.e. the snapback edge never existed; it
+> was ~100% phantom TP credits. Flagship −0.155 (0/12 months+), incumbent
+> −0.201, Lighter venue-native BTC+ETH −0.209 (1/13 months+), HYPE shock fade
+> −0.191 holdout, original MEXC 30d winner −0.031 OOS (below breakeven even
+> at 0-maker), floor filter/DD overlay/capacity tables moot.
+> **SURVIVES:** `mom_cascade_breakout` (momentum sleeve — no TP, byte-identical
+> pre/post patch: holdout +0.066R, n=197, 4/5 months+, 12mo +0.147/+62.6R)
+> and, low-confidence, `hype_flush_fade` (+0.178R holdout on only n=25).
+> engine_mom.py maker-path patched for the latent analogous artifact;
+> engine_lighter recovery logic verified free of before-fill artifacts.
+> Independent tick-methodology verification + salvage search in progress.
 
 > **VENUE UPDATE (2026-07-21):** MEXC's 0% maker fee does NOT apply to API
 > orders. Since the API-futures launch (Mar 31, 2026) API trading has a

@@ -167,6 +167,15 @@ def simulate(df: pd.DataFrame, signals: pd.DataFrame, symbol: str) -> Result:
 
             hit_sl = low[j] <= stop_level if long else high[j] >= stop_level
             hit_tp = (tp is not None) and (high[j] > tp if long else low[j] < tp)
+            if hit_tp and j == entry_idx and entry_type == "maker":
+                # ENTRY-CANDLE TP on a MAKER fill requires CLOSE confirmation:
+                # the candle's favorable extreme can occur BEFORE the
+                # late-in-candle limit fill (same artifact as the fade engines;
+                # tick replay showed only 6-8% of high-based same-candle TP
+                # credits were real). A close beyond TP provably happens after
+                # the fill. Taker entries fill at the bar OPEN, so their bar
+                # extremes are always post-fill — no confirmation needed.
+                hit_tp = close[j] > tp if long else close[j] < tp
             if hit_sl:
                 # ambiguous if TP also reachable -> loss (conservative)
                 outcome = "ambiguous_sl" if hit_tp else \
