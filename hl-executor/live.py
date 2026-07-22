@@ -214,7 +214,11 @@ class LiveBroker:
             eq = float(st["marginSummary"]["accountValue"])
             if CFG.hl_unified:
                 spot = self.info.spot_user_state(self.address)
-                eq += next((float(b["total"]) for b in spot.get("balances", [])
+                # subtract 'hold': margin reserved for resting orders shows up
+                # in BOTH the perps accountValue and the spot total (observed
+                # live: resting entry inflated the sum by its margin)
+                eq += next((float(b["total"]) - float(b.get("hold", 0))
+                            for b in spot.get("balances", [])
                             if b.get("coin") == "USDC"), 0.0)
             self.equity = eq
         except Exception as e:
