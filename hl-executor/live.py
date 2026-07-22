@@ -710,6 +710,10 @@ class LiveBroker:
         rec = {"ts": int(time.time()), "event": event, **kw}
         with self.log_path.open("a") as f:
             f.write(json.dumps(rec) + "\n")
+        # live events are rare — mirror them to stdout so the platform log
+        # (Railway) shows order flow and errors without shell access
+        print(f"live: {event} " + " ".join(f"{k}={v}" for k, v in kw.items()),
+              flush=True)
 
     def snapshot(self) -> dict:
         with self._lock:
